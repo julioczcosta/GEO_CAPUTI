@@ -1,0 +1,15 @@
+streamlit
+geopandas
+pandas
+requests
+folium
+streamlit-folium
+earthengine-api
+geemap
+shapely
+duckdb
+plotly
+beautifulsoup4
+urllib3
+fiona
+pyarrow
