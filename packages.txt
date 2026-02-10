@@ -3,3 +3,6 @@ libgdal-dev
 python3-gdal
 g++
 libspatialindex-dev
+unixodbc
+unixodbc-dev
+libpq-dev

@@ -14,3 +14,4 @@ urllib3
 fiona
 pyarrow
 rtree
+protobuf==3.20.*
