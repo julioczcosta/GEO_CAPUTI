@@ -5,14 +5,13 @@ import context
 import sentinel
 import climatology
 import consulta_car
-import consulta_bases  # <--- NOVO IMPORT
-import aptidao
+import consulta_bases
 import impedimentos
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
     layout="wide", 
-    page_title="DTI", 
+    page_title="GEO", 
     page_icon="🌍",
     initial_sidebar_state="expanded"
 )
@@ -89,7 +88,7 @@ with st.sidebar:
 
 if modo_operacao == "Diagnóstico":
     # MÓDULO 1: FLUXO DE ANÁLISE (Imóvel Selecionado)
-    st.title("DIAGNÓSTICO TERRITORIAL INTEGRADO")
+    st.title("GEOCAPUTI")
     
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🏠 INÍCIO", 
@@ -116,5 +115,5 @@ else:
     ])
 
     with tab_a: consulta_car.render_tab() 
-    with tab_b: consulta_bases.render_tab() # <--- AQUI RODA O DUCKDB
+    with tab_b: consulta_bases.render_tab() 
     with tab_c: aptidao.render_tab()

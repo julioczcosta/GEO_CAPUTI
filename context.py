@@ -66,7 +66,7 @@ def consultar_camadas_extras(lat, lon):
 
 # --- RENDERIZAÇÃO DA ABA ---
 def render_tab():
-    st.markdown("### 📚 Contexto Territorial")
+    st.markdown("###  Contexto Territorial")
     
     geometry = st.session_state.get('current_geometry')
     source_name = st.session_state.get('source_name', 'Desconhecido')
@@ -176,7 +176,7 @@ def render_tab():
 
         # --- CLIMA ---
         st.write("")
-        st.markdown("**🌦️ Climatologia**")
+        st.markdown("**🌦️ Clima**")
         dados_koppen = utils.get_koppen_class(lat_dec, lon_dec)
         
         if dados_koppen and "erro" not in dados_koppen:

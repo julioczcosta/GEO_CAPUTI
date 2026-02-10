@@ -24,7 +24,7 @@ def resetar_analises_anteriores():
             del st.session_state[chave]
 
 def render_tab():
-    st.markdown("### 🏠 Seleção do Imóvel")
+    st.markdown("###  Seleção do Imóvel")
     
     # --- CSS VISUAL ---
     st.markdown("""
