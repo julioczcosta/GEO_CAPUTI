@@ -32,17 +32,37 @@ except ImportError:
 # ==========================================
 
 def init_gee():
-    """Inicializa o Google Earth Engine."""
     try:
-        meu_projeto = 'ee-julioczcosta'
-        ee.Initialize(project=meu_projeto)
-    except:
-        try:
-            ee.Authenticate()
-            ee.Initialize(project='ee-julioczcosta')
-        except Exception as e:
-            st.error(f"Erro crítico GEE: {e}")
-            st.stop()
+        # 1. Tenta pegar o token secreto da nuvem (Streamlit Cloud)
+        if "earth_engine" in st.secrets:
+            # Lê a string JSON que salvamos nos Secrets
+            secret_json = st.secrets["earth_engine"]["token"]
+            creds_dict = json.loads(secret_json)
+            
+            # Cria a credencial usando o refresh_token
+            credentials = ee.data.Credentials(
+                None, 
+                credentials=creds_dict
+            )
+            
+            # Inicializa com a credencial e o projeto definido no JSON
+            ee.Initialize(
+                credentials=credentials, 
+                project=creds_dict.get("project") # Usa o seu projeto "ee-julioczcosta"
+            )
+            # print("✅ GEE: Conectado via Secrets (Nuvem)!")
+        
+        # 2. Se não achar secret, tenta usar o login local do seu computador
+        else:
+            ee.Initialize()
+            # print("✅ GEE: Conectado via Login Local (PC)!")
+            
+    except Exception as e:
+        st.error(f"⚠️ Erro ao conectar no Google Earth Engine: {e}")
+        st.stop() # Para a execução se não conectar
+
+# Chama a função imediatamente
+init_gee()
 
 def init_session_state():
     """Inicializa variáveis básicas da sessão."""
