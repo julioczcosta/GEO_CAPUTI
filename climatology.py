@@ -4,6 +4,19 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import calendar
+import io 
+
+# ==========================================
+# 0. FUNÇÃO AUXILIAR PARA EXCEL
+# ==========================================
+def to_excel(df):
+    """Converte DataFrame para bytes de Excel para download."""
+    output = io.BytesIO()
+    # Usa xlsxwriter como engine. Certifique-se de ter 'xlsxwriter' instalado ou use 'openpyxl'
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Dados')
+    processed_data = output.getvalue()
+    return processed_data
 
 # ==========================================
 # 1. FUNÇÕES DE DADOS (CACHE CORRIGIDO)
@@ -47,9 +60,9 @@ def get_worldclim_data(_geometry, cache_id):
                 data.append({
                     "Mês_Num": int(p['month']),
                     "Mês": calendar.month_abbr[int(p['month'])],
-                    "Média": float(p['avg']),
-                    "Mínima": float(p['min']),
-                    "Máxima": float(p['max'])
+                    "Média (°C)": float(p['avg']),
+                    "Mínima (°C)": float(p['min']),
+                    "Máxima (°C)": float(p['max'])
                 })
         
         return pd.DataFrame(data).sort_values('Mês_Num')
@@ -120,15 +133,12 @@ def render_tab():
         return
 
     # --- LÓGICA DE LIMPEZA AUTOMÁTICA ---
-    # Verifica se o imóvel mudou desde a última vez que carregamos esta aba.
-    # Se mudou, limpamos os gráficos antigos da memória.
     if st.session_state.get('last_clim_source') != source_name:
         if 'clim_temp' in st.session_state: del st.session_state['clim_temp']
         if 'clim_rain' in st.session_state: del st.session_state['clim_rain']
         if 'erro_clima_temp' in st.session_state: del st.session_state['erro_clima_temp']
         if 'erro_clima_rain' in st.session_state: del st.session_state['erro_clima_rain']
         st.session_state['last_clim_source'] = source_name
-        # Opcional: st.rerun() # Descomente se quiser que a tela pisque e limpe na hora
 
     st.info(f"Análise Climática para: **{source_name}**")
     
@@ -140,7 +150,6 @@ def render_tab():
         with st.container(border=True):
             st.markdown("**Médias Históricas (WorldClim)**")
             
-            # Passamos 'source_name' como segundo argumento para garantir que o cache renove
             if st.button("📉 Gerar Gráfico de Temperatura", use_container_width=True):
                 with st.spinner("Processando WorldClim..."):
                     df_temp = get_worldclim_data(geometry, source_name)
@@ -152,9 +161,10 @@ def render_tab():
             if 'clim_temp' in st.session_state:
                 df = st.session_state['clim_temp']
                 
-                med = df['Média'].mean()
-                mini = df['Mínima'].mean()
-                maxi = df['Máxima'].mean()
+                # Cálculo das métricas
+                med = df['Média (°C)'].mean()
+                mini = df['Mínima (°C)'].mean()
+                maxi = df['Máxima (°C)'].mean()
                 
                 fmt_med = f"{med:.1f}".replace(".", ",")
                 fmt_min = f"{mini:.1f}".replace(".", ",")
@@ -165,12 +175,13 @@ def render_tab():
                 c2.metric("Mínima Média", f"{fmt_min} °C")
                 c3.metric("Máxima Média", f"{fmt_max} °C")
 
+                # Gráfico
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(230, 126, 34, 0.2)', showlegend=False, hoverinfo='skip'))
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima'], mode='lines+markers', name='Máxima', line=dict(color='#e74c3c', width=1, dash='dot')))
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima'], mode='lines+markers', name='Mínima', line=dict(color='#3498db', width=1, dash='dot')))
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Média'], mode='lines+markers', name='Média', line=dict(color='#e67e22', width=3)))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima (°C)'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima (°C)'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(230, 126, 34, 0.2)', showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima (°C)'], mode='lines+markers', name='Máxima', line=dict(color='#e74c3c', width=1, dash='dot')))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima (°C)'], mode='lines+markers', name='Mínima', line=dict(color='#3498db', width=1, dash='dot')))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Média (°C)'], mode='lines+markers', name='Média', line=dict(color='#e67e22', width=3)))
 
                 fig.update_layout(
                     height=350, margin=dict(l=20, r=20, t=20, b=20),
@@ -180,13 +191,22 @@ def render_tab():
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption("Fonte: WorldClim V1 (Normais Climatológicas)")
 
+                # --- BOTÃO DE DOWNLOAD EXCEL ---
+                excel_data = to_excel(df)
+                st.download_button(
+                    label="📥 Baixar Dados (Excel)",
+                    data=excel_data,
+                    file_name=f'temperatura_{source_name}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True
+                )
+
     # --- COLUNA 2: PRECIPITAÇÃO ---
     with col_rain:
         st.subheader("☔ Precipitação")
         with st.container(border=True):
             st.markdown("**Médias Mensais (CHIRPS - 0.05°)**")
             
-            # Passamos 'source_name' como segundo argumento para garantir que o cache renove
             if st.button("🌧️ Gerar Gráfico de Chuva", use_container_width=True):
                 with st.spinner("Processando CHIRPS..."):
                     df_rain = get_chirps_data(geometry, source_name)
@@ -209,6 +229,14 @@ def render_tab():
                     text_auto='.0f',
                     color="Chuva (mm)", color_continuous_scale="Blues"
                 )
+                
+                # --- CORREÇÃO DOS VALORES HORIZONTAIS ---
+                fig.update_traces(
+                    textangle=0,        # Força o texto a ficar horizontal (0 graus)
+                    textposition='outside', # Joga o texto para cima da barra se possível
+                    cliponaxis=False    # Permite desenhar fora do eixo se a barra for alta
+                )
+
                 fig.update_layout(
                     height=350, margin=dict(l=20, r=20, t=20, b=20),
                     yaxis_title="Precipitação (mm)",
@@ -216,3 +244,13 @@ def render_tab():
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption("Fonte: CHIRPS (Série Histórica 2000-2025)")
+
+                # --- BOTÃO DE DOWNLOAD EXCEL ---
+                excel_data = to_excel(df)
+                st.download_button(
+                    label="📥 Baixar Dados (Excel)",
+                    data=excel_data,
+                    file_name=f'precipitacao_{source_name}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True
+                )

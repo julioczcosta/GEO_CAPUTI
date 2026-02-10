@@ -17,3 +17,4 @@ fiona
 pyarrow
 rtree
 lxml
+xlsxwriter
