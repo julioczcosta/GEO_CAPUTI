@@ -2,8 +2,8 @@ streamlit
 geopandas
 pandas
 requests
-folium==0.19.7
-streamlit-folium==0.25.0
+folium
+streamlit-folium
 earthengine-api
 geemap==0.36.6
 python-box==7.3.2
@@ -16,3 +16,4 @@ urllib3
 fiona
 pyarrow
 rtree
+lxml
