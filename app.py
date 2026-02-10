@@ -7,46 +7,80 @@ import climatology
 import consulta_car
 import consulta_bases
 import impedimentos
+import aptidao
+import hmac
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
+# --- 1. CONFIGURAÇÃO DA PÁGINA (Deve ser sempre o primeiro comando Streamlit) ---
 st.set_page_config(
     layout="wide", 
-    page_title="GEO", 
+    page_title="GEO CAPUTI", 
     page_icon="🌍",
     initial_sidebar_state="expanded"
 )
 
+# --- 2. SISTEMA DE LOGIN (Bloqueio de Segurança) ---
+def check_login():
+    """Verifica se o usuário está logado via Secrets"""
+    # Se já logou, libera
+    if st.session_state.get("logged_in", False):
+        return True
+
+    # Layout da tela de login
+    st.markdown("## 🔐 Acesso Restrito - GEO Caputi")
+    
+    with st.form("login_form"):
+        email = st.text_input("E-mail").strip().lower()
+        password = st.text_input("Senha", type="password")
+        submit = st.form_submit_button("Entrar")
+        
+        if submit:
+            if "users" not in st.secrets:
+                st.error("⚠️ Configuração de usuários não encontrada nos Secrets.")
+                return False
+            
+            known_users = st.secrets["users"]
+            
+            if email in known_users:
+                # Compara a senha de forma segura
+                if hmac.compare_digest(password, known_users[email]):
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_email"] = email
+                    st.rerun()
+                else:
+                    st.error("❌ Senha incorreta.")
+            else:
+                st.error("❌ E-mail não cadastrado.")
+
+    return False
+
+# --- TRAVA DE SEGURANÇA ---
+if not check_login():
+    st.stop()  # Se não logar, o código para aqui e não carrega o resto!
+
+# =========================================================
+# 🚀 O APLICATIVO REAL COMEÇA AQUI (Só carrega se logar)
+# =========================================================
+
 # --- CSS GLOBAL ---
 st.markdown("""
     <style>
-    /* Remove espaçamentos extras do Streamlit */
     .block-container {padding-top: 1rem; padding-bottom: 2rem;}
-    
-    /* Estilo do Título Principal */
     h1 { 
         text-align: center; 
         font-family: 'Helvetica Neue', sans-serif; 
         color: #2C3E50; 
         margin-bottom: 20px; 
     }
-    
-    /* Centralizar as Abas */
     .stTabs [data-baseweb="tab-list"] { justify-content: center; }
     .stTabs [data-baseweb="tab"] { font-size: 1.1rem; font-weight: 600; }
-    
-    /* Ajustes de botões e colunas */
     div[data-testid="column"] { display: flex; flex-direction: column; justify-content: flex-end; }
     button { height: auto; padding: 10px !important; font-weight: 600 !important; }
-    
-    /* Ajuste para mensagens de alerta */
     .stAlert { padding: 0.5rem; margin-bottom: 1rem; }
-    
-    /* Estilo do Radio Button na Sidebar */
     .stRadio > label { font-weight: bold; font-size: 1.1rem; margin-bottom: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- INICIALIZAÇÃO ---
+# --- INICIALIZAÇÃO DE UTILS ---
 if hasattr(utils, 'init_gee'):
     utils.init_gee()
 if hasattr(utils, 'init_session_state'):
@@ -54,6 +88,10 @@ if hasattr(utils, 'init_session_state'):
 
 # --- BARRA LATERAL (MENU) ---
 with st.sidebar:
+    # Mostra quem está logado
+    usuario_logado = st.session_state.get("user_email", "Usuário")
+    st.info(f"👤 Logado como: **{usuario_logado}**")
+    
     st.title("Menu")
     
     # SELETOR DE MODO
@@ -83,6 +121,11 @@ with st.sidebar:
                 {imovel_nome}
             </div>
         """, unsafe_allow_html=True)
+        
+    # Botão de Sair (Logout)
+    if st.button("Sair / Logout"):
+        st.session_state["logged_in"] = False
+        st.rerun()
 
 # --- LÓGICA DE EXIBIÇÃO ---
 
