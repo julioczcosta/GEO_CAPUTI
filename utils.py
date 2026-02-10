@@ -32,38 +32,40 @@ except ImportError:
 # ==========================================
 
 def init_gee():
+    """Cria o arquivo de credenciais e conecta ao GEE"""
     try:
-        # 1. Tenta pegar o token secreto da nuvem (Streamlit Cloud)
+        # 1. Verifica se estamos na nuvem (tem secrets)
         if "earth_engine" in st.secrets:
-            # Lê a string JSON que salvamos nos Secrets
-            secret_json = st.secrets["earth_engine"]["token"]
-            creds_dict = json.loads(secret_json)
+            # Define onde o GEE procura as senhas no Linux
+            credentials_path = os.path.expanduser("~/.config/earthengine/")
+            credentials_file = os.path.join(credentials_path, "credentials")
+
+            # Cria a pasta se não existir
+            if not os.path.exists(credentials_path):
+                os.makedirs(credentials_path)
+
+            # Pega o texto exato que salvamos no site e escreve no arquivo
+            token_content = st.secrets["earth_engine"]["token"]
             
-            # Cria a credencial usando o refresh_token
-            credentials = ee.data.Credentials(
-                None, 
-                credentials=creds_dict
-            )
+            with open(credentials_file, "w") as f:
+                f.write(token_content)
             
-            # Inicializa com a credencial e o projeto definido no JSON
-            ee.Initialize(
-                credentials=credentials, 
-                project=creds_dict.get("project") # Usa o seu projeto "ee-julioczcosta"
-            )
-            # print("✅ GEE: Conectado via Secrets (Nuvem)!")
-        
-        # 2. Se não achar secret, tenta usar o login local do seu computador
-        else:
+            print(f"✅ Credenciais salvas em: {credentials_file}")
+
+        # 2. Inicializa (Agora ele vai ler o arquivo que acabamos de criar)
+        # Tenta usar o projeto padrão se definido, ou força o seu projeto
+        try:
             ee.Initialize()
-            # print("✅ GEE: Conectado via Login Local (PC)!")
+        except Exception:
+            # Se falhar sem projeto, força o projeto explícito
+            ee.Initialize(project='ee-julioczcosta')
             
     except Exception as e:
-        st.error(f"⚠️ Erro ao conectar no Google Earth Engine: {e}")
-        st.stop() # Para a execução se não conectar
+        st.error(f"⚠️ Falha na conexão GEE: {e}")
+        st.stop()
 
-# Chama a função imediatamente
+# Chama a função
 init_gee()
-
 def init_session_state():
     """Inicializa variáveis básicas da sessão."""
     # Sentinel
