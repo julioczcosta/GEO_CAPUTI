@@ -9,6 +9,7 @@ import consulta_bases
 import impedimentos
 import aptidao
 import hmac
+import base64
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -153,22 +154,25 @@ with st.sidebar:
 # 🖼️ CABEÇALHO COM LOGO (GLOBAL)
 # =========================================================
 
-# Ajustamos as colunas: [1, 6, 1] deixa a coluna do meio bem larga para caber a logo inteira
-c_head_1, c_head_2, c_head_3 = st.columns([1, 6, 1]) 
+try:
+    # Lê a imagem e converte para código que o navegador entende (Base64)
+    with open("imagem/geocaputi.png", "rb") as f:
+        img_data = base64.b64encode(f.read()).decode()
+    
+    # Renderiza HTML puro para garantir o centro
+    st.markdown(
+        f"""
+        <div style="display: flex; justify-content: center; align-items: center; padding-bottom: 20px;">
+            <img src="data:image/png;base64,{img_data}" style="width: 500px; max-width: 90%; height: auto; object-fit: contain;">
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+except FileNotFoundError:
+    # Se der erro no arquivo, mostra o texto
+    st.markdown("<h1 style='text-align: center;'>GEOCAPUTI</h1>", unsafe_allow_html=True)
 
-with c_head_2:
-    # Usamos HTML/CSS para centralizar PERFEITAMENTE a imagem dentro da coluna larga
-    col_centro = st.container()
-    with col_centro:
-        try:
-            # width=450 define o tamanho exato. 
-            # Se achar pequeno, aumente para 500 ou 600.
-            # Se achar grande, diminua para 300 ou 350.
-            st.image("imagem/geocaputi.png", width=450) 
-        except:
-            st.title("GEOCAPUTI")
-
-st.write("") # Espaçamento
+st.write("")
 
 # =========================================================
 # LÓGICA DE NAVEGAÇÃO
