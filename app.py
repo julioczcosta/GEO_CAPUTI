@@ -10,7 +10,7 @@ import impedimentos
 import aptidao
 import hmac
 import base64
-from streamlit_option_menu import option_menu 
+from streamlit_option_menu import option_menu
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -26,7 +26,6 @@ def check_login():
     if st.session_state.get("logged_in", False):
         return True
 
-    # Layout da tela de login
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
         st.markdown("## 🔐 Acesso Restrito - GEO Caputi")
@@ -77,16 +76,18 @@ st.markdown("""
         color: #2C3E50; 
     }
     
-    /* Box do Imóvel Ativo */
+    /* Box do Imóvel Ativo na Sidebar */
     .imovel-box {
         background-color: #e8f5e9; /* Verde muito claro */
         color: #1b5e20; 
         padding: 12px; 
         border-radius: 8px; 
         border: 1px solid #c8e6c9; 
-        font-size: 14px;
+        font-size: 13px;
         line-height: 1.4;
         word-wrap: break-word;
+        margin-top: 10px;
+        margin-bottom: 20px;
     }
     
     /* Ajuste fino para o menu não ficar colado no cabeçalho */
@@ -102,25 +103,26 @@ if hasattr(utils, 'init_gee'):
 if hasattr(utils, 'init_session_state'):
     utils.init_session_state()
 
-# --- BARRA LATERAL (MENU) ---
+# --- BARRA LATERAL (MENU LIMPO) ---
 with st.sidebar:
-    # Mostra quem está logado
+    # Mostra quem está logado de forma discreta
     usuario_logado = st.session_state.get("user_email", "Usuário")
-    st.info(f"👤 Logado como: **{usuario_logado}**")
+    st.caption(f"👤 {usuario_logado}")
+    st.write("") # Espaço
     
-    st.title("Menu")
-    
-    # SELETOR DE MODO
+    # SELETOR DE MODO (Sem título "Menu" e sem label "Navegação")
+    # Trocamos "Ferramentas Avulsas" por "Consultas Públicas"
     modo_operacao = st.radio(
-        "Navegação:",
-        ["Diagnóstico", "Ferramentas Avulsas"],
-        captions=["Análise do imóvel selecionado", "Consultas em bases públicas"]
+        "Navegação", 
+        ["Diagnóstico do Imóvel", "Consultas Públicas"],
+        captions=["Análise completa do perímetro", "Bases do CAR, INCRA e Aptidão"],
+        label_visibility="collapsed" 
     )
     
     st.markdown("---")
     
     # BOX DO IMÓVEL ATIVO
-    if 'last_code' in st.session_state and modo_operacao == "Diagnóstico":
+    if 'last_code' in st.session_state and modo_operacao == "Diagnóstico do Imóvel":
         imovel_nome = st.session_state['last_code']
         st.markdown(f"""
             <div class="imovel-box">
@@ -148,7 +150,7 @@ try:
             display: flex; 
             justify-content: center; 
             align-items: center; 
-            padding-bottom: 10px;
+            padding-bottom: 15px;
             position: relative;
             z-index: 1;
         ">
@@ -170,15 +172,27 @@ except FileNotFoundError:
 # 🧭 BARRA DE NAVEGAÇÃO MODERNA (OPTION MENU)
 # =========================================================
 
-# Estilo personalizado do Menu (Verde da Marca)
+# Estilo personalizado do Menu (AUMENTADO A ALTURA AQUI)
 styles_menu = {
     "container": {"padding": "0!important", "background-color": "#f8f9fa"},
-    "icon": {"color": "#555", "font-size": "14px"}, 
-    "nav-link": {"font-size": "14px", "text-align": "center", "margin": "0px", "--hover-color": "#eee"},
+    
+    # Ícone maior
+    "icon": {"color": "#555", "font-size": "16px"}, 
+    
+    # Texto maior e botões mais altos (Padding 12px)
+    "nav-link": {
+        "font-size": "16px", 
+        "text-align": "center", 
+        "margin": "0px", 
+        "padding-top": "12px",     # Aumenta a altura para cima
+        "padding-bottom": "12px",  # Aumenta a altura para baixo
+        "--hover-color": "#eee"
+    },
+    
     "nav-link-selected": {"background-color": "#009e60", "font-weight": "600"}, # Verde GEOCAPUTI
 }
 
-if modo_operacao == "Diagnóstico":
+if modo_operacao == "Diagnóstico do Imóvel":
     # ---------------------------------------------------------
     # MENU DIAGNÓSTICO
     # ---------------------------------------------------------
@@ -197,7 +211,7 @@ if modo_operacao == "Diagnóstico":
         home.render_tab()
     elif selected == "Contexto":
         context.render_tab()
-    elif selected == "Imagens de Satélite": # Nome atualizado!
+    elif selected == "Imagens de Satélite":
         sentinel.render_tab()
     elif selected == "Climatologia":
         climatology.render_tab()
@@ -206,9 +220,10 @@ if modo_operacao == "Diagnóstico":
 
 else:
     # ---------------------------------------------------------
-    # MENU FERRAMENTAS
+    # MENU CONSULTAS PÚBLICAS (Antigo Ferramentas)
     # ---------------------------------------------------------
-    st.markdown("<h4 style='text-align: center; color: #555; margin-bottom: 10px;'>FERRAMENTAS & CONSULTAS</h4>", unsafe_allow_html=True)
+    # Título sutil para dar contexto
+    st.markdown("<h4 style='text-align: center; color: #555; margin-bottom: 15px;'>CONSULTAS PÚBLICAS & BASES</h4>", unsafe_allow_html=True)
     
     selected_tool = option_menu(
         menu_title=None, 
