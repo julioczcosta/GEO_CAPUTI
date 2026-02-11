@@ -65,7 +65,9 @@ if not check_login():
 st.markdown("""
     <style>
     /* Remove padding excessivo do topo */
-    .block-container {padding-top: 1rem; padding-bottom: 2rem;}
+    .block-container {
+        padding-top: 3.5rem !important;
+        padding-bottom: 2rem;}
     
     /* Estilo dos Títulos */
     h1, h2, h3 { 
