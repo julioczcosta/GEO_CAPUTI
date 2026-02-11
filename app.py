@@ -64,19 +64,43 @@ if not check_login():
 # --- CSS GLOBAL REFINADO ---
 st.markdown("""
     <style>
-    /* Ajuste do padding do topo */
+    /* ============================================================
+       1. LAYOUT E ESPAÇAMENTO
+       ============================================================ */
+    
+    /* Aumenta o espaço no topo para a Logo não ficar espremida */
     .block-container {
         padding-top: 3.5rem !important; 
-        padding-bottom: 2rem;
+        padding-bottom: 3rem;
     }
     
-    /* Tipografia */
-    h1, h2, h3 { 
-        font-family: 'Helvetica Neue', sans-serif; 
+    /* Ajuste fino para o menu horizontal (option_menu) centralizar verticalmente */
+    div[data-testid="stHorizontalBlock"] {
+        align-items: center;
+    }
+
+    /* ============================================================
+       2. TIPOGRAFIA E CORES
+       ============================================================ */
+    
+    /* Fontes modernas e cor Chumbo para títulos */
+    h1, h2, h3, h4, h5 { 
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
         color: #2C3E50; 
+        font-weight: 600;
     }
     
-    /* Box do Imóvel Ativo na Sidebar */
+    /* Texto de ajuda (captions) mais legível */
+    .stCaption {
+        color: #666;
+        font-size: 0.9rem;
+    }
+
+    /* ============================================================
+       3. SIDEBAR (MENU LATERAL)
+       ============================================================ */
+    
+    /* Box do Imóvel Ativo (Verde Claro com Texto Verde Escuro) */
     .imovel-box {
         background-color: #e8f5e9; 
         color: #1b5e20; 
@@ -88,45 +112,74 @@ st.markdown("""
         word-wrap: break-word;
         margin-top: 10px;
         margin-bottom: 20px;
-    }
-    
-    /* Ajuste fino para o menu não ficar colado no cabeçalho */
-    div[data-testid="stHorizontalBlock"] {
-        align-items: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
 
-    /* --- ESTILIZAÇÃO DE BOTÕES --- */
+    /* ============================================================
+       4. BOTÕES (SISTEMA BICOLOR: VERDE & CHUMBO)
+       ============================================================ */
 
-    /* 1. Botão Primário (Solid Green) - Ex: Submit, Confirmar */
+    /* TIPO A: BOTÃO PRIMÁRIO (Use type="primary" no Python)
+       Cor: Fundo Verde Sólido, Texto Branco */
     div.stButton > button[kind="primary"] {
-        background-color: #009e60;
-        border-color: #009e60;
-        color: white;
-        transition: all 0.3s;
-    }
-    div.stButton > button[kind="primary"]:hover {
-        background-color: #007f4d;
-        border-color: #007f4d;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    }
-
-    /* 2. Botão Secundário/Padrão (Outline Grey) - Ex: Limpar, Baixar */
-    div.stButton > button[kind="secondary"], div.stButton > button:not([kind="primary"]) {
-        color: #2C3E50; /* Cinza Chumbo da Logo */
-        border-color: #2C3E50;
-        background-color: transparent;
-        transition: all 0.3s;
-    }
-    div.stButton > button[kind="secondary"]:hover, div.stButton > button:not([kind="primary"]):hover {
-        background-color: #2C3E50;
-        color: white;
-        border-color: #2C3E50;
+        background-color: #009e60 !important;
+        border-color: #009e60 !important;
+        color: white !important;
+        font-weight: 600;
+        border-radius: 6px;
+        transition: all 0.3s ease;
     }
     
-    /* Remove bordas vermelhas se houver algum erro residual */
+    /* Hover do Primário (Fica um verde mais escuro) */
+    div.stButton > button[kind="primary"]:hover {
+        background-color: #007f4d !important;
+        border-color: #007f4d !important;
+        box-shadow: 0 4px 8px rgba(0,158,96,0.2);
+        transform: translateY(-1px);
+    }
+
+    /* TIPO B: BOTÃO SECUNDÁRIO/PADRÃO (Sem type="primary")
+       Cor: Fundo Transparente, Borda e Texto Chumbo */
+    div.stButton > button:not([kind="primary"]) {
+        background-color: transparent !important;
+        color: #2C3E50 !important;
+        border-color: #2C3E50 !important;
+        border-width: 1px !important;
+        font-weight: 600;
+        border-radius: 6px;
+        transition: all 0.3s ease;
+    }
+
+    /* Hover do Secundário (Fica Chumbo Sólido com Texto Branco) */
+    div.stButton > button:not([kind="primary"]):hover {
+        background-color: #2C3E50 !important;
+        color: white !important;
+        border-color: #2C3E50 !important;
+        box-shadow: 0 4px 8px rgba(44,62,80,0.2);
+    }
+
+    /* ============================================================
+       5. COMPONENTES EXTRAS
+       ============================================================ */
+    
+    /* Inputs (Caixas de texto) com foco Verde */
+    div[data-baseweb="input"] > div:focus-within {
+        border-color: #009e60 !important;
+        box-shadow: none !important;
+    }
+
+    /* Checkboxes e Radios com cor de seleção Verde */
+    div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {
+        background-color: #009e60 !important; 
+        border-color: #009e60 !important;
+    }
+
+    /* Alertas e Infos (Suavizar bordas) */
     .stAlert {
         border-radius: 8px;
+        border: none;
     }
+    
     </style>
     """, unsafe_allow_html=True)
 
