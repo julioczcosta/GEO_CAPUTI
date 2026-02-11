@@ -61,7 +61,7 @@ if not check_login():
 # 🚀 O APLICATIVO REAL COMEÇA AQUI
 # =========================================================
 
-# --- CSS GLOBAL ---
+# --- CSS GLOBAL REFINADO ---
 st.markdown("""
     <style>
     /* Ajuste do padding do topo */
@@ -78,7 +78,7 @@ st.markdown("""
     
     /* Box do Imóvel Ativo na Sidebar */
     .imovel-box {
-        background-color: #e8f5e9; /* Verde muito claro */
+        background-color: #e8f5e9; 
         color: #1b5e20; 
         padding: 12px; 
         border-radius: 8px; 
@@ -93,6 +93,39 @@ st.markdown("""
     /* Ajuste fino para o menu não ficar colado no cabeçalho */
     div[data-testid="stHorizontalBlock"] {
         align-items: center;
+    }
+
+    /* --- ESTILIZAÇÃO DE BOTÕES --- */
+
+    /* 1. Botão Primário (Solid Green) - Ex: Submit, Confirmar */
+    div.stButton > button[kind="primary"] {
+        background-color: #009e60;
+        border-color: #009e60;
+        color: white;
+        transition: all 0.3s;
+    }
+    div.stButton > button[kind="primary"]:hover {
+        background-color: #007f4d;
+        border-color: #007f4d;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+
+    /* 2. Botão Secundário/Padrão (Outline Grey) - Ex: Limpar, Baixar */
+    div.stButton > button[kind="secondary"], div.stButton > button:not([kind="primary"]) {
+        color: #2C3E50; /* Cinza Chumbo da Logo */
+        border-color: #2C3E50;
+        background-color: transparent;
+        transition: all 0.3s;
+    }
+    div.stButton > button[kind="secondary"]:hover, div.stButton > button:not([kind="primary"]):hover {
+        background-color: #2C3E50;
+        color: white;
+        border-color: #2C3E50;
+    }
+    
+    /* Remove bordas vermelhas se houver algum erro residual */
+    .stAlert {
+        border-radius: 8px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -222,8 +255,6 @@ else:
     # ---------------------------------------------------------
     # MENU CONSULTAS PÚBLICAS (Antigo Ferramentas)
     # ---------------------------------------------------------
-    # Título sutil para dar contexto
-    st.markdown("<h4 style='text-align: center; color: #555; margin-bottom: 15px;'>CONSULTAS PÚBLICAS & BASES</h4>", unsafe_allow_html=True)
     
     selected_tool = option_menu(
         menu_title=None, 
