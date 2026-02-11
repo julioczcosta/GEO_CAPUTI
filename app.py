@@ -152,18 +152,21 @@ with st.sidebar:
 # =========================================================
 # 🖼️ CABEÇALHO COM LOGO (GLOBAL)
 # =========================================================
-# Colocamos aqui para aparecer em TODAS as abas
 
-# Cria 3 colunas para centralizar a imagem (Vazio | Imagem | Vazio)
-c_head_1, c_head_2, c_head_3 = st.columns([1, 1.5, 1]) 
+# Ajustamos as colunas: [1, 6, 1] deixa a coluna do meio bem larga para caber a logo inteira
+c_head_1, c_head_2, c_head_3 = st.columns([1, 6, 1]) 
 
 with c_head_2:
-    try:
-        # Tenta carregar a imagem
-        st.image("imagem/geocaputi.png", use_container_width=True)
-    except:
-        # Fallback caso a imagem não exista ainda (para não quebrar o app)
-        st.title("GEOCAPUTI")
+    # Usamos HTML/CSS para centralizar PERFEITAMENTE a imagem dentro da coluna larga
+    col_centro = st.container()
+    with col_centro:
+        try:
+            # width=450 define o tamanho exato. 
+            # Se achar pequeno, aumente para 500 ou 600.
+            # Se achar grande, diminua para 300 ou 350.
+            st.image("imagem/geocaputi.png", width=450) 
+        except:
+            st.title("GEOCAPUTI")
 
 st.write("") # Espaçamento
 
