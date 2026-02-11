@@ -10,6 +10,7 @@ import impedimentos
 import aptidao
 import hmac
 import base64
+from streamlit_option_menu import option_menu 
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -61,43 +62,19 @@ if not check_login():
 # 🚀 O APLICATIVO REAL COMEÇA AQUI
 # =========================================================
 
-# --- CSS GLOBAL (Personalizado para tons da Logo) ---
+# --- CSS GLOBAL ---
 st.markdown("""
     <style>
-    /* Remove padding excessivo do topo */
+    /* Ajuste do padding do topo */
     .block-container {
-        padding-top: 3.5rem !important;
-        padding-bottom: 2rem;}
+        padding-top: 3.5rem !important; 
+        padding-bottom: 2rem;
+    }
     
-    /* Estilo dos Títulos */
+    /* Tipografia */
     h1, h2, h3 { 
         font-family: 'Helvetica Neue', sans-serif; 
-        color: #2C3E50; /* Cinza Chumbo da Logo */
-    }
-    
-    /* Centralizar Abas e melhorar visual */
-    .stTabs [data-baseweb="tab-list"] { 
-        justify-content: center; 
-        border-bottom: 2px solid #f0f2f6;
-    }
-    .stTabs [data-baseweb="tab"] { 
-        font-size: 1rem; 
-        font-weight: 600; 
-        color: #555;
-    }
-    .stTabs [data-baseweb="tab"][aria-selected="true"] {
-        color: #009e60; /* Verde da Logo */
-        border-bottom-color: #009e60;
-    }
-    
-    /* Ajustes de botões (Verde da marca) */
-    div.stButton > button[kind="primary"] {
-        background-color: #009e60;
-        border-color: #009e60;
-    }
-    div.stButton > button[kind="primary"]:hover {
-        background-color: #007f4d;
-        border-color: #007f4d;
+        color: #2C3E50; 
     }
     
     /* Box do Imóvel Ativo */
@@ -110,6 +87,11 @@ st.markdown("""
         font-size: 14px;
         line-height: 1.4;
         word-wrap: break-word;
+    }
+    
+    /* Ajuste fino para o menu não ficar colado no cabeçalho */
+    div[data-testid="stHorizontalBlock"] {
+        align-items: center;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -153,61 +135,94 @@ with st.sidebar:
         st.rerun()
 
 # =========================================================
-# 🖼️ CABEÇALHO COM LOGO (GLOBAL)
+# 🖼️ CABEÇALHO COM LOGO
 # =========================================================
 
 try:
-    # Lê a imagem e converte para código que o navegador entende (Base64)
     with open("imagem/geocaputi.png", "rb") as f:
         img_data = base64.b64encode(f.read()).decode()
     
-    # Renderiza HTML puro para garantir o centro
     st.markdown(
         f"""
-        <div style="display: flex; justify-content: center; align-items: center; padding-bottom: 20px;">
-            <img src="data:image/png;base64,{img_data}" style="width: 500px; max-width: 90%; height: auto; object-fit: contain;">
+        <div style="
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            padding-bottom: 10px;
+            position: relative;
+            z-index: 1;
+        ">
+            <img src="data:image/png;base64,{img_data}" 
+                 style="
+                    width: 500px; 
+                    max-width: 90%; 
+                    height: auto; 
+                    object-fit: contain;
+                 ">
         </div>
         """,
         unsafe_allow_html=True
     )
 except FileNotFoundError:
-    # Se der erro no arquivo, mostra o texto
     st.markdown("<h1 style='text-align: center;'>GEOCAPUTI</h1>", unsafe_allow_html=True)
 
-st.write("")
+# =========================================================
+# 🧭 BARRA DE NAVEGAÇÃO MODERNA (OPTION MENU)
+# =========================================================
 
-# =========================================================
-# LÓGICA DE NAVEGAÇÃO
-# =========================================================
+# Estilo personalizado do Menu (Verde da Marca)
+styles_menu = {
+    "container": {"padding": "0!important", "background-color": "#f8f9fa"},
+    "icon": {"color": "#555", "font-size": "14px"}, 
+    "nav-link": {"font-size": "14px", "text-align": "center", "margin": "0px", "--hover-color": "#eee"},
+    "nav-link-selected": {"background-color": "#009e60", "font-weight": "600"}, # Verde GEOCAPUTI
+}
 
 if modo_operacao == "Diagnóstico":
-    # MÓDULO 1: FLUXO DE ANÁLISE (Imóvel Selecionado)
-    # Obs: Removemos o st.title("GEOCAPUTI") daqui porque a logo já está em cima
-    
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🏠 INÍCIO", 
-        "📚 CONTEXTO", 
-        "🛰️ SENTINEL-2", 
-        "🌦️ CLIMATOLOGIA", 
-        "🚫 IMPEDIMENTOS"
-    ])
+    # ---------------------------------------------------------
+    # MENU DIAGNÓSTICO
+    # ---------------------------------------------------------
+    selected = option_menu(
+        menu_title=None, 
+        options=["Início", "Contexto", "Imagens de Satélite", "Climatologia", "Impedimentos"],
+        icons=["house", "geo-alt", "layers", "cloud-rain", "exclamation-triangle"], 
+        menu_icon="cast", 
+        default_index=0, 
+        orientation="horizontal",
+        styles=styles_menu
+    )
 
-    with tab1: home.render_tab()
-    with tab2: context.render_tab()
-    with tab3: sentinel.render_tab()
-    with tab4: climatology.render_tab()
-    with tab5: impedimentos.render_tab()
+    # Roteamento das Páginas
+    if selected == "Início":
+        home.render_tab()
+    elif selected == "Contexto":
+        context.render_tab()
+    elif selected == "Imagens de Satélite": # Nome atualizado!
+        sentinel.render_tab()
+    elif selected == "Climatologia":
+        climatology.render_tab()
+    elif selected == "Impedimentos":
+        impedimentos.render_tab()
 
 else:
-    # MÓDULO 2: FERRAMENTAS & CONSULTAS
-    st.markdown("<h3 style='text-align: center; color: #555;'>FERRAMENTAS & CONSULTAS</h3>", unsafe_allow_html=True)
+    # ---------------------------------------------------------
+    # MENU FERRAMENTAS
+    # ---------------------------------------------------------
+    st.markdown("<h4 style='text-align: center; color: #555; margin-bottom: 10px;'>FERRAMENTAS & CONSULTAS</h4>", unsafe_allow_html=True)
     
-    tab_a, tab_b, tab_c = st.tabs([
-        "🔍 CONSULTA CAR",
-        "📡 CONSULTA INCRA (SIGEF/SNCI)", 
-        "🌾 APTIDÃO AGRÍCOLA" 
-    ])
+    selected_tool = option_menu(
+        menu_title=None, 
+        options=["Consulta CAR", "Consulta INCRA", "Aptidão Agrícola"],
+        icons=["search", "broadcast", "tree"], 
+        menu_icon="cast", 
+        default_index=0, 
+        orientation="horizontal",
+        styles=styles_menu
+    )
 
-    with tab_a: consulta_car.render_tab() 
-    with tab_b: consulta_bases.render_tab() 
-    with tab_c: aptidao.render_tab()
+    if selected_tool == "Consulta CAR":
+        consulta_car.render_tab() 
+    elif selected_tool == "Consulta INCRA":
+        consulta_bases.render_tab() 
+    elif selected_tool == "Aptidão Agrícola":
+        aptidao.render_tab()

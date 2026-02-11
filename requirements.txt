@@ -18,3 +18,4 @@ pyarrow
 rtree
 lxml
 xlsxwriter
+streamlit-option-menu
