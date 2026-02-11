@@ -170,7 +170,7 @@ def render_tab():
     if 'impedimentos_results' not in st.session_state: st.session_state['impedimentos_results'] = []
     
     # Botão de Ação
-    if st.button("Verificar Impedimentos", type="primary", use_container_width=True):
+    if st.button("Verificar Impedimentos", use_container_width=True):
         
         if gdf_alvo.crs != WFS_CRS: gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
         geom_uniao = gdf_alvo.unary_union

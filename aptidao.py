@@ -189,7 +189,7 @@ def render_tab():
 
             else:
                 with c2:
-                    if st.button("🚀 Processar", type="primary", use_container_width=True):
+                    if st.button("🚀 Processar", use_container_width=True):
                         with st.spinner("Analisando aptidão..."):
                             try:
                                 lista_calc = []

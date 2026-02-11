@@ -212,7 +212,7 @@ def render_tab():
         eh_sigef = False
 
     with c_btn:
-        btn_buscar = st.button("🔍 Buscar", type="primary", use_container_width=True)
+        btn_buscar = st.button("🔍 Buscar", use_container_width=True)
 
     if btn_buscar:
         if not filtros_gerados: st.toast("Digite um código.", icon="⚠️")

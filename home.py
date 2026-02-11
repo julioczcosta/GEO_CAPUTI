@@ -180,7 +180,7 @@ def render_tab():
                         """, unsafe_allow_html=True)
 
                 # --- BOTÃO DE CONFIRMAÇÃO ---
-                if st.button("✅ Usar Este Perímetro", type="primary", use_container_width=True):
+                if st.button("✅ Usar Este Perímetro", use_container_width=True):
                     
                     with st.spinner("Configurando ambiente de análise..."):
                         # 1. FAXINA

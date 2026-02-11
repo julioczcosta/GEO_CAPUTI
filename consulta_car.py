@@ -171,7 +171,7 @@ def render_tab():
     with col2:
         codigo_car_raw = st.text_input("Código do Imóvel:", placeholder="Ex: MT-1234567-...")
         
-        if st.button("🔍 Buscar Perímetro", type="primary"):
+        if st.button("🔍 Buscar Perímetro"):
             if not codigo_car_raw:
                 st.warning("Digite o código.")
             else:
