@@ -28,7 +28,7 @@ def check_login():
 
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
-        st.markdown("## 🔐 Acesso Restrito - GEOCAPUTI")
+        st.markdown("## 🔐 Acesso - GEOCAPUTI")
         
         with st.form("login_form"):
             email = st.text_input("E-mail").strip().lower()
