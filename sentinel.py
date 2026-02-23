@@ -9,12 +9,23 @@ from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
 
 def render_tab():
-    # 1. Verifica Geometria
+    # 1. Verifica Geometria e Nome do Imóvel Atual
     geometry = st.session_state.get('current_geometry')
+    source_name = st.session_state.get('source_name', 'Imovel')
     
     if not geometry:
         st.warning("⚠️ Por favor, selecione um imóvel na aba '🏠 Início' primeiro.")
         return
+
+    # ==========================================
+    # 🧹 FAXINA AUTOMÁTICA (O Segredo para não misturar fazendas)
+    # ==========================================
+    # Se o nome do imóvel mudou desde a última vez que abrimos essa aba,
+    # apagamos todas as imagens e visualizações antigas da memória.
+    if st.session_state.get('last_sentinel_source') != source_name:
+        utils.reset_preview()
+        st.session_state['camadas_fixas'] = []
+        st.session_state['last_sentinel_source'] = source_name
 
     # ==========================================
     # 🧠 INTELIGÊNCIA: CLUSTERING DE GLEBAS 
@@ -26,44 +37,32 @@ def render_tab():
     
     with st.spinner("Analisando a topologia e distribuição das áreas..."):
         try:
-            # Puxa os dados da nuvem para o Python
             geom_dict = geometry.getInfo()
             
-            # Normaliza se for FeatureCollection ou Geometria Pura
             if geom_dict.get('type') == 'FeatureCollection':
                 geoms_base = [shape(f['geometry']) for f in geom_dict.get('features', [])]
                 shp_geom = unary_union(geoms_base)
             else:
                 shp_geom = shape(geom_dict)
             
-            # Se for múltiplo, tenta agrupar os próximos
             if shp_geom.geom_type in ['MultiPolygon', 'GeometryCollection']:
-                # Extrai os polígonos individuais
                 poligonos = list(shp_geom.geoms) if shp_geom.geom_type == 'MultiPolygon' else [g for g in shp_geom.geoms if g.geom_type == 'Polygon']
                 
                 if len(poligonos) > 1:
-                    # 1. Agrupamento Inteligente (Buffer de ~220 metros / 0.002 graus)
-                    # Isso funde talhões separados por estradas, rios e carreadores.
                     areas_infladas = unary_union([p.buffer(0.002) for p in poligonos])
-                    
                     blocos_fundidos = [areas_infladas] if areas_infladas.geom_type == 'Polygon' else list(areas_infladas.geoms)
                     
-                    # 2. Se depois de fundir os vizinhos, ainda sobrou mais de 1 bloco...
                     if len(blocos_fundidos) > 1:
                         is_multipart = True
                         
-                        # Opção 0: Todos os Blocos Juntos
                         area_total_ha = geometry.area().divide(10000).getInfo()
                         opcoes.append(f"🟩 Visualizar Tudo Junto ({area_total_ha:.1f} ha)")
                         geometrias_separadas.append(geometry)
                         
-                        # Opções Individuais (Os Macro Blocos)
                         for i, bloco_inflado in enumerate(blocos_fundidos):
-                            # Descobre quais talhões originais pertencem a esse Bloco Isolado
                             pols_originais = [p for p in poligonos if p.intersects(bloco_inflado)]
                             bloco_limpo = unary_union(pols_originais)
                             
-                            # Devolve para o Google Earth Engine
                             gee_bloco = ee.Geometry(mapping(bloco_limpo))
                             area_ha = gee_bloco.area().divide(10000).getInfo()
                             
@@ -71,10 +70,8 @@ def render_tab():
                             geometrias_separadas.append(gee_bloco)
                             
         except Exception as e:
-            # Se falhar por KML muito louco, roda normal como uma geometria única
             pass
 
-    # Se a inteligência detectou blocos isolados, exibe o menu
     if is_multipart:
         st.info("🌍 Foram identificadas áreas geograficamente distantes. Escolha a porção para visualizar:")
         selecao = st.selectbox("Selecione o Bloco", opcoes, label_visibility="collapsed", on_change=utils.reset_preview)
@@ -82,13 +79,11 @@ def render_tab():
         idx = opcoes.index(selecao)
         geom_alvo = geometrias_separadas[idx]
         
-        # Pega a área para a lógica da escala
         if idx == 0:
             area_alvo_ha = area_total_ha
         else:
             area_alvo_ha = float(selecao.split('(')[1].replace(' ha)', ''))
     else:
-        # Se for tudo juntinho (ou 1 polígono só), passa direto transparente
         geom_alvo = geometry
         try: area_alvo_ha = geom_alvo.area().divide(10000).getInfo()
         except: area_alvo_ha = 100
@@ -96,7 +91,7 @@ def render_tab():
     # ==========================================
     # 🛡️ TRAVA DE ESCALA E SEGURANÇA (DYNAMIC SCALE)
     # ==========================================
-    escala_processamento = 10 # Padrão máximo (10m)
+    escala_processamento = 10 
     
     if area_alvo_ha > 20000:
         escala_processamento = 30
@@ -153,7 +148,6 @@ def render_tab():
             utils.reset_preview()
             with st.spinner("Buscando imagens e filtrando nuvens..."):
                 try:
-                    # Trava Anti-180MB: Usando o bounds do buffer para alívio do servidor
                     region_viz = geom_alvo.bounds().buffer(buffer_metros, 100).bounds()
                     
                     coll = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
@@ -201,7 +195,7 @@ def render_tab():
                         else: file_prefix = "Sentinel"
                             
                         if is_multipart and selecao != opcoes[0]:
-                            gleba_num = selecao.split(" ")[2] # Extrai número do Bloco Isolado X
+                            gleba_num = selecao.split(" ")[2] 
                             filename_final = f"{file_prefix}_Bloco{gleba_num}_{type_suffix}_{mes}_{ano}"
                         else:
                             filename_final = f"{file_prefix}_AreaTotal_{type_suffix}_{mes}_{ano}"
