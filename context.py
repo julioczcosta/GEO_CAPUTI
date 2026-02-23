@@ -123,7 +123,7 @@ def render_tab():
                 dados_ibge = utils.get_ibge_context_by_code(
                     mun_selecionado['cod_ibge'], mun_selecionado['nome_puro'], mun_selecionado['uf'], lat_dec, lon_dec
                 )
-                dados_altimetria = utils.get_altimetria_municipio(mun_selecionado['cod_ibge'])
+                dados_altimetria = utils.get_altimetria_municipio(mun_selecionado['cod_ibge'], lat_dec, lon_dec)
 
             if "erro" in dados_ibge:
                 st.error(f"{dados_ibge['erro']}")
