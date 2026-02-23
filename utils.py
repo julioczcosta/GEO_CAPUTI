@@ -415,3 +415,32 @@ def gerar_geopackage_bytes(gdf):
             tmp.seek(0)
             return tmp.read()
     except: return None
+    
+@st.cache_data(show_spinner=False)
+def get_altimetria_municipio(cod_ibge):
+    """
+    Calcula a altitude média de todo o território do município usando SRTM e a malha do IBGE no GEE.
+    """
+    try:
+        # Puxa a malha de municípios e filtra pelo código IBGE exato
+        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
+        municipio = mun_col.filter(ee.Filter.eq('CD_MUN', str(cod_ibge))).first()
+        geom_mun = municipio.geometry()
+
+        # Puxa o SRTM (Modelo de Elevação)
+        srtm = ee.Image('USGS/SRTMGL1_003')
+
+        # Calcula a média no município todo
+        # Escala de 90m e bestEffort=True garantem que não vai dar erro de limite de memória
+        stats = srtm.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geom_mun,
+            scale=90,
+            maxPixels=1e13,
+            bestEffort=True
+        ).getInfo()
+
+        altitude_media = stats.get('elevation', 0)
+        return {"media": altitude_media}
+    except Exception as e:
+        return {"erro": str(e)}

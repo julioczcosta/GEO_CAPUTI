@@ -114,15 +114,16 @@ def render_tab():
                     escolha = st.selectbox("Selecione o município para consultar dados do IBGE:", nomes_opcoes)
                     mun_selecionado = next(m for m in dados_muns if m['municipio'] == escolha)
 
-        # --- DADOS DO IBGE ---
+        # --- DADOS DO IBGE E ALTIMETRIA ---
         st.write("")
         st.subheader("🏛️ Dados Político-Administrativos")
         
         if mun_selecionado:
-            with st.spinner("Consultando IBGE..."):
+            with st.spinner("Consultando IBGE e Altimetria..."):
                 dados_ibge = utils.get_ibge_context_by_code(
                     mun_selecionado['cod_ibge'], mun_selecionado['nome_puro'], mun_selecionado['uf'], lat_dec, lon_dec
                 )
+                dados_altimetria = utils.get_altimetria_municipio(mun_selecionado['cod_ibge'])
 
             if "erro" in dados_ibge:
                 st.error(f"{dados_ibge['erro']}")
@@ -136,6 +137,9 @@ def render_tab():
                 pop = fmt(dados_ibge['populacao'], 0)
                 area = fmt(dados_ibge['area_km2'], 2)
                 dens = fmt(dados_ibge['densidade'], 2)
+                
+                # Trata a exibição da altitude
+                alt_media = f"{dados_altimetria['media']:.0f}" if "erro" not in dados_altimetria else "N/A"
 
                 with st.container(border=True):
                     st.markdown(f"### {dados_ibge['municipio']} - {dados_ibge['uf']}")
@@ -144,9 +148,12 @@ def render_tab():
                     
                     st.divider()
                     
-                    c_a, c_b = st.columns(2)
+                    c_a, c_b, c_c = st.columns(3)
                     c_a.metric("👥 População", f"{pop} hab.")
                     c_b.metric("📏 Área Mun.", f"{area} km²")
+                    c_c.metric("⛰️ Alt. Média", f"{alt_media} m")
+                    
+                    st.write("")
                     st.metric("🏙️ Densidade", f"{dens} hab/km²")
                     
                     st.divider()
@@ -156,7 +163,7 @@ def render_tab():
                     * **Intermediária:** {dados_ibge['regiao_intermediaria']}
                     * **Imediata:** {dados_ibge['regiao_imediata']}
                     """)
-                    st.caption("Fonte: IBGE (Censo 2022)")
+                    st.caption("Fonte: IBGE (Censo 2022) | NASA SRTM")
 
     # ==========================================
     # COLUNA 2: DADOS AMBIENTAIS E LEGAIS
