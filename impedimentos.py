@@ -6,6 +6,7 @@ import folium
 from streamlit_folium import st_folium
 from io import BytesIO
 import math
+from shapely import wkb # <-- IMPORTANTE PARA A FAXINA
 
 # --- 1. CONFIGURAÇÕES DOS SERVIÇOS WFS ---
 WFS_CRS = "EPSG:4674"  # SIRGAS 2000
@@ -94,6 +95,28 @@ SERVICES_TO_CHECK = [
 
 # --- 2. FUNÇÕES AUXILIARES ---
 
+# =======================================================
+# NOVA FUNÇÃO: FAXINA GEOMÉTRICA (Evita o GEOSException)
+# =======================================================
+def corrigir_geometrias(gdf):
+    if gdf is None or gdf.empty:
+        return gdf
+    try:
+        # Remove Z (Altitude) forçando 2D
+        gdf.geometry = gdf.geometry.apply(
+            lambda geom: wkb.loads(wkb.dumps(geom, output_dimension=2)) if geom.has_z else geom
+        )
+        # Explode MultiGeometries
+        gdf = gdf.explode(index_parts=False).reset_index(drop=True)
+        # Corrige topologia (Buffer 0)
+        gdf.geometry = gdf.geometry.buffer(0)
+        # Remove nulos
+        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        return gdf
+    except Exception as e:
+        st.warning(f"Aviso na correção geométrica: {e}")
+        return gdf
+
 def calcular_epsg_utm(geometria_centroide):
     """Calcula UTM automaticamente."""
     try:
@@ -169,11 +192,19 @@ def render_tab():
     if 'impedimentos_done' not in st.session_state: st.session_state['impedimentos_done'] = False
     if 'impedimentos_results' not in st.session_state: st.session_state['impedimentos_results'] = []
     
-    # Botão de Ação
-    if st.button("Verificar Impedimentos", use_container_width=True):
+    # Botão de Ação (Ajustado para type="primary")
+    if st.button("🚫 Verificar Sobreposições", type="primary", use_container_width=True):
+        
+        # =======================================================
+        # APLICA A FAXINA ANTES DA UNIÃO!
+        # =======================================================
+        gdf_alvo = corrigir_geometrias(gdf_alvo)
         
         if gdf_alvo.crs != WFS_CRS: gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
+        
+        # Agora essa linha não vai mais explodir
         geom_uniao = gdf_alvo.unary_union
+        
         crs_proj = calcular_epsg_utm(geom_uniao.centroid)
         bounds = gdf_alvo.total_bounds
         bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
@@ -257,23 +288,17 @@ def render_tab():
                     
                     # Sanitização de Dados para o Mapa
                     for col in gdf_draw.columns:
-                        # Arredonda Área para o Tooltip (para não aparecer muitas casas)
                         if col == 'area_ha_sobreposta' and not is_point:
                             gdf_draw[col] = gdf_draw[col].round(4)
-                        # Converte Datas e Objetos para String (Correção JSON)
                         elif pd.api.types.is_datetime64_any_dtype(gdf_draw[col]) or gdf_draw[col].dtype == 'object':
                             gdf_draw[col] = gdf_draw[col].astype(str)
 
-                    # Renomeia colunas para o Tooltip (Alias)
-                    # Cria um dict reverso temporário só com o que tem no gdf
                     aliases_map = {k: v for k, v in COLUMN_ALIASES.items() if k in gdf_draw.columns}
                     
-                    # Remove Área se for Ponto
                     cols_tooltip = [c for c in gdf_draw.columns if c not in ['geometry', 'geom_original']]
                     if is_point and 'area_ha_sobreposta' in cols_tooltip:
                         cols_tooltip.remove('area_ha_sobreposta')
                     
-                    # Aplica Alias no Tooltip
                     tooltips_aliased = [aliases_map.get(c, c) for c in cols_tooltip]
                     
                     folium.GeoJson(
@@ -297,12 +322,10 @@ def render_tab():
                     with st.expander(f"🔴 {item['nome']} (Ver Detalhes)", expanded=True):
                         df_show = pd.DataFrame(item["dados"].drop(columns=['geometry'], errors='ignore'))
                         
-                        # Verifica se é ponto para remover coluna de área da Tabela também
                         is_point_table = item["dados"].geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
                         if is_point_table and 'area_ha_sobreposta' in df_show.columns:
                             df_show = df_show.drop(columns=['area_ha_sobreposta'])
                         
-                        # Renomeia Colunas usando o dicionário
                         df_show = df_show.rename(columns=COLUMN_ALIASES)
                         
                         st.dataframe(df_show, use_container_width=True, hide_index=True)
