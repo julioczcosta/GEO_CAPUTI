@@ -6,18 +6,15 @@ import folium
 from streamlit_folium import st_folium
 from io import BytesIO
 import math
-from shapely import wkb # <-- IMPORTANTE PARA A FAXINA
+from shapely import wkb
 
 # --- 1. CONFIGURAÇÕES DOS SERVIÇOS WFS ---
 WFS_CRS = "EPSG:4674"  # SIRGAS 2000
 
 # Dicionário para renomear colunas (Aliasing)
 COLUMN_ALIASES = {
-    # Gerais
     'area_ha_sobreposta': 'Área Sobreposta (ha)',
     'geometry': 'Geometria',
-    
-    # Embargos
     'nom_pessoa': 'Infrator',
     'cpf_cnpj_infrator': 'CPF/CNPJ',
     'num_auto_infracao': 'Auto de Infração',
@@ -32,8 +29,6 @@ COLUMN_ALIASES = {
     'processo': 'Processo',
     'desc_ai': 'Descrição AI',
     'valor_mult': 'Valor Multa',
-    
-    # UCs
     'nome_uc': 'Nome da UC',
     'nomeuc': 'Nome da UC',
     'ano': 'Ano Criação',
@@ -46,15 +41,11 @@ COLUMN_ALIASES = {
     'categoria': 'Categoria',
     'esfera': 'Esfera',
     'municipio': 'Município',
-    
-    # Sítios Arqueológicos
     'identificacao_bem': 'Identificação',
     'ds_natureza': 'Natureza',
     'ds_classificacao': 'Classificação',
     'sintese_bem': 'Síntese',
     'dt_cadastro': 'Data Cadastro',
-    
-    # Indígenas
     'terrai_nome': 'Terra Indígena',
     'etnia_nome': 'Etnia',
     'fase_ti': 'Fase',
@@ -65,7 +56,6 @@ COLUMN_ALIASES = {
     'nome_cr': 'Coord. Regional'
 }
 
-# Colunas Técnicas para buscar no WFS
 WFS_COLUNAS = {
     "publica:vw_brasil_adm_embargo_a": ['nom_pessoa', 'cpf_cnpj_infrator', 'num_auto_infracao', 'qtd_area_desmatada', 'data_cadastro_tad', 'des_infracao', 'respeita_embargo'],
     "ICMBio:embargos_icmbio": ['cpf_cnpj', 'autuado', 'desc_infra', 'tipo_infra', 'nome_uc', 'ano', 'area', 'processo'],
@@ -79,7 +69,6 @@ WFS_COLUNAS = {
     "Funai:aldeias_pontos": ['nome_aldeia', 'cod_aldeia', 'nome_cr']
 }
 
-# Serviços
 SERVICES_TO_CHECK = [
     { "name": "Embargo IBAMA", "base_url": "https://siscom.ibama.gov.br/geoserver/publica/ows", "typename": "publica:vw_brasil_adm_embargo_a", "color": "#FF0000" },
     { "name": "Embargo ICMBio", "base_url": "https://geoservicos.inde.gov.br/geoserver/ICMBio/ows", "typename": "ICMBio:embargos_icmbio", "color": "#8B0000" },
@@ -95,30 +84,22 @@ SERVICES_TO_CHECK = [
 
 # --- 2. FUNÇÕES AUXILIARES ---
 
-# =======================================================
-# NOVA FUNÇÃO: FAXINA GEOMÉTRICA (Evita o GEOSException)
-# =======================================================
 def corrigir_geometrias(gdf):
     if gdf is None or gdf.empty:
         return gdf
     try:
-        # Remove Z (Altitude) forçando 2D
+        # Força 2D
         gdf.geometry = gdf.geometry.apply(
             lambda geom: wkb.loads(wkb.dumps(geom, output_dimension=2)) if geom.has_z else geom
         )
-        # Explode MultiGeometries
         gdf = gdf.explode(index_parts=False).reset_index(drop=True)
-        # Corrige topologia (Buffer 0)
         gdf.geometry = gdf.geometry.buffer(0)
-        # Remove nulos
         gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
         return gdf
     except Exception as e:
-        st.warning(f"Aviso na correção geométrica: {e}")
         return gdf
 
 def calcular_epsg_utm(geometria_centroide):
-    """Calcula UTM automaticamente."""
     try:
         lon, lat = geometria_centroide.x, geometria_centroide.y
         zone = math.floor((lon + 180) / 6) + 1
@@ -128,7 +109,6 @@ def calcular_epsg_utm(geometria_centroide):
 
 @st.cache_data(ttl=3600)
 def baixar_wfs(url, params):
-    """Baixa dados do WFS com cache."""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         try:
@@ -170,41 +150,37 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
 def render_tab():
     st.markdown("### Análise de Impedimentos Socioambientais")
     
-    # --- RESGATE DO IMÓVEL (HOME) ---
     gdf_alvo = None
     
     possible_keys = ['gdf_imovel', 'imovel_upload', 'gdf_perimetro', 'kml_data', 'gdf_data']
     for key in possible_keys:
         if key in st.session_state and isinstance(st.session_state[key], gpd.GeoDataFrame):
-            gdf_alvo = st.session_state[key]
+            # Usamos o .copy() para não sujar a variável global acidentalmente
+            gdf_alvo = st.session_state[key].copy()
             break
 
     if gdf_alvo is None:
         st.warning("⚠️ Nenhum imóvel identificado.")
         st.markdown("Vá para a aba **Início**, faça o upload e clique em 'Usar Este Perímetro'.")
         return
-    else:
-        # Pega o nome do código para exibir
-        codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
-        st.info(f"Analisando perímetro: **{codigo_display}**")
+        
+    # =======================================================
+    # APLICA A FAXINA AQUI NO TOPO! 
+    # Assim o KML fica limpo para o Botão E para o Mapa.
+    # =======================================================
+    gdf_alvo = corrigir_geometrias(gdf_alvo)
 
-    # Inicializa estado
+    codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
+    st.info(f"Analisando perímetro: **{codigo_display}**")
+
     if 'impedimentos_done' not in st.session_state: st.session_state['impedimentos_done'] = False
     if 'impedimentos_results' not in st.session_state: st.session_state['impedimentos_results'] = []
     
-    # Botão de Ação (Ajustado para type="primary")
     if st.button("🚫 Verificar Sobreposições", type="primary", use_container_width=True):
-        
-        # =======================================================
-        # APLICA A FAXINA ANTES DA UNIÃO!
-        # =======================================================
-        gdf_alvo = corrigir_geometrias(gdf_alvo)
         
         if gdf_alvo.crs != WFS_CRS: gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
         
-        # Agora essa linha não vai mais explodir
         geom_uniao = gdf_alvo.unary_union
-        
         crs_proj = calcular_epsg_utm(geom_uniao.centroid)
         bounds = gdf_alvo.total_bounds
         bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
@@ -270,6 +246,8 @@ def render_tab():
             st.markdown("#### Localização das Sobreposições")
             
             if gdf_alvo.crs != WFS_CRS: gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
+            
+            # Agora aqui o KML já está limpo e não vai dar erro
             centro = [gdf_alvo.unary_union.centroid.y, gdf_alvo.unary_union.centroid.x]
             
             m = folium.Map(location=centro, zoom_start=12, tiles="Esri World Imagery")
@@ -283,10 +261,8 @@ def render_tab():
                 if item["status"]:
                     gdf_draw = item["dados"].copy()
                     
-                    # Identifica se é Ponto
                     is_point = gdf_draw.geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
                     
-                    # Sanitização de Dados para o Mapa
                     for col in gdf_draw.columns:
                         if col == 'area_ha_sobreposta' and not is_point:
                             gdf_draw[col] = gdf_draw[col].round(4)
