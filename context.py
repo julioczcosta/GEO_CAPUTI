@@ -135,7 +135,7 @@ def render_tab():
                     except: return str(num)
 
                 pop = fmt(dados_ibge['populacao'], 0)
-                area = fmt(dados_ibge['area_km2'], 2)
+                area = fmt(dados_ibge['area_km2'], 0) # <-- Ajustado para 0
                 dens = fmt(dados_ibge['densidade'], 2)
                 
                 # Trata a exibição da altitude
@@ -148,10 +148,13 @@ def render_tab():
                     
                     st.divider()
                     
+                    # --- AJUSTE DE LAYOUT PARA CABER NA TELA ---
                     c_a, c_b, c_c = st.columns(3)
-                    c_a.metric("👥 População", f"{pop} hab.")
-                    c_b.metric("📏 Área Mun.", f"{area} km²")
-                    c_c.metric("⛰️ Alt. Média", f"{alt_media} m")
+                    
+                    # As unidades "hab" e "km²" foram para o título para poupar espaço no valor
+                    c_a.metric("👥 População", pop)
+                    c_b.metric("📏 Área (km²)", area)
+                    c_c.metric("⛰️ Altitude", f"{alt_media}m")
                     
                     st.write("")
                     st.metric("🏙️ Densidade", f"{dens} hab/km²")
