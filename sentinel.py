@@ -11,8 +11,59 @@ def render_tab():
     geometry = st.session_state.get('current_geometry')
     
     if not geometry:
-        st.warning("⚠️ Por favor, selecione um imóvel na aba '🏠 Home' primeiro.")
+        st.warning("⚠️ Por favor, selecione um imóvel na aba '🏠 Início' primeiro.")
         return
+
+    # ==========================================
+    # 🧠 INTELIGÊNCIA: SELETOR DE GLEBAS
+    # ==========================================
+    
+    # Descobre o tipo de geometria e separa se for múltipla
+    geom_type = geometry.type().getInfo()
+    is_multipart = False
+    
+    if geom_type in ['MultiPolygon', 'GeometryCollection']:
+        parts = geometry.geometries().getInfo()
+        if len(parts) > 1:
+            is_multipart = True
+            opcoes = []
+            geometrias_separadas = []
+            
+            # Analisa cada fragmento separadamente
+            for i, part in enumerate(parts):
+                part_ee = ee.Geometry(part)
+                area_ha = part_ee.area().divide(10000).getInfo()
+                opcoes.append(f"Gleba {i+1} ({area_ha:.1f} ha)")
+                geometrias_separadas.append(part_ee)
+            
+            st.info("🌍 O perímetro contém múltiplas áreas separadas. Selecione a gleba para gerar a imagem:")
+            selecao = st.selectbox("Selecione a Gleba", opcoes, label_visibility="collapsed", on_change=utils.reset_preview)
+            
+            # Pega apenas a geometria que o usuário escolheu
+            idx = opcoes.index(selecao)
+            geom_alvo = geometrias_separadas[idx]
+            area_alvo_ha = float(selecao.split('(')[1].replace(' ha)', ''))
+        else:
+            geom_alvo = geometry
+            area_alvo_ha = geom_alvo.area().divide(10000).getInfo()
+    else:
+        geom_alvo = geometry
+        area_alvo_ha = geom_alvo.area().divide(10000).getInfo()
+
+    # ==========================================
+    # 🛡️ TRAVA DE ESCALA (DYNAMIC SCALE)
+    # ==========================================
+    escala_processamento = 10 # Padrão máximo do Sentinel (10m)
+    
+    if area_alvo_ha > 20000:
+        escala_processamento = 30
+    elif area_alvo_ha > 5000:
+        escala_processamento = 20
+        
+    if escala_processamento > 10:
+        st.caption(f"⚠️ *Devido à extensão da gleba ({area_alvo_ha:.1f} ha), a resolução do cálculo/download foi ajustada automaticamente para {escala_processamento}m.*")
+
+    st.divider()
 
     # --- Lógica de Data Dinâmica ---
     agora = datetime.now()
@@ -31,13 +82,14 @@ def render_tab():
         ano = st.selectbox("Ano", lista_anos, index=idx_ano_atual, label_visibility="collapsed", on_change=utils.reset_preview)
     with c4:
         with st.popover("⚙️", use_container_width=True):
-            buffer_metros = st.slider("Buffer (m)", 0, 2000, 500, step=100, on_change=utils.reset_preview)
+            # AUMENTADO O BUFFER PARA 5.000 METROS
+            buffer_metros = st.slider("Buffer (m)", 0, 5000, 500, step=100, on_change=utils.reset_preview)
             max_nuvens = st.slider("Máx. Nuvens (%)", 0, 100, 30, on_change=utils.reset_preview)
     with c5:
         with st.popover("🎨", use_container_width=True):
             tipo_visualizacao = st.radio("Tipo:", ["RGB", "NDVI", "Falsa Cor"], label_visibility="collapsed", on_change=utils.reset_preview)
     with c6: 
-        btn_visualizar = st.button("👁️ Visualizar", use_container_width=True)
+        btn_visualizar = st.button("👁️ Visualizar", type="primary", use_container_width=True)
     with c7: 
         btn_adicionar = st.button("➕ Adicionar", use_container_width=True)
 
@@ -51,15 +103,17 @@ def render_tab():
     with st.container():
         m = geemap.Map(center=[-14, -50], zoom=4, draw_control=False, scale_control=True)
         m.add_basemap("HYBRID")
-        m.centerObject(geometry, 13)
+        
+        # Centraliza na gleba selecionada
+        m.centerObject(geom_alvo, 13)
 
         # PROCESSAMENTO (Visualizar)
         if btn_visualizar:
             utils.reset_preview()
-            with st.spinner("Processando Sentinel-2..."):
+            with st.spinner("Processando Sentinel-2 (Isso pode levar alguns segundos)..."):
                 try:
-                    # Define região de visualização (Box)
-                    region_viz = geometry.bounds().buffer(buffer_metros)
+                    # Define região de visualização (Box da Gleba + Buffer)
+                    region_viz = geom_alvo.bounds().buffer(buffer_metros)
                     
                     coll = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                         .filterBounds(region_viz)
@@ -91,8 +145,8 @@ def render_tab():
                             download_bands = ['NDVI']
                             type_suffix = "NDVI"
                             
-                            # Stats
-                            stats = img.reduceRegion(ee.Reducer.mean(), geometry, 30, crs='EPSG:4326', maxPixels=1e9).getInfo()
+                            # Stats (Usa a escala inteligente para não travar)
+                            stats = img.reduceRegion(ee.Reducer.mean(), geom_alvo, escala_processamento, crs='EPSG:4326', maxPixels=1e10).getInfo()
                             val = stats['NDVI'] if stats['NDVI'] else 0
                             cor = "#2ecc71" if val > 0.6 else "#f1c40f" if val > 0.3 else "#e74c3c"
                             st.session_state['ndvi_stats'] = f"""<div style="position: fixed; bottom: 30px; right: 10px; z-index:9999; background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-family: sans-serif; text-align: center;"><div style="font-size: 12px; color: #555;">Vigor M&eacute;dio ({mes}/{ano})</div><div style="font-size: 20px; font-weight: bold; color: {cor};">{val:.2f}</div></div>"""
@@ -103,29 +157,30 @@ def render_tab():
                         raw_source = st.session_state.get('source_name', 'Imovel')
                         
                         if "CAR:" in raw_source:
-                            # Se for CAR, usa apenas "CAR" como prefixo
                             file_prefix = "CAR"
                         elif "KML:" in raw_source:
-                            # Se for KML, usa o nome do arquivo limpo (sem extensão e espaços)
-                            # Ex: "KML: Minha Fazenda.kml" -> "Minha_Fazenda"
                             clean_name = raw_source.replace("KML: ", "").replace(".kml", "").replace(".kmz", "").strip()
                             file_prefix = clean_name.replace(" ", "_")
                         else:
                             file_prefix = "Sentinel"
                             
-                        # Nome Final: {Prefixo}_{Tipo}_{Mes}_{Ano}
-                        filename_final = f"{file_prefix}_{type_suffix}_{mes}_{ano}"
+                        # Se tiver múltiplas glebas, adiciona no nome do arquivo
+                        if is_multipart:
+                            gleba_num = selecao.split(" ")[1]
+                            filename_final = f"{file_prefix}_Gleba{gleba_num}_{type_suffix}_{mes}_{ano}"
+                        else:
+                            filename_final = f"{file_prefix}_{type_suffix}_{mes}_{ano}"
 
                         # --- GERAÇÃO DO LINK DE DOWNLOAD ---
                         img_download = img.select(download_bands)
                         
                         params_download = {
-                            'name': filename_final, # Nome que aparecerá no download
-                            'scale': 10,
+                            'name': filename_final, 
+                            'scale': escala_processamento, # Usa a escala inteligente
                             'crs': 'EPSG:4326',
                             'region': region_viz, 
                             'format': 'GEO_TIFF',
-                            'maxPixels': 1e9
+                            'maxPixels': 1e13 # Aumentado o teto para não quebrar
                         }
                         
                         url = img_download.getDownloadURL(params_download)
@@ -136,12 +191,12 @@ def render_tab():
                             'name': nome_camada, 
                             'type': tipo_visualizacao,
                             'download_url': url,
-                            'filename': filename_final # Salva nome para usar no botão
+                            'filename': filename_final 
                         }
                     else: 
                         st.warning(f"☁️ Nenhuma imagem encontrada em {mes}/{ano} com menos de {max_nuvens}% de nuvens.")
                 except Exception as e: 
-                    st.error(f"Erro GEE: {e}")
+                    st.error(f"Erro no Google Earth Engine: {e}")
 
         # RENDER LAYERS
         for c in st.session_state['camadas_fixas']: 
@@ -156,29 +211,36 @@ def render_tab():
                 if st.session_state['ndvi_stats']: m.add_html(st.session_state['ndvi_stats'])
 
             if prev.get('download_url'):
-                # Botão de Download com o nome correto
+                # Botão Secundário (Cinza Outline) conforme nosso CSS
                 st.markdown(f"""
                     <div style="text-align: center; margin-bottom: 10px;">
                         <a href="{prev['download_url']}" target="_blank" style="text-decoration: none;">
                             <button style="
-                                background-color: #2c3e50; 
-                                color: white; 
-                                border: none; 
+                                background-color: transparent; 
+                                color: #2C3E50; 
+                                border: 1px solid #2C3E50; 
                                 padding: 10px 20px; 
                                 border-radius: 6px; 
                                 cursor: pointer; 
                                 font-weight: 600;
-                                box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                                transition: background-color 0.2s;">
+                                transition: all 0.3s ease;"
+                                onmouseover="this.style.backgroundColor='#2C3E50'; this.style.color='white';"
+                                onmouseout="this.style.backgroundColor='transparent'; this.style.color='#2C3E50';">
                                 📥 Baixar TIFF ({prev.get('filename', 'imagem')}.tif)
                             </button>
                         </a>
                     </div>
                 """, unsafe_allow_html=True)
 
+        # Desenha a geometria total (em cinza claro/fino) e a Gleba Alvo (em Vermelho forte)
         empty = ee.Image().byte()
-        outline = empty.paint(ee.FeatureCollection(geometry), 1, 2)
-        m.add_layer(outline, {'palette': 'FF0000'}, "📍 Limite Oficial")
+        if is_multipart:
+            outline_full = empty.paint(geometry, 1, 1)
+            m.add_layer(outline_full, {'palette': 'gray'}, "Todas as Áreas", False)
+            
+        outline_alvo = empty.paint(ee.FeatureCollection(geom_alvo), 1, 3)
+        m.add_layer(outline_alvo, {'palette': 'FF0000'}, "📍 Área Selecionada")
+        
         m.add_layer_control()
 
         with io.BytesIO() as buffer:
@@ -186,6 +248,7 @@ def render_tab():
             map_html = buffer.getvalue().decode('utf-8')
         st.components.v1.html(map_html, height=650, scrolling=False)
         
-        if st.button("🗑️ Limpar Mapa"):
-            utils.limpar_tudo()
+        # O botão Limpar fica Cinza conforme CSS
+        if st.button("🗑️ Limpar Mapa", use_container_width=True):
+            utils.limpar_analises()
             st.rerun()
