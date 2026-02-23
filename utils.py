@@ -36,28 +36,21 @@ def init_gee():
     try:
         # 1. Verifica se estamos na nuvem (tem secrets)
         if "earth_engine" in st.secrets:
-            # Define onde o GEE procura as senhas no Linux
             credentials_path = os.path.expanduser("~/.config/earthengine/")
             credentials_file = os.path.join(credentials_path, "credentials")
 
-            # Cria a pasta se não existir
             if not os.path.exists(credentials_path):
                 os.makedirs(credentials_path)
 
-            # Pega o texto exato que salvamos no site e escreve no arquivo
             token_content = st.secrets["earth_engine"]["token"]
             
             with open(credentials_file, "w") as f:
                 f.write(token_content)
             
-            print(f"✅ Credenciais salvas em: {credentials_file}")
-
-        # 2. Inicializa (Agora ele vai ler o arquivo que acabamos de criar)
-        # Tenta usar o projeto padrão se definido, ou força o seu projeto
+        # 2. Inicializa
         try:
             ee.Initialize()
         except Exception:
-            # Se falhar sem projeto, força o projeto explícito
             ee.Initialize(project='ee-julioczcosta')
             
     except Exception as e:
@@ -66,24 +59,18 @@ def init_gee():
 
 # Chama a função
 init_gee()
+
 def init_session_state():
     """Inicializa variáveis básicas da sessão."""
-    # Sentinel
     if 'camadas_fixas' not in st.session_state: st.session_state['camadas_fixas'] = []
     if 'camada_preview' not in st.session_state: st.session_state['camada_preview'] = None
     if 'ndvi_stats' not in st.session_state: st.session_state['ndvi_stats'] = None
     if 'ndvi_colorbar' not in st.session_state: st.session_state['ndvi_colorbar'] = None
-    
-    # Geometria Principal (Confirmada)
     if 'current_geometry' not in st.session_state: st.session_state['current_geometry'] = None
     if 'source_name' not in st.session_state: st.session_state['source_name'] = "Nenhuma seleção"
-    
-    # Variáveis de Preview (Home)
     if 'preview_geometry' not in st.session_state: st.session_state['preview_geometry'] = None
     if 'preview_data' not in st.session_state: st.session_state['preview_data'] = None
     if 'last_car_searched' not in st.session_state: st.session_state['last_car_searched'] = None
-    
-    # Variáveis de Consulta CAR
     if 'car_consultado' not in st.session_state: st.session_state['car_consultado'] = None
 
 def limpar_analises():
@@ -92,7 +79,6 @@ def limpar_analises():
         'clim_temp', 'clim_rain', 'erro_clima_temp', 'erro_clima_rain', 'last_clim_source',
         'camada_preview', 'camadas_fixas', 'ndvi_stats', 'ndvi_colorbar', 'ctx_dados'
     ]
-    
     for k in keys_to_delete:
         if k in st.session_state:
             del st.session_state[k]
@@ -101,7 +87,6 @@ def limpar_analises():
     st.session_state['camada_preview'] = None
 
 def reset_preview():
-    """Limpa apenas o preview do Sentinel."""
     st.session_state['camada_preview'] = None
     st.session_state['ndvi_stats'] = None
     st.session_state['ndvi_colorbar'] = None
@@ -124,7 +109,6 @@ def get_legacy_session():
     return session
 
 def get_car_geometry(codigo_car):
-    """Busca geometria do imóvel no WFS do SICAR."""
     try:
         if '-' not in codigo_car:
             return None, None, "Formato inválido. Use Ex: UF-CODIGO..."
@@ -163,7 +147,6 @@ def get_car_geometry(codigo_car):
 
 @st.cache_data
 def processar_kml_conteudo(kml_content):
-    """Lê arquivo KML (XML) e converte para geometria Earth Engine diretamente."""
     try:
         kml_str = kml_content.decode('utf-8', errors='ignore')
         tree = ET.fromstring(kml_str)
@@ -191,83 +174,105 @@ def processar_kml_conteudo(kml_content):
 # ==========================================
 
 def _force_2d(geometry):
-    """Remove a coordenada Z (altitude) das geometrias para evitar erros."""
     if geometry.has_z:
         return transform(lambda x, y, z: (x, y), geometry)
     return geometry
 
 def carregar_kml_geopandas(uploaded_file):
-    """
-    Lê KML, KMZ ou ZIP e retorna um GeoDataFrame (GPD) consolidado com TODAS as geometrias.
-    Usa Geopandas e Fiona para processar arquivos complexos.
-    """
     if gpd is None: return None, "Biblioteca Geopandas não instalada."
-
     try:
-        # Cria diretório temporário
         temp_dir = tempfile.mkdtemp()
         file_path = os.path.join(temp_dir, uploaded_file.name)
-        
-        # Salva o arquivo enviado
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
         target_file = file_path
-
-        # Lógica de extração para KMZ ou ZIP
         if uploaded_file.name.lower().endswith(('.kmz', '.zip')):
             with zipfile.ZipFile(file_path, 'r') as z:
-                # Procura por arquivo .kml dentro do zip/kmz
                 kml_filename = [n for n in z.namelist() if n.lower().endswith('.kml')]
                 if not kml_filename:
-                    return None, "Nenhum arquivo .kml encontrado dentro do pacote."
+                    return None, "Nenhum arquivo .kml encontrado."
                 z.extract(kml_filename[0], temp_dir)
                 target_file = os.path.join(temp_dir, kml_filename[0])
 
         gdfs = []
-        # Tenta listar camadas. KMLs complexos podem ter várias (ex: Pontos, Linhas, Polígonos).
-        try:
-            layers = fiona.listlayers(target_file)
-        except:
-            layers = [0] # Fallback se não conseguir listar
+        try: layers = fiona.listlayers(target_file)
+        except: layers = [0] 
 
         for layer in layers:
             try:
-                # Lê a camada específica
                 gdf = gpd.read_file(target_file, layer=layer)
-                
                 if not gdf.empty:
-                    # Remove Z (3D) para evitar erro no GEE ou Shapefile
                     gdf.geometry = gdf.geometry.apply(_force_2d)
-                    
-                    # Padroniza CRS para WGS84
                     if gdf.crs is None:
                         gdf.set_crs(epsg=4326, inplace=True)
                     else:
                         gdf = gdf.to_crs(epsg=4326)
-                    
                     gdfs.append(gdf)
-            except Exception:
-                continue # Pula camadas vazias ou inválidas
+            except Exception: continue
 
-        if not gdfs:
-            return None, "Nenhuma geometria válida encontrada."
-
-        # Consolida pontos, linhas e polígonos num único GeoDataFrame
+        if not gdfs: return None, "Nenhuma geometria válida encontrada."
         gdf_final = pd.concat(gdfs, ignore_index=True)
-        
-        # Limpa diretório temporário (opcional, SO limpa depois)
         try: shutil.rmtree(temp_dir)
         except: pass
 
         return gdf_final, None
-
     except Exception as e:
         return None, f"Erro ao processar arquivo: {str(e)}"
 
 # ==========================================
-# 5. DADOS DE CONTEXTO
+# 5. DADOS DE CONTEXTO E INTERSECÇÃO GEE
 # ==========================================
+
+@st.cache_data(show_spinner=False)
+def obter_municipios_interseccao(_geom_gee, cache_id):
+    """
+    Cruza o imóvel com a malha municipal do IBGE via GEE e calcula porcentagem de área.
+    Retorna uma lista de municípios que tocam a propriedade.
+    """
+    try:
+        # Malha oficial do IBGE 2020 no MapBiomas
+        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
+        interseccao = mun_col.filterBounds(_geom_gee)
+
+        def calc_area(feat):
+            inter = feat.geometry().intersection(_geom_gee, 10)
+            area_ha = inter.area(10).divide(10000)
+            return feat.set('area_imovel_ha', area_ha)
+
+        muns_area = interseccao.map(calc_area)
+        features = muns_area.getInfo()['features']
+
+        resultados = []
+        area_total = 0
+
+        for f in features:
+            props = f['properties']
+            nome = props.get('NM_MUN', 'Desconhecido')
+            uf = props.get('SIGLA_UF', '')
+            area = props.get('area_imovel_ha', 0)
+            cod_ibge = props.get('CD_MUN')
+
+            # Considera apenas intersecções > 0.05 ha para evitar erros de desenho
+            if area > 0.05:
+                resultados.append({
+                    'municipio': f"{nome} - {uf}".strip(" -"),
+                    'nome_puro': nome,
+                    'uf': uf,
+                    'area_ha': area,
+                    'cod_ibge': str(cod_ibge)
+                })
+                area_total += area
+
+        # Calcula porcentagem e ordena
+        for r in resultados:
+            r['porcentagem'] = (r['area_ha'] / area_total) * 100 if area_total > 0 else 0
+        
+        resultados = sorted(resultados, key=lambda x: x['area_ha'], reverse=True)
+        return resultados
+
+    except Exception as e:
+        return [{"erro": str(e)}]
 
 @st.cache_data
 def get_koppen_class(lat, lon):
@@ -281,7 +286,6 @@ def get_koppen_class(lat, lon):
                 return feature['properties']
     except Exception: pass
         
-    # Fallback aproximado se não achar o arquivo
     if lat > -10: code, desc = "Am", "Tropical de Monção"
     elif lat > -20: code, desc = "Aw", "Tropical de Savana"
     elif lat > -25: code, desc = "Cwa", "Subtropical Úmido (Inverno Seco)"
@@ -289,38 +293,11 @@ def get_koppen_class(lat, lon):
     return {"Classificacao": code, "Descricao": desc}
 
 @st.cache_data
-def get_ibge_context(lat, lon):
+def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
+    """Busca dados populacionais e territoriais do IBGE usando o código."""
     try:
         session = requests.Session()
-        headers = {"User-Agent": "GeoDashboard/1.0"}
         
-        # Geolocalização Reversa (Nominatim)
-        url_geo = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10"
-        try:
-            resp_geo = session.get(url_geo, headers=headers, timeout=5)
-            data_geo = resp_geo.json()
-            address = data_geo.get("address", {})
-            cidade = address.get("city") or address.get("town") or address.get("village") or address.get("municipality")
-            state_raw = address.get("ISO3166-2-lvl4", "") 
-            uf = state_raw.split("-")[1] if "-" in state_raw else "BR"
-            if not cidade: return {"erro": "Local não identificado."}
-        except: return {"erro": "Erro na geolocalização."}
-
-        # Busca Município no IBGE
-        url_loc = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios"
-        resp_loc = session.get(url_loc, timeout=5)
-        lista = resp_loc.json()
-        
-        def normalizar(s): return s.lower().replace("á","a").replace("ã","a").replace("â","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u").replace("ç","c")
-        
-        target = normalizar(cidade)
-        municipio_alvo = next((m for m in lista if normalizar(m['nome']) == target), None)
-        if not municipio_alvo: municipio_alvo = next((m for m in lista if target in normalizar(m['nome'])), None)
-        if not municipio_alvo: return {"erro": f"Município {cidade} não encontrado."}
-        
-        cod_ibge = municipio_alvo['id']
-        nome_oficial = municipio_alvo['nome']
-
         # População e Área
         populacao, area_km2 = None, None
         try:
@@ -335,7 +312,7 @@ def get_ibge_context(lat, lon):
 
         densidade = (populacao / area_km2) if (populacao and area_km2) else None
 
-        # Regiões (Intermediária e Imediata via WFS)
+        # Regiões (Intermediária e Imediata via WFS do IBGE usando o centroide)
         reg_int, reg_ime = "---", "---"
         try:
             bbox = f"{lon-0.001},{lat-0.001},{lon+0.001},{lat+0.001}"
@@ -350,7 +327,8 @@ def get_ibge_context(lat, lon):
         except: pass
 
         return {
-            "municipio": nome_oficial, "uf": uf, "area_km2": area_km2, "populacao": populacao, "densidade": densidade, "codigo_ibge": cod_ibge,
+            "municipio": nome_oficial, "uf": uf, "area_km2": area_km2, "populacao": populacao, 
+            "densidade": densidade, "codigo_ibge": cod_ibge,
             "regiao_intermediaria": reg_int, "regiao_imediata": reg_ime
         }
     except Exception as e: return {"erro": str(e)}
@@ -362,13 +340,11 @@ def get_bacia_info(lat, lon):
         url = "https://geoservicos.ibge.gov.br/geoserver/ows"
         bbox = f"{lon-0.01},{lat-0.01},{lon+0.01},{lat+0.01}"
         
-        # Tenta Nível 6 (Mais detalhado)
         try:
             r = session.get(url, params={"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_6", "outputFormat": "application/json", "bbox": bbox}, timeout=6).json()
             props = r["features"][0]["properties"] if r.get("features") else {}
         except: props = {}
 
-        # Fallback Nível 4
         if not props:
             try:
                 r = session.get(url, params={"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_4", "outputFormat": "application/json", "bbox": bbox}, timeout=6).json()
@@ -390,13 +366,11 @@ def get_bacia_info(lat, lon):
 # ==========================================
 
 def convert_gee_to_gdf(gee_geometry, properties):
-    """Converte geometria GEE e propriedades para GeoDataFrame."""
     if gpd is None: return None
     try:
         geojson = gee_geometry.getInfo()
         shapely_geom = shape(geojson)
-        if not properties or not isinstance(properties, dict):
-            properties = {}
+        if not properties or not isinstance(properties, dict): properties = {}
         gdf = gpd.GeoDataFrame([properties], geometry=[shapely_geom])
         gdf.set_crs(epsg=4326, inplace=True)
         return gdf
@@ -405,7 +379,6 @@ def convert_gee_to_gdf(gee_geometry, properties):
         return None
 
 def gerar_kml_bytes(gdf, nome_arquivo):
-    """Gera bytes de um arquivo KML."""
     if gpd is None: return None
     try:
         with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp:
@@ -416,17 +389,12 @@ def gerar_kml_bytes(gdf, nome_arquivo):
         return gdf.to_json().encode('utf-8')
 
 def gerar_shapefile_zip(gdf):
-    """Gera um ZIP contendo o Shapefile."""
     if gpd is None: return None
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             nome_base = "imovel_car"
             caminho_completo = os.path.join(temp_dir, nome_base + ".shp")
-            
-            # Salva o shapefile
             gdf.to_file(caminho_completo, encoding='utf-8')
-            
-            # Zipa os arquivos gerados
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                 for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
@@ -434,14 +402,12 @@ def gerar_shapefile_zip(gdf):
                     caminho_arq = os.path.join(temp_dir, arquivo)
                     if os.path.exists(caminho_arq):
                         zip_file.write(caminho_arq, arcname=arquivo)
-            
             return zip_buffer.getvalue()
     except Exception as e:
         print(f"Erro SHP: {e}")
         return None
 
 def gerar_geopackage_bytes(gdf):
-    """Gera bytes de um arquivo GPKG."""
     if gpd is None: return None
     try:
         with tempfile.NamedTemporaryFile(suffix='.gpkg', delete=False) as tmp:
