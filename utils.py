@@ -221,17 +221,12 @@ def carregar_kml_geopandas(uploaded_file):
         return None, f"Erro ao processar arquivo: {str(e)}"
 
 # ==========================================
-# 5. DADOS DE CONTEXTO E INTERSECÇÃO GEE
+# 5. DADOS DE CONTEXTO E ALTIMETRIA
 # ==========================================
 
 @st.cache_data(show_spinner=False)
 def obter_municipios_interseccao(_geom_gee, cache_id):
-    """
-    Cruza o imóvel com a malha municipal do IBGE via GEE e calcula porcentagem de área.
-    Retorna uma lista de municípios que tocam a propriedade.
-    """
     try:
-        # Malha oficial do IBGE 2020 no MapBiomas
         mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
         interseccao = mun_col.filterBounds(_geom_gee)
 
@@ -253,7 +248,6 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
             area = props.get('area_imovel_ha', 0)
             cod_ibge = props.get('CD_MUN')
 
-            # Considera apenas intersecções > 0.05 ha para evitar erros de desenho
             if area > 0.05:
                 resultados.append({
                     'municipio': f"{nome} - {uf}".strip(" -"),
@@ -264,7 +258,6 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
                 })
                 area_total += area
 
-        # Calcula porcentagem e ordena
         for r in resultados:
             r['porcentagem'] = (r['area_ha'] / area_total) * 100 if area_total > 0 else 0
         
@@ -273,6 +266,43 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
 
     except Exception as e:
         return [{"erro": str(e)}]
+
+@st.cache_data(show_spinner=False)
+def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
+    """
+    Calcula a altitude média. Tenta primeiro usar a malha oficial do município.
+    Se falhar, usa um buffer gigante em volta do centroide (Plano B).
+    """
+    try:
+        srtm = ee.Image('USGS/SRTMGL1_003')
+        
+        try:
+            # Tenta pegar a malha do município no MapBiomas
+            mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
+            municipio = mun_col.filter(ee.Filter.or_(
+                ee.Filter.eq('CD_MUN', str(cod_ibge)),
+                ee.Filter.eq('CD_MUN', int(cod_ibge))
+            )).first()
+            geom_alvo = municipio.geometry()
+        except:
+            # Plano B: Cria um raio de 15km ao redor do centroide da fazenda
+            geom_alvo = ee.Geometry.Point([lon_fallback, lat_fallback]).buffer(15000)
+
+        # Calcula a média (escala 90m para não explodir a memória)
+        stats = srtm.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geom_alvo,
+            scale=90,
+            maxPixels=1e13,
+            bestEffort=True
+        ).getInfo()
+
+        altitude_media = stats.get('elevation', 0)
+        if altitude_media is None: altitude_media = 0
+        
+        return {"media": altitude_media}
+    except Exception as e:
+        return {"erro": str(e)}
 
 @st.cache_data
 def get_koppen_class(lat, lon):
@@ -294,11 +324,9 @@ def get_koppen_class(lat, lon):
 
 @st.cache_data
 def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
-    """Busca dados populacionais e territoriais do IBGE usando o código."""
     try:
         session = requests.Session()
         
-        # População e Área
         populacao, area_km2 = None, None
         try:
             r_pop = session.get(f"https://apisidra.ibge.gov.br/values/t/4714/n6/{cod_ibge}/v/93/p/last%201", timeout=5).json()
@@ -312,7 +340,6 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
 
         densidade = (populacao / area_km2) if (populacao and area_km2) else None
 
-        # Regiões (Intermediária e Imediata via WFS do IBGE usando o centroide)
         reg_int, reg_ime = "---", "---"
         try:
             bbox = f"{lon-0.001},{lat-0.001},{lon+0.001},{lat+0.001}"
@@ -415,32 +442,3 @@ def gerar_geopackage_bytes(gdf):
             tmp.seek(0)
             return tmp.read()
     except: return None
-    
-@st.cache_data(show_spinner=False)
-def get_altimetria_municipio(cod_ibge):
-    """
-    Calcula a altitude média de todo o território do município usando SRTM e a malha do IBGE no GEE.
-    """
-    try:
-        # Puxa a malha de municípios e filtra pelo código IBGE exato
-        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
-        municipio = mun_col.filter(ee.Filter.eq('CD_MUN', str(cod_ibge))).first()
-        geom_mun = municipio.geometry()
-
-        # Puxa o SRTM (Modelo de Elevação)
-        srtm = ee.Image('USGS/SRTMGL1_003')
-
-        # Calcula a média no município todo
-        # Escala de 90m e bestEffort=True garantem que não vai dar erro de limite de memória
-        stats = srtm.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=geom_mun,
-            scale=90,
-            maxPixels=1e13,
-            bestEffort=True
-        ).getInfo()
-
-        altitude_media = stats.get('elevation', 0)
-        return {"media": altitude_media}
-    except Exception as e:
-        return {"erro": str(e)}
