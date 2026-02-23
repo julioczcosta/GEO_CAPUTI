@@ -120,7 +120,7 @@ def render_tab():
         ano = st.selectbox("Ano", lista_anos, index=idx_ano_atual, label_visibility="collapsed", on_change=utils.reset_preview)
     with c4:
         with st.popover("⚙️", use_container_width=True):
-            buffer_metros = st.slider("Buffer (m)", 0, 5000, 500, step=100, on_change=utils.reset_preview)
+            buffer_metros = st.slider("Buffer (m)", 0, 3000, 300, step=100, on_change=utils.reset_preview)
             max_nuvens = st.slider("Máx. Nuvens (%)", 0, 100, 30, on_change=utils.reset_preview)
     with c5:
         with st.popover("🎨", use_container_width=True):
