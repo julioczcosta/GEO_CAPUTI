@@ -5,6 +5,8 @@ import io
 import streamlit.components.v1 as components
 import utils
 from datetime import datetime
+from shapely.geometry import shape, mapping
+from shapely.ops import unary_union
 
 def render_tab():
     # 1. Verifica Geometria
@@ -15,60 +17,86 @@ def render_tab():
         return
 
     # ==========================================
-    # 🧠 INTELIGÊNCIA: SELETOR DE GLEBAS
+    # 🧠 INTELIGÊNCIA: CLUSTERING DE GLEBAS 
     # ==========================================
     is_multipart = False
     opcoes = []
     geometrias_separadas = []
+    area_total_ha = 0
     
-    try:
-        geom_type = geometry.type().getInfo()
-        
-        # Cenário 1: FeatureCollection (Comum em KMLs com várias áreas)
-        if geom_type == 'FeatureCollection':
-            count = geometry.size().getInfo()
-            if count > 1:
-                is_multipart = True
-                features = geometry.getInfo().get('features', [])
-                for i, f in enumerate(features):
-                    f_geom = ee.Geometry(f['geometry'])
-                    area_ha = f_geom.area().divide(10000).getInfo()
-                    opcoes.append(f"Gleba {i+1} ({area_ha:.1f} ha)")
-                    geometrias_separadas.append(f_geom)
-
-        # Cenário 2: MultiPolygon / GeometryCollection
-        elif geom_type in ['MultiPolygon', 'GeometryCollection']:
-            parts = geometry.geometries().getInfo()
-            if len(parts) > 1:
-                is_multipart = True
-                for i, part in enumerate(parts):
-                    part_ee = ee.Geometry(part)
-                    area_ha = part_ee.area().divide(10000).getInfo()
-                    opcoes.append(f"Gleba {i+1} ({area_ha:.1f} ha)")
-                    geometrias_separadas.append(part_ee)
+    with st.spinner("Analisando a topologia e distribuição das áreas..."):
+        try:
+            # Puxa os dados da nuvem para o Python
+            geom_dict = geometry.getInfo()
+            
+            # Normaliza se for FeatureCollection ou Geometria Pura
+            if geom_dict.get('type') == 'FeatureCollection':
+                geoms_base = [shape(f['geometry']) for f in geom_dict.get('features', [])]
+                shp_geom = unary_union(geoms_base)
+            else:
+                shp_geom = shape(geom_dict)
+            
+            # Se for múltiplo, tenta agrupar os próximos
+            if shp_geom.geom_type in ['MultiPolygon', 'GeometryCollection']:
+                # Extrai os polígonos individuais
+                poligonos = list(shp_geom.geoms) if shp_geom.geom_type == 'MultiPolygon' else [g for g in shp_geom.geoms if g.geom_type == 'Polygon']
+                
+                if len(poligonos) > 1:
+                    # 1. Agrupamento Inteligente (Buffer de ~220 metros / 0.002 graus)
+                    # Isso funde talhões separados por estradas, rios e carreadores.
+                    areas_infladas = unary_union([p.buffer(0.002) for p in poligonos])
                     
-    except Exception as e:
-        # Se a leitura falhar (KML muito gigante), previne o erro e segue
-        pass
+                    blocos_fundidos = [areas_infladas] if areas_infladas.geom_type == 'Polygon' else list(areas_infladas.geoms)
+                    
+                    # 2. Se depois de fundir os vizinhos, ainda sobrou mais de 1 bloco...
+                    if len(blocos_fundidos) > 1:
+                        is_multipart = True
+                        
+                        # Opção 0: Todos os Blocos Juntos
+                        area_total_ha = geometry.area().divide(10000).getInfo()
+                        opcoes.append(f"🟩 Visualizar Tudo Junto ({area_total_ha:.1f} ha)")
+                        geometrias_separadas.append(geometry)
+                        
+                        # Opções Individuais (Os Macro Blocos)
+                        for i, bloco_inflado in enumerate(blocos_fundidos):
+                            # Descobre quais talhões originais pertencem a esse Bloco Isolado
+                            pols_originais = [p for p in poligonos if p.intersects(bloco_inflado)]
+                            bloco_limpo = unary_union(pols_originais)
+                            
+                            # Devolve para o Google Earth Engine
+                            gee_bloco = ee.Geometry(mapping(bloco_limpo))
+                            area_ha = gee_bloco.area().divide(10000).getInfo()
+                            
+                            opcoes.append(f"📍 Bloco Isolado {i+1} ({area_ha:.1f} ha)")
+                            geometrias_separadas.append(gee_bloco)
+                            
+        except Exception as e:
+            # Se falhar por KML muito louco, roda normal como uma geometria única
+            pass
 
-    # Se detectou múltiplas áreas, exibe o seletor
+    # Se a inteligência detectou blocos isolados, exibe o menu
     if is_multipart:
-        st.info("🌍 O arquivo contém múltiplas áreas distintas. Selecione qual gleba deseja gerar a imagem:")
-        selecao = st.selectbox("Selecione a Gleba", opcoes, label_visibility="collapsed", on_change=utils.reset_preview)
+        st.info("🌍 Foram identificadas áreas geograficamente distantes. Escolha a porção para visualizar:")
+        selecao = st.selectbox("Selecione o Bloco", opcoes, label_visibility="collapsed", on_change=utils.reset_preview)
         
         idx = opcoes.index(selecao)
         geom_alvo = geometrias_separadas[idx]
-        area_alvo_ha = float(selecao.split('(')[1].replace(' ha)', ''))
+        
+        # Pega a área para a lógica da escala
+        if idx == 0:
+            area_alvo_ha = area_total_ha
+        else:
+            area_alvo_ha = float(selecao.split('(')[1].replace(' ha)', ''))
     else:
+        # Se for tudo juntinho (ou 1 polígono só), passa direto transparente
         geom_alvo = geometry
-        # Try/Except para evitar que o KML gigante quebre o cálculo de área
         try: area_alvo_ha = geom_alvo.area().divide(10000).getInfo()
         except: area_alvo_ha = 100
 
     # ==========================================
-    # 🛡️ TRAVA DE ESCALA (DYNAMIC SCALE)
+    # 🛡️ TRAVA DE ESCALA E SEGURANÇA (DYNAMIC SCALE)
     # ==========================================
-    escala_processamento = 10 # Padrão máximo do Sentinel (10m)
+    escala_processamento = 10 # Padrão máximo (10m)
     
     if area_alvo_ha > 20000:
         escala_processamento = 30
@@ -76,7 +104,7 @@ def render_tab():
         escala_processamento = 20
         
     if escala_processamento > 10:
-        st.caption(f"⚠️ *Devido à extensão ({area_alvo_ha:.1f} ha), a resolução do download foi ajustada automaticamente para {escala_processamento}m.*")
+        st.caption(f"⚠️ *Devido à extensão ({area_alvo_ha:.1f} ha), a resolução foi ajustada para {escala_processamento}m para não travar o download.*")
 
     st.divider()
 
@@ -107,7 +135,6 @@ def render_tab():
     with c7: 
         btn_adicionar = st.button("➕ Adicionar", use_container_width=True)
 
-    # Adicionar Camada Fixa
     if btn_adicionar and st.session_state['camada_preview']:
         st.session_state['camadas_fixas'].append(st.session_state['camada_preview'])
         st.toast("Camada fixada no mapa!")
@@ -118,18 +145,15 @@ def render_tab():
         m = geemap.Map(center=[-14, -50], zoom=4, draw_control=False, scale_control=True)
         m.add_basemap("HYBRID")
         
-        # Centraliza na gleba selecionada
         try: m.centerObject(geom_alvo, 13)
         except: pass
 
         # PROCESSAMENTO (Visualizar)
         if btn_visualizar:
             utils.reset_preview()
-            with st.spinner("Processando Sentinel-2..."):
+            with st.spinner("Buscando imagens e filtrando nuvens..."):
                 try:
-                    # 🚀 O SEGREDO DO BYPASS DE 180MB 🚀
-                    # Fazer bounds() -> buffer() -> bounds() força o Google a criar um 
-                    # retângulo exato de apenas 4 pontos. É ultraleve e nunca vai dar erro.
+                    # Trava Anti-180MB: Usando o bounds do buffer para alívio do servidor
                     region_viz = geom_alvo.bounds().buffer(buffer_metros, 100).bounds()
                     
                     coll = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
@@ -161,7 +185,6 @@ def render_tab():
                             download_bands = ['NDVI']
                             type_suffix = "NDVI"
                             
-                            # Stats com limite generoso de maxPixels
                             stats = img.reduceRegion(ee.Reducer.mean(), geom_alvo, escala_processamento, crs='EPSG:4326', maxPixels=1e13).getInfo()
                             val = stats['NDVI'] if stats['NDVI'] else 0
                             cor = "#2ecc71" if val > 0.6 else "#f1c40f" if val > 0.3 else "#e74c3c"
@@ -169,7 +192,6 @@ def render_tab():
                             grad = f"linear-gradient(to right, {', '.join(vis['palette'])})"
                             st.session_state['ndvi_colorbar'] = f"""<div style="position: fixed; bottom: 30px; left: 10px; z-index:9999; background: white; padding: 10px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-family: sans-serif;"><div style="font-size: 12px; color: #555; text-align: center; margin-bottom: 4px;">NDVI</div><div style="height: 12px; width: 150px; background: {grad}; border-radius: 4px;"></div><div style="display: flex; justify-content: space-between; font-size: 10px; color: #555; margin-top: 4px;"><span>Solo</span><span>Vigor</span></div></div>"""
 
-                        # --- CONSTRUÇÃO DO NOME DO ARQUIVO ---
                         raw_source = st.session_state.get('source_name', 'Imovel')
                         
                         if "CAR:" in raw_source: file_prefix = "CAR"
@@ -178,13 +200,12 @@ def render_tab():
                             file_prefix = clean_name.replace(" ", "_")
                         else: file_prefix = "Sentinel"
                             
-                        if is_multipart:
-                            gleba_num = selecao.split(" ")[1]
-                            filename_final = f"{file_prefix}_Gleba{gleba_num}_{type_suffix}_{mes}_{ano}"
+                        if is_multipart and selecao != opcoes[0]:
+                            gleba_num = selecao.split(" ")[2] # Extrai número do Bloco Isolado X
+                            filename_final = f"{file_prefix}_Bloco{gleba_num}_{type_suffix}_{mes}_{ano}"
                         else:
-                            filename_final = f"{file_prefix}_{type_suffix}_{mes}_{ano}"
+                            filename_final = f"{file_prefix}_AreaTotal_{type_suffix}_{mes}_{ano}"
 
-                        # --- GERAÇÃO DO LINK DE DOWNLOAD ---
                         img_download = img.select(download_bands)
                         
                         params_download = {
@@ -207,11 +228,11 @@ def render_tab():
                             'filename': filename_final 
                         }
                     else: 
-                        st.warning(f"☁️ Nenhuma imagem encontrada em {mes}/{ano} com menos de {max_nuvens}% de nuvens.")
+                        st.warning(f"☁️ Nenhuma imagem clara o suficiente encontrada (Máx. {max_nuvens}% nuvens).")
                 except Exception as e: 
                     st.error(f"Erro GEE: {e}")
 
-        # RENDER LAYERS
+        # Renderização das Camadas
         for c in st.session_state['camadas_fixas']: 
             m.add_layer(c['ee_object'], c['vis_params'], c['name'])
             
@@ -238,15 +259,15 @@ def render_tab():
                                 transition: all 0.3s ease;"
                                 onmouseover="this.style.backgroundColor='#2C3E50'; this.style.color='white';"
                                 onmouseout="this.style.backgroundColor='transparent'; this.style.color='#2C3E50';">
-                                📥 Baixar TIFF ({prev.get('filename', 'imagem')}.tif)
+                                📥 Baixar Imagem TIFF ({prev.get('filename', 'imagem')}.tif)
                             </button>
                         </a>
                     </div>
                 """, unsafe_allow_html=True)
 
-        # Desenha a geometria total e a Gleba Alvo
+        # Desenho das Geometrias
         empty = ee.Image().byte()
-        if is_multipart:
+        if is_multipart and selecao != opcoes[0]:
             try:
                 outline_full = empty.paint(geometry, 1, 1)
                 m.add_layer(outline_full, {'palette': 'gray'}, "Todas as Áreas", False)
@@ -254,7 +275,7 @@ def render_tab():
             
         try:
             outline_alvo = empty.paint(ee.FeatureCollection(geom_alvo), 1, 3)
-            m.add_layer(outline_alvo, {'palette': 'FF0000'}, "📍 Área Selecionada")
+            m.add_layer(outline_alvo, {'palette': 'FF0000'}, "📍 Bloco Selecionado")
         except: pass
         
         m.add_layer_control()
