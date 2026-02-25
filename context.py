@@ -169,7 +169,7 @@ def render_tab():
 
                     # --- LOGÍSTICA OFICIAL (Sede ➔ Capital) ---
                     st.divider()
-                    st.markdown("**🛣️ Logística Oficial (Sede ➔ Capital)**")
+                    st.markdown("**🛣️ Logística (Cidade -> Capital)**")
                     if "erro" in dados_rota:
                         st.warning(f"{dados_rota['erro']}")
                     else:
@@ -177,7 +177,7 @@ def render_tab():
                         c_rota1, c_rota2 = st.columns(2)
                         c_rota1.metric("Distância (Rodovia)", f"{dist_km} km")
                         c_rota2.metric("Tempo Estimado", dados_rota['tempo_estimado'])
-                        st.caption("Fonte: Coordenadas Sede IBGE | Rotas OSRM")
+                        st.caption("Fonte: Coordenadas IBGE / Rotas OSRM")
 
     # ==========================================
     # COLUNA 2: DADOS AMBIENTAIS E LEGAIS
