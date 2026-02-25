@@ -114,16 +114,17 @@ def render_tab():
                     escolha = st.selectbox("Selecione o município para consultar dados do IBGE:", nomes_opcoes)
                     mun_selecionado = next(m for m in dados_muns if m['municipio'] == escolha)
 
-        # --- DADOS DO IBGE E ALTIMETRIA ---
+        # --- DADOS DO IBGE, ALTIMETRIA E ROTAS ---
         st.write("")
         st.subheader("🏛️ Dados Político-Administrativos")
         
         if mun_selecionado:
-            with st.spinner("Consultando IBGE e Altimetria..."):
+            with st.spinner("Consultando IBGE, Altimetria e Rotas..."):
                 dados_ibge = utils.get_ibge_context_by_code(
                     mun_selecionado['cod_ibge'], mun_selecionado['nome_puro'], mun_selecionado['uf'], lat_dec, lon_dec
                 )
                 dados_altimetria = utils.get_altimetria_municipio(mun_selecionado['cod_ibge'], lat_dec, lon_dec)
+                dados_rota = utils.get_distancia_capital(mun_selecionado['cod_ibge'], mun_selecionado['uf'])
 
             if "erro" in dados_ibge:
                 st.error(f"{dados_ibge['erro']}")
@@ -135,7 +136,7 @@ def render_tab():
                     except: return str(num)
 
                 pop = fmt(dados_ibge['populacao'], 0)
-                area = fmt(dados_ibge['area_km2'], 0) # <-- Ajustado para 0
+                area = fmt(dados_ibge['area_km2'], 0)
                 dens = fmt(dados_ibge['densidade'], 2)
                 
                 # Trata a exibição da altitude
@@ -148,10 +149,8 @@ def render_tab():
                     
                     st.divider()
                     
-                    # --- AJUSTE DE LAYOUT PARA CABER NA TELA ---
                     c_a, c_b, c_c = st.columns(3)
                     
-                    # As unidades "hab" e "km²" foram para o título para poupar espaço no valor
                     c_a.metric("👥 População", pop)
                     c_b.metric("📏 Área (km²)", area)
                     c_c.metric("⛰️ Altitude média", f"{alt_media}m")
@@ -167,6 +166,18 @@ def render_tab():
                     * **Imediata:** {dados_ibge['regiao_imediata']}
                     """)
                     st.caption("Fonte: IBGE (Censo 2022) | NASA SRTM")
+
+                    # --- LOGÍSTICA OFICIAL (Sede ➔ Capital) ---
+                    st.divider()
+                    st.markdown("**🛣️ Logística Oficial (Sede ➔ Capital)**")
+                    if "erro" in dados_rota:
+                        st.warning(f"{dados_rota['erro']}")
+                    else:
+                        dist_km = f"{dados_rota['distancia_km']:.1f}".replace(".", ",")
+                        c_rota1, c_rota2 = st.columns(2)
+                        c_rota1.metric("Distância (Rodovia)", f"{dist_km} km")
+                        c_rota2.metric("Tempo Estimado", dados_rota['tempo_estimado'])
+                        st.caption("Fonte: Coordenadas Sede IBGE | Rotas OSRM")
 
     # ==========================================
     # COLUNA 2: DADOS AMBIENTAIS E LEGAIS

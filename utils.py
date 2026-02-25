@@ -442,3 +442,75 @@ def gerar_geopackage_bytes(gdf):
             tmp.seek(0)
             return tmp.read()
     except: return None
+
+# ==========================================
+# 7. LOGÍSTICA E ROTAS (OSRM)
+# ==========================================
+
+COORDENADAS_CAPITAIS = {
+    'AC': (-9.974, -67.807), 'AL': (-9.665, -35.735), 'AM': (-3.101, -60.025),
+    'AP': (0.034, -51.069), 'BA': (-12.971, -38.510), 'CE': (-3.717, -38.543),
+    'DF': (-15.779, -47.929), 'ES': (-20.315, -40.312), 'GO': (-16.679, -49.253),
+    'MA': (-2.530, -44.302), 'MG': (-19.920, -43.937), 'MS': (-20.442, -54.646),
+    'MT': (-15.595, -56.095), 'PA': (-1.455, -48.502), 'PB': (-7.115, -34.863),
+    'PE': (-8.047, -34.877), 'PI': (-5.089, -42.801), 'PR': (-25.428, -49.273),
+    'RJ': (-22.906, -43.172), 'RN': (-5.794, -35.211), 'RO': (-8.761, -63.903),
+    'RR': (2.823, -60.675), 'RS': (-30.027, -51.228), 'SC': (-27.595, -48.548),
+    'SE': (-10.947, -37.073), 'SP': (-23.550, -46.633), 'TO': (-10.212, -48.360)
+}
+
+@st.cache_data(show_spinner=False)
+def get_distancia_capital(cod_ibge, uf):
+    """
+    1. Busca a coordenada da sede do município no WFS do IBGE.
+    2. Puxa a capital do dicionário interno.
+    3. Calcula a distância de rodovia usando OSRM.
+    """
+    if uf not in COORDENADAS_CAPITAIS:
+        return {"erro": "UF não encontrada."}
+    
+    lat_cap, lon_cap = COORDENADAS_CAPITAIS[uf]
+    
+    # 1. Buscar a Sede do Município (Ponto A)
+    try:
+        session = requests.Session()
+        url_wfs = "https://geoservicos.ibge.gov.br/geoserver/ows"
+        params_wfs = {
+            "service": "WFS", "version": "1.0.0", "request": "GetFeature",
+            "typeName": "CCAR:BC250_2025_lml_cidade_p", "outputFormat": "application/json",
+            "cql_filter": f"geocodigo='{cod_ibge}'"
+        }
+        r_wfs = session.get(url_wfs, params=params_wfs, timeout=10)
+        
+        if r_wfs.status_code != 200 or not r_wfs.json().get("features"):
+            return {"erro": "Sede municipal não localizada no IBGE."}
+            
+        coords = r_wfs.json()["features"][0]["geometry"]["coordinates"]
+        lon_sede, lat_sede = coords[0], coords[1]
+        
+    except Exception as e:
+        return {"erro": f"Falha ao buscar sede: {e}"}
+
+    # 2. Calcular a Rota (Ponto A -> Ponto B)
+    try:
+        url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon_sede},{lat_sede};{lon_cap},{lat_cap}?overview=false"
+        r_osrm = requests.get(url_osrm, timeout=10)
+        
+        if r_osrm.status_code == 200:
+            dados = r_osrm.json()
+            if dados.get("code") == "Ok":
+                dist_km = dados["routes"][0]["distance"] / 1000
+                dur_h = dados["routes"][0]["duration"] / 3600
+                
+                # Formata o tempo bonito (ex: 4h 15m)
+                horas = int(dur_h)
+                minutos = int((dur_h - horas) * 60)
+                tempo_str = f"{horas}h {minutos}m" if horas > 0 else f"{minutos}m"
+                
+                return {
+                    "distancia_km": dist_km,
+                    "tempo_estimado": tempo_str
+                }
+        return {"erro": "Rota indisponível no OSRM."}
+    except Exception as e:
+        return {"erro": f"Falha no OSRM: {e}"}
