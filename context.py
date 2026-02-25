@@ -80,7 +80,9 @@ def render_tab():
     
     # --- 1. CONSULTA ESPACIAL AVANÇADA (INTERSECÇÃO) ---
     with st.spinner("Mapeando municípios afetados..."):
-        dados_muns = utils.obter_municipios_interseccao(geometry, source_name)
+        # Adicionamos a latitude e longitude no cache_id para forçar a atualização
+        chave_unica = f"{source_name}_{lat_dec}_{lon_dec}"
+        dados_muns = utils.obter_municipios_interseccao(geometry, chave_unica)
 
     col1, col2 = st.columns(2, gap="medium")
 
