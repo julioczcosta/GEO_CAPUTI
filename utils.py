@@ -546,6 +546,33 @@ def get_distancia_capital(cod_ibge, uf):
 # 8. REDAÇÃO DO LAUDO
 # ==========================================
 
+NOMES_CAPITAIS = {
+    'AC': 'Rio Branco', 'AL': 'Maceió', 'AM': 'Manaus', 'AP': 'Macapá',
+    'BA': 'Salvador', 'CE': 'Fortaleza', 'DF': 'Brasília', 'ES': 'Vitória',
+    'GO': 'Goiânia', 'MA': 'São Luís', 'MG': 'Belo Horizonte', 'MS': 'Campo Grande',
+    'MT': 'Cuiabá', 'PA': 'Belém', 'PB': 'João Pessoa', 'PE': 'Recife',
+    'PI': 'Teresina', 'PR': 'Curitiba', 'RJ': 'Rio de Janeiro', 'RN': 'Natal',
+    'RO': 'Porto Velho', 'RR': 'Boa Vista', 'RS': 'Porto Alegre', 'SC': 'Florianópolis',
+    'SE': 'Aracaju', 'SP': 'São Paulo', 'TO': 'Palmas'
+}
+
+LIMITES_ESTADOS = {
+    'AC': (-73.99, -11.14, -66.60, -7.11), 'AL': (-38.29, -10.50, -35.15, -8.81),
+    'AM': (-73.80, -9.81, -56.10, 2.24), 'AP': (-54.87, -1.23, -49.88, 4.30),
+    'BA': (-46.61, -18.34, -37.34, -8.53), 'CE': (-41.41, -7.86, -37.25, -2.78),
+    'DF': (-48.28, -16.05, -47.30, -15.50), 'ES': (-41.87, -21.30, -39.66, -17.89),
+    'GO': (-53.25, -19.49, -45.90, -12.39), 'MA': (-48.99, -10.26, -41.82, -1.04),
+    'MG': (-51.04, -22.92, -39.85, -14.23), 'MS': (-57.83, -24.06, -50.99, -17.16),
+    'MT': (-61.60, -18.04, -50.22, -7.84), 'PA': (-58.89, -9.84, -46.06, 2.59),
+    'PB': (-38.76, -8.30, -34.79, -6.02), 'PE': (-41.35, -9.48, -34.72, -7.04),
+    'PI': (-45.92, -10.92, -41.05, -2.74), 'PR': (-54.61, -26.71, -48.02, -22.51),
+    'RJ': (-44.88, -23.36, -40.96, -20.76), 'RN': (-38.58, -6.98, -34.97, -4.83),
+    'RO': (-66.80, -13.69, -59.77, -7.96), 'RR': (-64.82, -1.61, -58.88, 5.27),
+    'RS': (-57.64, -33.75, -49.69, -27.08), 'SC': (-53.83, -29.35, -48.36, -25.97),
+    'SE': (-38.24, -11.49, -36.39, -9.51), 'SP': (-53.11, -25.31, -44.16, -19.77),
+    'TO': (-50.74, -13.09, -45.52, -5.16)
+}
+
 def obter_direcao_estado(uf, lat, lon):
     """Calcula a posição cardeal (Norte, Sul, Leste, Centro) dividindo o estado em 9 quadrantes."""
     if uf not in LIMITES_ESTADOS: return "região"
