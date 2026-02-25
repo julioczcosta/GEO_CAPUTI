@@ -181,6 +181,29 @@ def render_tab():
                         c_rota2.metric("Tempo Estimado", dados_rota['tempo_estimado'])
                         st.caption("Fonte: Coordenadas IBGE / Rotas OSRM")
 
+                    # --- NOVO BLOCO: TEXTO RESUMO PARA O LAUDO ---
+                    st.divider()
+                    st.markdown("**📝 Redação Sugerida para o Laudo**")
+                    
+                    with st.spinner("Gerando redação do laudo..."):
+                        distancia_real = dados_rota.get('distancia_km', 0) if "erro" not in dados_rota else 0
+                        altitude_real = dados_altimetria.get('media', 0) if "erro" not in dados_altimetria else "N/A"
+                        
+                        texto_laudo = utils.gerar_texto_resumo_laudo(
+                            uf=mun_selecionado['uf'], 
+                            mun_nome=dados_ibge['municipio'], 
+                            pop=dados_ibge['populacao'], 
+                            area_km2=dados_ibge['area_km2'], 
+                            lat_dec=lat_dec,
+                            lon_dec=lon_dec,
+                            lat_dms=lat_dms, 
+                            lon_dms=lon_dms, 
+                            altitude=altitude_real, 
+                            dist_km=distancia_real
+                        )
+                    
+                    st.info(texto_laudo)
+
     # ==========================================
     # COLUNA 2: DADOS AMBIENTAIS E LEGAIS
     # ==========================================

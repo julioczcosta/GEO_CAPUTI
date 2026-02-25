@@ -459,6 +459,33 @@ COORDENADAS_CAPITAIS = {
     'SE': (-10.947, -37.073), 'SP': (-23.550, -46.633), 'TO': (-10.212, -48.360)
 }
 
+NOMES_CAPITAIS = {
+    'AC': 'Rio Branco', 'AL': 'Maceió', 'AM': 'Manaus', 'AP': 'Macapá',
+    'BA': 'Salvador', 'CE': 'Fortaleza', 'DF': 'Brasília', 'ES': 'Vitória',
+    'GO': 'Goiânia', 'MA': 'São Luís', 'MG': 'Belo Horizonte', 'MS': 'Campo Grande',
+    'MT': 'Cuiabá', 'PA': 'Belém', 'PB': 'João Pessoa', 'PE': 'Recife',
+    'PI': 'Teresina', 'PR': 'Curitiba', 'RJ': 'Rio de Janeiro', 'RN': 'Natal',
+    'RO': 'Porto Velho', 'RR': 'Boa Vista', 'RS': 'Porto Alegre', 'SC': 'Florianópolis',
+    'SE': 'Aracaju', 'SP': 'São Paulo', 'TO': 'Palmas'
+}
+
+LIMITES_ESTADOS = {
+    'AC': (-73.99, -11.14, -66.60, -7.11), 'AL': (-38.29, -10.50, -35.15, -8.81),
+    'AM': (-73.80, -9.81, -56.10, 2.24), 'AP': (-54.87, -1.23, -49.88, 4.30),
+    'BA': (-46.61, -18.34, -37.34, -8.53), 'CE': (-41.41, -7.86, -37.25, -2.78),
+    'DF': (-48.28, -16.05, -47.30, -15.50), 'ES': (-41.87, -21.30, -39.66, -17.89),
+    'GO': (-53.25, -19.49, -45.90, -12.39), 'MA': (-48.99, -10.26, -41.82, -1.04),
+    'MG': (-51.04, -22.92, -39.85, -14.23), 'MS': (-57.83, -24.06, -50.99, -17.16),
+    'MT': (-61.60, -18.04, -50.22, -7.84), 'PA': (-58.89, -9.84, -46.06, 2.59),
+    'PB': (-38.76, -8.30, -34.79, -6.02), 'PE': (-41.35, -9.48, -34.72, -7.04),
+    'PI': (-45.92, -10.92, -41.05, -2.74), 'PR': (-54.61, -26.71, -48.02, -22.51),
+    'RJ': (-44.88, -23.36, -40.96, -20.76), 'RN': (-38.58, -6.98, -34.97, -4.83),
+    'RO': (-66.80, -13.69, -59.77, -7.96), 'RR': (-64.82, -1.61, -58.88, 5.27),
+    'RS': (-57.64, -33.75, -49.69, -27.08), 'SC': (-53.83, -29.35, -48.36, -25.97),
+    'SE': (-38.24, -11.49, -36.39, -9.51), 'SP': (-53.11, -25.31, -44.16, -19.77),
+    'TO': (-50.74, -13.09, -45.52, -5.16)
+}
+
 @st.cache_data(show_spinner=False)
 def get_distancia_capital(cod_ibge, uf):
     """
@@ -514,3 +541,80 @@ def get_distancia_capital(cod_ibge, uf):
         return {"erro": "Rota indisponível no OSRM."}
     except Exception as e:
         return {"erro": f"Falha no OSRM: {e}"}
+
+# ==========================================
+# 8. REDAÇÃO DO LAUDO
+# ==========================================
+
+def obter_direcao_estado(uf, lat, lon):
+    """Calcula a posição cardeal (Norte, Sul, Leste, Centro) dividindo o estado em 9 quadrantes."""
+    if uf not in LIMITES_ESTADOS: return "região"
+    min_lon, min_lat, max_lon, max_lat = LIMITES_ESTADOS[uf]
+
+    terco_lat = (max_lat - min_lat) / 3
+    terco_lon = (max_lon - min_lon) / 3
+
+    if lat > max_lat - terco_lat: pos_lat = "norte"
+    elif lat < min_lat + terco_lat: pos_lat = "sul"
+    else: pos_lat = "central"
+
+    if lon > max_lon - terco_lon: pos_lon = "leste"
+    elif lon < min_lon + terco_lon: pos_lon = "oeste"
+    else: pos_lon = "central"
+
+    if pos_lat == "central" and pos_lon == "central": return "região central"
+    if pos_lat == "central": return f"região {pos_lon}"
+    if pos_lon == "central": return f"região {pos_lat}"
+    
+    # Cruzamentos (Nordeste, Noroeste, Sudeste, Sudoeste)
+    if pos_lat == "norte" and pos_lon == "leste": return "região nordeste"
+    if pos_lat == "norte" and pos_lon == "oeste": return "região noroeste"
+    if pos_lat == "sul" and pos_lon == "leste": return "região sudeste"
+    if pos_lat == "sul" and pos_lon == "oeste": return "região sudoeste"
+    
+    return "região"
+
+@st.cache_data(show_spinner=False)
+def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_dms, lon_dms, altitude, dist_km):
+    """
+    Gera o texto padronizado e coeso para o laudo.
+    """
+    try:
+        direcao = obter_direcao_estado(uf, lat_dec, lon_dec)
+
+        def formata_br(numero, decimais=0):
+            try:
+                if isinstance(numero, str) and numero == "N/A": return "N/A"
+                val = float(numero)
+                return f"{val:,.{decimais}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            except:
+                return str(numero)
+
+        pop_fmt = formata_br(pop, 0)
+        area_fmt = formata_br(area_km2, 3)
+        alt_fmt = formata_br(altitude, 0)
+        dist_fmt = formata_br(dist_km, 0)
+
+        nome_capital = NOMES_CAPITAIS.get(uf, "a capital")
+
+        # Texto para a CAPITAL
+        if mun_nome.upper() == nome_capital.upper():
+            texto = (
+                f"{mun_nome} é a capital do estado ({uf}), situada na {direcao}. "
+                f"Sua população é de {pop_fmt} habitantes, segundo estimativa do IBGE (Instituto Brasileiro de Geografia e Estatística), "
+                f"distribuídos em uma área de {area_fmt} quilômetros quadrados. "
+                f"Localiza-se a uma latitude {lat_dms} e a uma longitude {lon_dms}, a uma altitude de {alt_fmt} metros."
+            )
+        # Texto para o INTERIOR
+        else:
+            texto = (
+                f"{mun_nome} é um município brasileiro situado na {direcao} do estado, "
+                f"a aproximadamente {dist_fmt} quilômetros da capital, {nome_capital}. "
+                f"Sua população é de {pop_fmt} habitantes, segundo estimativa do IBGE (Instituto Brasileiro de Geografia e Estatística), "
+                f"distribuídos em uma área de {area_fmt} quilômetros quadrados. "
+                f"Localiza-se a uma latitude {lat_dms} e a uma longitude {lon_dms}, a uma altitude de {alt_fmt} metros."
+            )
+
+        return texto
+    except Exception as e:
+        return f"Erro ao gerar redação: {str(e)}"
