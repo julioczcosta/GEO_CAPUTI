@@ -183,7 +183,7 @@ def render_tab():
 
                     # --- NOVO BLOCO: TEXTO RESUMO PARA O LAUDO ---
                     st.divider()
-                    st.markdown("**📝 Redação Sugerida para o Laudo**")
+                    st.markdown("**📝 Resumo**")
                     
                     with st.spinner("Gerando redação do laudo..."):
                         distancia_real = dados_rota.get('distancia_km', 0) if "erro" not in dados_rota else 0
