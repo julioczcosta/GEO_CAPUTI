@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import io  # Necessário para criar o arquivo Excel na memória
+import utils # Importado para usarmos a função de Köppen
 
 # ==========================================
 # 0. CONFIGURAÇÕES E UTILITÁRIOS
@@ -42,6 +43,22 @@ def to_excel_horizontal(df, index_col='Mês'):
 # ==========================================
 # 1. FUNÇÕES DE DADOS (CACHE CORRIGIDO)
 # ==========================================
+
+@st.cache_data(show_spinner=False)
+def get_limites_municipio_clima(lon, lat):
+    """Busca a geometria oficial do município no MapBiomas para a análise climática."""
+    try:
+        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
+        mun_info = mun_col.filterBounds(ee.Geometry.Point([lon, lat])).limit(1).getInfo()['features']
+        if mun_info:
+            return {
+                "geojson": mun_info[0]['geometry'],
+                "nome": mun_info[0]['properties'].get('NM_MUN', 'Município'),
+                "uf": mun_info[0]['properties'].get('SIGLA_UF', '')
+            }
+    except Exception:
+        return None
+    return None
 
 @st.cache_data(show_spinner=False)
 def get_worldclim_data(_geometry, cache_id):
@@ -149,15 +166,56 @@ def render_tab():
         st.warning("⚠️ Selecione um imóvel na aba 'Início' primeiro.")
         return
 
-    # Limpeza automática ao mudar de imóvel
+    # Extrai o centroide para consultas de Município e Köppen
+    centroide = geometry.centroid(1).coordinates().getInfo()
+    lon_dec, lat_dec = centroide[0], centroide[1]
+
+    # Limpeza automática ao mudar de imóvel (agora varre todas as variáveis de clima)
     if st.session_state.get('last_clim_source') != source_name:
-        if 'clim_temp' in st.session_state: del st.session_state['clim_temp']
-        if 'clim_rain' in st.session_state: del st.session_state['clim_rain']
-        if 'erro_clima_temp' in st.session_state: del st.session_state['erro_clima_temp']
-        if 'erro_clima_rain' in st.session_state: del st.session_state['erro_clima_rain']
+        chaves_para_deletar = [k for k in st.session_state.keys() if k.startswith('clim_') or k.startswith('erro_clima')]
+        for k in chaves_para_deletar:
+            del st.session_state[k]
         st.session_state['last_clim_source'] = source_name
 
-    st.info(f"Análise Climática para: **{source_name}**")
+    # --- ESCOLHA DA ABRANGÊNCIA ---
+    st.write("Selecione a área de análise:")
+    abrangencia = st.radio(
+        "Abrangência:", 
+        options=["Município", "Perímetro do Imóvel"], 
+        index=0, 
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
+    # --- DEFINIR A GEOMETRIA ALVO ---
+    target_geometry = geometry
+    area_label = source_name
+    
+    # Criamos um sufixo para o cache e para o session_state não misturarem os dados
+    escopo_id = "mun" if abrangencia == "Município" else "perim"
+    chave_cache = f"{source_name}_{escopo_id}"
+
+    if abrangencia == "Município":
+        with st.spinner("Mapeando limites do município..."):
+            mun_dados = get_limites_municipio_clima(lon_dec, lat_dec)
+            if mun_dados:
+                target_geometry = ee.Geometry(mun_dados["geojson"])
+                area_label = f"{mun_dados['nome']} - {mun_dados['uf']}"
+            else:
+                st.warning("Município não localizado. Utilizando o perímetro do imóvel.")
+                escopo_id = "perim"
+                chave_cache = f"{source_name}_perim"
+
+    st.info(f"Gerando dados climáticos para: **{area_label}**")
+
+    # --- CLASSIFICAÇÃO KÖPPEN (Transferido do Contexto) ---
+    dados_koppen = utils.get_koppen_class(lat_dec, lon_dec)
+    if dados_koppen and "erro" not in dados_koppen:
+        sigla = dados_koppen.get('Classificacao', 'N/A')
+        desc = dados_koppen.get('Descricao', 'Sem descrição')
+        st.success(f"**Classificação Climática (Köppen):** {sigla} - {desc}", icon="🌡️")
+    
+    st.write("") # Espaçamento
     
     col_temp, col_rain = st.columns(2, gap="medium")
 
@@ -167,16 +225,19 @@ def render_tab():
         with st.container(border=True):
             st.markdown("**Médias Históricas (WorldClim)**")
             
-            if st.button("📉 Gerar Gráfico de Temperatura", use_container_width=True):
+            # Chaves únicas para o estado atual (Município vs Perímetro)
+            state_key_temp = f'clim_temp_{escopo_id}'
+            
+            if st.button("📉 Gerar Gráfico de Temperatura", key=f"btn_temp_{escopo_id}", use_container_width=True):
                 with st.spinner("Processando WorldClim..."):
-                    df_temp = get_worldclim_data(geometry, source_name)
+                    df_temp = get_worldclim_data(target_geometry, chave_cache)
                     if not df_temp.empty:
-                        st.session_state['clim_temp'] = df_temp
+                        st.session_state[state_key_temp] = df_temp
                     elif 'erro_clima_temp' in st.session_state:
                         st.error(f"Erro: {st.session_state['erro_clima_temp']}")
             
-            if 'clim_temp' in st.session_state:
-                df = st.session_state['clim_temp']
+            if state_key_temp in st.session_state:
+                df = st.session_state[state_key_temp]
                 
                 # Métricas
                 med = df['Média (°C)'].mean()
@@ -202,16 +263,17 @@ def render_tab():
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption("Fonte: WorldClim V1 (Normais Climatológicas)")
+                st.caption(f"Fonte: WorldClim V1 | Escala: {abrangencia}")
 
                 # Download Excel Horizontal
                 excel_data = to_excel_horizontal(df)
                 st.download_button(
                     label="📥 Baixar Dados",
                     data=excel_data,
-                    file_name=f'temperatura_{source_name}.xlsx',
+                    file_name=f'temperatura_{chave_cache}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    use_container_width=True
+                    use_container_width=True,
+                    key=f"dl_temp_{escopo_id}"
                 )
 
     # --- COLUNA 2: PRECIPITAÇÃO ---
@@ -220,17 +282,20 @@ def render_tab():
         with st.container(border=True):
             st.markdown("**Médias Mensais (CHIRPS - 0.05°)**")
             
-            if st.button("🌧️ Gerar Gráfico de Chuva", use_container_width=True):
+            # Chaves únicas para o estado atual
+            state_key_rain = f'clim_rain_{escopo_id}'
+            
+            if st.button("🌧️ Gerar Gráfico de Chuva", key=f"btn_rain_{escopo_id}", use_container_width=True):
                 with st.spinner("Processando CHIRPS..."):
-                    df_rain = get_chirps_data(geometry, source_name)
+                    df_rain = get_chirps_data(target_geometry, chave_cache)
                     if not df_rain.empty:
-                        st.session_state['clim_rain'] = df_rain
+                        st.session_state[state_key_rain] = df_rain
                     else:
                         msg = st.session_state.get('erro_clima_rain', 'Erro desconhecido.')
                         st.error(f"Erro CHIRPS: {msg}")
 
-            if 'clim_rain' in st.session_state:
-                df = st.session_state['clim_rain']
+            if state_key_rain in st.session_state:
+                df = st.session_state[state_key_rain]
                 
                 total_anual = df['Chuva (mm)'].sum()
                 st.metric("Acumulado Anual Médio", f"{total_anual:,.0f}".replace(",", ".") + " mm")
@@ -249,14 +314,15 @@ def render_tab():
                     coloraxis_showscale=False
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption("Fonte: CHIRPS (Série Histórica 2000-2025)")
+                st.caption(f"Fonte: CHIRPS (Série Histórica) | Escala: {abrangencia}")
 
                 # Download Excel Horizontal
                 excel_data = to_excel_horizontal(df)
                 st.download_button(
                     label="📥 Baixar Dados",
                     data=excel_data,
-                    file_name=f'precipitacao_{source_name}.xlsx',
+                    file_name=f'precipitacao_{chave_cache}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    use_container_width=True
+                    use_container_width=True,
+                    key=f"dl_rain_{escopo_id}"
                 )
