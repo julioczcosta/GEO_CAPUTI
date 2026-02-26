@@ -269,15 +269,10 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
 
 @st.cache_data(show_spinner=False)
 def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
-    """
-    Calcula a altitude média. Tenta primeiro usar a malha oficial do município.
-    Se falhar, usa um buffer gigante em volta do centroide (Plano B).
-    """
     try:
         srtm = ee.Image('USGS/SRTMGL1_003')
         
         try:
-            # Tenta pegar a malha do município no MapBiomas
             mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
             municipio = mun_col.filter(ee.Filter.or_(
                 ee.Filter.eq('CD_MUN', str(cod_ibge)),
@@ -285,10 +280,8 @@ def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
             )).first()
             geom_alvo = municipio.geometry()
         except:
-            # Plano B: Cria um raio de 15km ao redor do centroide da fazenda
             geom_alvo = ee.Geometry.Point([lon_fallback, lat_fallback]).buffer(15000)
 
-        # Calcula a média (escala 90m para não explodir a memória)
         stats = srtm.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom_alvo,
@@ -488,17 +481,11 @@ LIMITES_ESTADOS = {
 
 @st.cache_data(show_spinner=False)
 def get_distancia_capital(cod_ibge, uf):
-    """
-    1. Busca a coordenada da sede do município no WFS do IBGE.
-    2. Puxa a capital do dicionário interno.
-    3. Calcula a distância de rodovia usando OSRM.
-    """
     if uf not in COORDENADAS_CAPITAIS:
         return {"erro": "UF não encontrada."}
     
     lat_cap, lon_cap = COORDENADAS_CAPITAIS[uf]
     
-    # 1. Buscar a Sede do Município (Ponto A)
     try:
         session = requests.Session()
         url_wfs = "https://geoservicos.ibge.gov.br/geoserver/ows"
@@ -518,7 +505,6 @@ def get_distancia_capital(cod_ibge, uf):
     except Exception as e:
         return {"erro": f"Falha ao buscar sede: {e}"}
 
-    # 2. Calcular a Rota (Ponto A -> Ponto B)
     try:
         url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon_sede},{lat_sede};{lon_cap},{lat_cap}?overview=false"
         r_osrm = requests.get(url_osrm, timeout=10)
@@ -529,7 +515,6 @@ def get_distancia_capital(cod_ibge, uf):
                 dist_km = dados["routes"][0]["distance"] / 1000
                 dur_h = dados["routes"][0]["duration"] / 3600
                 
-                # Formata o tempo bonito (ex: 4h 15m)
                 horas = int(dur_h)
                 minutos = int((dur_h - horas) * 60)
                 tempo_str = f"{horas}h {minutos}m" if horas > 0 else f"{minutos}m"
@@ -543,38 +528,10 @@ def get_distancia_capital(cod_ibge, uf):
         return {"erro": f"Falha no OSRM: {e}"}
 
 # ==========================================
-# 8. REDAÇÃO DO LAUDO
+# 8. REDAÇÃO DO LAUDO E CLIMATOLOGIA EXTRA
 # ==========================================
 
-NOMES_CAPITAIS = {
-    'AC': 'Rio Branco', 'AL': 'Maceió', 'AM': 'Manaus', 'AP': 'Macapá',
-    'BA': 'Salvador', 'CE': 'Fortaleza', 'DF': 'Brasília', 'ES': 'Vitória',
-    'GO': 'Goiânia', 'MA': 'São Luís', 'MG': 'Belo Horizonte', 'MS': 'Campo Grande',
-    'MT': 'Cuiabá', 'PA': 'Belém', 'PB': 'João Pessoa', 'PE': 'Recife',
-    'PI': 'Teresina', 'PR': 'Curitiba', 'RJ': 'Rio de Janeiro', 'RN': 'Natal',
-    'RO': 'Porto Velho', 'RR': 'Boa Vista', 'RS': 'Porto Alegre', 'SC': 'Florianópolis',
-    'SE': 'Aracaju', 'SP': 'São Paulo', 'TO': 'Palmas'
-}
-
-LIMITES_ESTADOS = {
-    'AC': (-73.99, -11.14, -66.60, -7.11), 'AL': (-38.29, -10.50, -35.15, -8.81),
-    'AM': (-73.80, -9.81, -56.10, 2.24), 'AP': (-54.87, -1.23, -49.88, 4.30),
-    'BA': (-46.61, -18.34, -37.34, -8.53), 'CE': (-41.41, -7.86, -37.25, -2.78),
-    'DF': (-48.28, -16.05, -47.30, -15.50), 'ES': (-41.87, -21.30, -39.66, -17.89),
-    'GO': (-53.25, -19.49, -45.90, -12.39), 'MA': (-48.99, -10.26, -41.82, -1.04),
-    'MG': (-51.04, -22.92, -39.85, -14.23), 'MS': (-57.83, -24.06, -50.99, -17.16),
-    'MT': (-61.60, -18.04, -50.22, -7.84), 'PA': (-58.89, -9.84, -46.06, 2.59),
-    'PB': (-38.76, -8.30, -34.79, -6.02), 'PE': (-41.35, -9.48, -34.72, -7.04),
-    'PI': (-45.92, -10.92, -41.05, -2.74), 'PR': (-54.61, -26.71, -48.02, -22.51),
-    'RJ': (-44.88, -23.36, -40.96, -20.76), 'RN': (-38.58, -6.98, -34.97, -4.83),
-    'RO': (-66.80, -13.69, -59.77, -7.96), 'RR': (-64.82, -1.61, -58.88, 5.27),
-    'RS': (-57.64, -33.75, -49.69, -27.08), 'SC': (-53.83, -29.35, -48.36, -25.97),
-    'SE': (-38.24, -11.49, -36.39, -9.51), 'SP': (-53.11, -25.31, -44.16, -19.77),
-    'TO': (-50.74, -13.09, -45.52, -5.16)
-}
-
 def obter_direcao_estado(uf, lat, lon):
-    """Calcula a posição cardeal (Norte, Sul, Leste, Centro) dividindo o estado em 9 quadrantes."""
     if uf not in LIMITES_ESTADOS: return "região"
     min_lon, min_lat, max_lon, max_lat = LIMITES_ESTADOS[uf]
 
@@ -593,7 +550,6 @@ def obter_direcao_estado(uf, lat, lon):
     if pos_lat == "central": return f"região {pos_lon}"
     if pos_lon == "central": return f"região {pos_lat}"
     
-    # Cruzamentos (Nordeste, Noroeste, Sudeste, Sudoeste)
     if pos_lat == "norte" and pos_lon == "leste": return "região nordeste"
     if pos_lat == "norte" and pos_lon == "oeste": return "região noroeste"
     if pos_lat == "sul" and pos_lon == "leste": return "região sudeste"
@@ -603,9 +559,6 @@ def obter_direcao_estado(uf, lat, lon):
 
 @st.cache_data(show_spinner=False)
 def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_dms, lon_dms, altitude, dist_km):
-    """
-    Gera o texto padronizado e coeso para o laudo.
-    """
     try:
         direcao = obter_direcao_estado(uf, lat_dec, lon_dec)
 
@@ -624,7 +577,6 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
 
         nome_capital = NOMES_CAPITAIS.get(uf, "a capital")
 
-        # Texto para a CAPITAL
         if mun_nome.upper() == nome_capital.upper():
             texto = (
                 f"{mun_nome} é a capital do estado ({uf}), situada na {direcao}. "
@@ -632,7 +584,6 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
                 f"distribuídos em uma área de {area_fmt} quilômetros quadrados. "
                 f"Localiza-se a uma latitude {lat_dms} e a uma longitude {lon_dms}, a uma altitude de {alt_fmt} metros."
             )
-        # Texto para o INTERIOR
         else:
             texto = (
                 f"{mun_nome} é um município brasileiro situado na {direcao} do estado, "
@@ -645,3 +596,19 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
         return texto
     except Exception as e:
         return f"Erro ao gerar redação: {str(e)}"
+
+@st.cache_data(show_spinner=False)
+def get_limites_municipio_clima(lon, lat):
+    """Busca a geometria oficial do município no MapBiomas para a análise climática."""
+    try:
+        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
+        mun_info = mun_col.filterBounds(ee.Geometry.Point([lon, lat])).limit(1).getInfo()['features']
+        if mun_info:
+            return {
+                "geojson": mun_info[0]['geometry'],
+                "nome": mun_info[0]['properties'].get('NM_MUN', 'Município'),
+                "uf": mun_info[0]['properties'].get('SIGLA_UF', '')
+            }
+    except Exception:
+        return None
+    return None
