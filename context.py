@@ -222,7 +222,7 @@ def render_tab():
         # BLOCO INFERIOR: REDAÇÃO DO LAUDO (Largura Total)
         # ==========================================
         st.divider()
-        st.subheader("📝 Redação Sugerida para o Laudo")
+        st.subheader("📝 Resumo")
         
         distancia_real = dados_rota.get('distancia_km', 0) if "erro" not in dados_rota else 0
         altitude_real = dados_altimetria.get('media', 0) if "erro" not in dados_altimetria else "N/A"
