@@ -30,33 +30,43 @@ def to_excel_horizontal(df, index_col='Mês'):
     return output.getvalue()
 
 # ==========================================
-# 1. FUNÇÕES DE DADOS CLIMÁTICOS
+# 1. FUNÇÕES DE DADOS CLIMÁTICOS (SEM CACHE FANTASMA)
 # ==========================================
+# Removemos o @st.cache_data daqui para OBRIGAR o sistema a recalcular 
+# sempre que o usuário clicar no botão, evitando que gráficos se repitam.
 
-@st.cache_data(show_spinner=False)
-def get_worldclim_data(_geometry, cache_id):
+def get_worldclim_data(geometry_gee):
     try:
-        geo_simple = _geometry.simplify(maxError=100)
-        wc = ee.ImageCollection("WORLDCLIM/V1/MONTHLY")
+        geo_simple = geometry_gee.simplify(maxError=100)
         
-        def get_stats(img):
-            month = img.get('month')
-            stats = img.reduceRegion(
+        # ERA5 Monthly Aggregates (ECMWF) - Mais preciso e dinâmico que o WorldClim
+        dataset = ee.ImageCollection("ECMWF/ERA5/MONTHLY")\
+            .filterDate('2010-01-01', '2020-12-31')\
+            .select(['mean_2m_air_temperature', 'maximum_2m_air_temperature', 'minimum_2m_air_temperature'])
+
+        def calc_monthly_temp(m):
+            m = ee.Number(m)
+            mean_month = dataset.filter(ee.Filter.calendarRange(m, m, 'month')).mean()
+            
+            stats = mean_month.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=geo_simple,
-                scale=2000, 
-                maxPixels=1e9,
+                scale=11000, 
+                maxPixels=1e13, # Aumentado para evitar erros em municípios gigantes
                 bestEffort=True,
                 tileScale=16
             )
+            
+            # ERA5 é em Kelvin (-273.15 para Celsius)
             return ee.Feature(None, {
-                'month': month,
-                'avg': ee.Number(stats.get('tavg')).divide(10),
-                'min': ee.Number(stats.get('tmin')).divide(10),
-                'max': ee.Number(stats.get('tmax')).divide(10)
+                'month': m,
+                'avg': ee.Number(stats.get('mean_2m_air_temperature')).subtract(273.15),
+                'max': ee.Number(stats.get('maximum_2m_air_temperature')).subtract(273.15),
+                'min': ee.Number(stats.get('minimum_2m_air_temperature')).subtract(273.15)
             })
 
-        features = wc.map(get_stats).getInfo()['features']
+        months = ee.List.sequence(1, 12)
+        features = ee.FeatureCollection(months.map(calc_monthly_temp)).getInfo()['features']
         
         data = []
         for f in features:
@@ -77,10 +87,9 @@ def get_worldclim_data(_geometry, cache_id):
         st.session_state['erro_clima_temp'] = str(e)
         return pd.DataFrame()
 
-@st.cache_data(show_spinner=False)
-def get_chirps_data(_geometry, cache_id):
+def get_chirps_data(geometry_gee):
     try:
-        geo_simple = _geometry.simplify(maxError=100)
+        geo_simple = geometry_gee.simplify(maxError=100)
         dataset = ee.ImageCollection("UCSB-CHG/CHIRPS/PENTAD")\
             .filterDate('2000-01-01', '2025-12-31')\
             .select('precipitation')
@@ -92,7 +101,7 @@ def get_chirps_data(_geometry, cache_id):
                 reducer=ee.Reducer.mean(),
                 geometry=geo_simple,
                 scale=5500,
-                maxPixels=1e9,
+                maxPixels=1e13, # Aumentado para evitar erros em municípios gigantes
                 bestEffort=True,
                 tileScale=16
             ).get('precipitation')
@@ -133,16 +142,18 @@ def render_tab():
         st.warning("⚠️ Selecione um imóvel na aba 'Início' primeiro.")
         return
 
-    # Extrai o centroide para consultas de Município e Köppen
     centroide = geometry.centroid(1).coordinates().getInfo()
     lon_dec, lat_dec = centroide[0], centroide[1]
 
-    # Limpeza automática ao mudar de imóvel
-    if st.session_state.get('last_clim_source') != source_name:
+    # Identificador ultra-específico para limpeza de sessão
+    identificador_imovel = f"{source_name}_{lat_dec}_{lon_dec}"
+
+    # Limpeza da sessão sempre que um imóvel novo for selecionado
+    if st.session_state.get('last_clim_source') != identificador_imovel:
         chaves_para_deletar = [k for k in st.session_state.keys() if k.startswith('clim_') or k.startswith('erro_clima')]
         for k in chaves_para_deletar:
             del st.session_state[k]
-        st.session_state['last_clim_source'] = source_name
+        st.session_state['last_clim_source'] = identificador_imovel
 
     # --- CLASSIFICAÇÃO KÖPPEN ---
     dados_koppen = utils.get_koppen_class(lat_dec, lon_dec)
@@ -158,7 +169,7 @@ def render_tab():
     abrangencia = st.radio(
         "Abrangência:", 
         options=["Município", "Perímetro do Imóvel"], 
-        index=0, 
+        index=0, # Município como Default
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -166,9 +177,7 @@ def render_tab():
     # --- DEFINIR A GEOMETRIA ALVO ---
     target_geometry = geometry
     area_label = source_name
-    
     escopo_id = "mun" if abrangencia == "Município" else "perim"
-    chave_cache = f"{source_name}_{escopo_id}"
 
     if abrangencia == "Município":
         with st.spinner("Mapeando limites do município..."):
@@ -179,9 +188,8 @@ def render_tab():
             else:
                 st.warning("Município não localizado. Utilizando o perímetro do imóvel.")
                 escopo_id = "perim"
-                chave_cache = f"{source_name}_perim"
-
-    st.info(f"Gerando dados climáticos para: **{area_label}**")
+                
+    st.info(f"Gerando gráficos climáticos para: **{area_label}**")
     
     col_temp, col_rain = st.columns(2, gap="medium")
 
@@ -189,13 +197,13 @@ def render_tab():
     with col_temp:
         st.subheader("🌡️ Temperatura")
         with st.container(border=True):
-            st.markdown("**Médias Históricas (WorldClim)**")
+            st.markdown("**Médias Históricas (ERA5 - ECMWF)**")
             
             state_key_temp = f'clim_temp_{escopo_id}'
             
             if st.button("📉 Gerar Gráfico de Temperatura", key=f"btn_temp_{escopo_id}", use_container_width=True):
-                with st.spinner("Processando WorldClim..."):
-                    df_temp = get_worldclim_data(target_geometry, chave_cache)
+                with st.spinner("Processando reanálise climática..."):
+                    df_temp = get_worldclim_data(target_geometry)
                     if not df_temp.empty:
                         st.session_state[state_key_temp] = df_temp
                     elif 'erro_clima_temp' in st.session_state:
@@ -226,13 +234,13 @@ def render_tab():
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption(f"Fonte: WorldClim V1 | Escala: {abrangencia}")
+                st.caption(f"Fonte: ERA5 (2010-2020) | Escopo: {abrangencia}")
 
                 excel_data = to_excel_horizontal(df)
                 st.download_button(
                     label="📥 Baixar Dados",
                     data=excel_data,
-                    file_name=f'temperatura_{chave_cache}.xlsx',
+                    file_name=f'temperatura_{escopo_id}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     use_container_width=True,
                     key=f"dl_temp_{escopo_id}"
@@ -247,8 +255,8 @@ def render_tab():
             state_key_rain = f'clim_rain_{escopo_id}'
             
             if st.button("🌧️ Gerar Gráfico de Chuva", key=f"btn_rain_{escopo_id}", use_container_width=True):
-                with st.spinner("Processando CHIRPS..."):
-                    df_rain = get_chirps_data(target_geometry, chave_cache)
+                with st.spinner("Processando satélites de chuva..."):
+                    df_rain = get_chirps_data(target_geometry)
                     if not df_rain.empty:
                         st.session_state[state_key_rain] = df_rain
                     else:
@@ -274,13 +282,13 @@ def render_tab():
                     coloraxis_showscale=False
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption(f"Fonte: CHIRPS (Série Histórica) | Escala: {abrangencia}")
+                st.caption(f"Fonte: CHIRPS (Série Histórica) | Escopo: {abrangencia}")
 
                 excel_data = to_excel_horizontal(df)
                 st.download_button(
                     label="📥 Baixar Dados",
                     data=excel_data,
-                    file_name=f'precipitacao_{chave_cache}.xlsx',
+                    file_name=f'precipitacao_{escopo_id}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     use_container_width=True,
                     key=f"dl_rain_{escopo_id}"
