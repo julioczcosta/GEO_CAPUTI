@@ -30,16 +30,13 @@ def to_excel_horizontal(df, index_col='Mês'):
     return output.getvalue()
 
 # ==========================================
-# 1. FUNÇÕES DE DADOS CLIMÁTICOS (SEM CACHE FANTASMA)
+# 1. FUNÇÕES DE DADOS CLIMÁTICOS 
 # ==========================================
-# Removemos o @st.cache_data daqui para OBRIGAR o sistema a recalcular 
-# sempre que o usuário clicar no botão, evitando que gráficos se repitam.
 
 def get_worldclim_data(geometry_gee):
     try:
         geo_simple = geometry_gee.simplify(maxError=100)
         
-        # ERA5 Monthly Aggregates (ECMWF) - Mais preciso e dinâmico que o WorldClim
         dataset = ee.ImageCollection("ECMWF/ERA5/MONTHLY")\
             .filterDate('2010-01-01', '2020-12-31')\
             .select(['mean_2m_air_temperature', 'maximum_2m_air_temperature', 'minimum_2m_air_temperature'])
@@ -52,12 +49,11 @@ def get_worldclim_data(geometry_gee):
                 reducer=ee.Reducer.mean(),
                 geometry=geo_simple,
                 scale=11000, 
-                maxPixels=1e13, # Aumentado para evitar erros em municípios gigantes
+                maxPixels=1e13, 
                 bestEffort=True,
                 tileScale=16
             )
             
-            # ERA5 é em Kelvin (-273.15 para Celsius)
             return ee.Feature(None, {
                 'month': m,
                 'avg': ee.Number(stats.get('mean_2m_air_temperature')).subtract(273.15),
@@ -101,7 +97,7 @@ def get_chirps_data(geometry_gee):
                 reducer=ee.Reducer.mean(),
                 geometry=geo_simple,
                 scale=5500,
-                maxPixels=1e13, # Aumentado para evitar erros em municípios gigantes
+                maxPixels=1e13, 
                 bestEffort=True,
                 tileScale=16
             ).get('precipitation')
@@ -145,10 +141,10 @@ def render_tab():
     centroide = geometry.centroid(1).coordinates().getInfo()
     lon_dec, lat_dec = centroide[0], centroide[1]
 
-    # Identificador ultra-específico para limpeza de sessão
-    identificador_imovel = f"{source_name}_{lat_dec}_{lon_dec}"
+    # --- A CORREÇÃO MESTRA ESTÁ AQUI ---
+    # Arredondamos para 5 casas decimais para travar o "RG" do imóvel e evitar a exclusão dos gráficos!
+    identificador_imovel = f"{source_name}_{lat_dec:.5f}_{lon_dec:.5f}"
 
-    # Limpeza da sessão sempre que um imóvel novo for selecionado
     if st.session_state.get('last_clim_source') != identificador_imovel:
         chaves_para_deletar = [k for k in st.session_state.keys() if k.startswith('clim_') or k.startswith('erro_clima')]
         for k in chaves_para_deletar:
@@ -169,7 +165,7 @@ def render_tab():
     abrangencia = st.radio(
         "Abrangência:", 
         options=["Município", "Perímetro do Imóvel"], 
-        index=0, # Município como Default
+        index=0, 
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -180,7 +176,7 @@ def render_tab():
     escopo_id = "mun" if abrangencia == "Município" else "perim"
 
     if abrangencia == "Município":
-        with st.spinner("Mapeando limites do município..."):
+        with st.spinner("Mapeando limites climáticos do município..."):
             mun_dados = utils.get_limites_municipio_clima(lon_dec, lat_dec)
             if mun_dados:
                 target_geometry = ee.Geometry(mun_dados["geojson"])
