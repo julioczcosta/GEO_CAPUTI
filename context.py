@@ -1,243 +1,293 @@
 import streamlit as st
-import utils
 import ee
-import requests
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+import io 
+import utils
 
-# --- FUNÇÃO LOCAL PARA CONSULTAR CAMADAS EXTRAS DO IBGE ---
-def consultar_camadas_extras(lat, lon):
-    """Consulta Bioma e Amazônia Legal via WFS do IBGE."""
-    base_url = "https://geoservicos.ibge.gov.br/geoserver/ows"
-    headers = {"User-Agent": "Mozilla/5.0"}
+# ==========================================
+# 0. CONFIGURAÇÕES E UTILITÁRIOS
+# ==========================================
+
+MESES_PT = {
+    1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+    7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
+}
+
+def to_excel_horizontal(df, index_col='Mês'):
+    output = io.BytesIO()
+    if 'Mês_Num' in df.columns:
+        df = df.drop(columns=['Mês_Num'])
     
-    resultados = {
-        "bioma": "Não identificado",
-        "amazonia_legal": False
-    }
-    colunas_geometria = ['geom', 'the_geom']
+    df_t = df.set_index(index_col).T 
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_t.to_excel(writer, sheet_name='Dados')
+        worksheet = writer.sheets['Dados']
+        worksheet.set_column(0, 12, 15) 
+    
+    return output.getvalue()
 
-    # 1. BIOMA
-    for geom_col in colunas_geometria:
-        try:
-            params_bioma = {
-                "service": "WFS", "version": "1.0.0", "request": "GetFeature",
-                "typeName": "CREN:bioma_vazado", "outputFormat": "application/json",
-                "cql_filter": f"INTERSECTS({geom_col}, POINT({lon} {lat}))"
-            }
-            resp = requests.get(base_url, params=params_bioma, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("features"):
-                    resultados["bioma"] = data["features"][0]["properties"].get("bioma", "Não identificado")
-                    break
-        except: continue
+# ==========================================
+# 1. FUNÇÕES DE DADOS CLIMÁTICOS
+# ==========================================
 
-    # 2. AMAZÔNIA LEGAL
-    for geom_col in colunas_geometria:
-        try:
-            params_amz = {
-                "service": "WFS", "version": "1.0.0", "request": "GetFeature",
-                "typeName": "CGMAT:lim_amazonia_legal_2022", "outputFormat": "application/json",
-                "cql_filter": f"INTERSECTS({geom_col}, POINT({lon} {lat}))"
-            }
-            resp_amz = requests.get(base_url, params=params_amz, headers=headers, timeout=10)
-            if resp_amz.status_code == 200:
-                data_amz = resp_amz.json()
-                if data_amz.get("features"):
-                    resultados["amazonia_legal"] = True
-                    break
-        except: continue
+@st.cache_data(show_spinner=False)
+def get_worldclim_data(_geometry, cache_id):
+    try:
+        geo_simple = _geometry.simplify(maxError=100)
+        wc = ee.ImageCollection("WORLDCLIM/V1/MONTHLY")
+        
+        def get_stats(img):
+            month = img.get('month')
+            stats = img.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=geo_simple,
+                scale=2000, 
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=16
+            )
+            return ee.Feature(None, {
+                'month': month,
+                'avg': ee.Number(stats.get('tavg')).divide(10),
+                'min': ee.Number(stats.get('tmin')).divide(10),
+                'max': ee.Number(stats.get('tmax')).divide(10)
+            })
 
-    return resultados
+        features = wc.map(get_stats).getInfo()['features']
+        
+        data = []
+        for f in features:
+            p = f['properties']
+            m_num = int(p['month'])
+            if p.get('avg') is not None:
+                data.append({
+                    "Mês_Num": m_num,
+                    "Mês": MESES_PT[m_num], 
+                    "Média (°C)": float(p['avg']),
+                    "Mínima (°C)": float(p['min']),
+                    "Máxima (°C)": float(p['max'])
+                })
+        
+        return pd.DataFrame(data).sort_values('Mês_Num')
+        
+    except Exception as e:
+        st.session_state['erro_clima_temp'] = str(e)
+        return pd.DataFrame()
 
-# --- RENDERIZAÇÃO DA ABA ---
+@st.cache_data(show_spinner=False)
+def get_chirps_data(_geometry, cache_id):
+    try:
+        geo_simple = _geometry.simplify(maxError=100)
+        dataset = ee.ImageCollection("UCSB-CHG/CHIRPS/PENTAD")\
+            .filterDate('2000-01-01', '2025-12-31')\
+            .select('precipitation')
+
+        def calc_monthly_climatology(m):
+            m = ee.Number(m)
+            mean_pentad = dataset.filter(ee.Filter.calendarRange(m, m, 'month')).mean()
+            val = mean_pentad.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=geo_simple,
+                scale=5500,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=16
+            ).get('precipitation')
+            monthly_total = ee.Number(val).multiply(6)
+            return ee.Feature(None, {'month': m, 'rain': monthly_total})
+
+        months = ee.List.sequence(1, 12)
+        features = ee.FeatureCollection(months.map(calc_monthly_climatology)).getInfo()['features']
+        
+        data = []
+        for f in features:
+            p = f['properties']
+            m_num = int(p['month'])
+            if p.get('rain') is not None:
+                data.append({
+                    "Mês_Num": m_num,
+                    "Mês": MESES_PT[m_num],
+                    "Chuva (mm)": float(p['rain'])
+                })
+                
+        return pd.DataFrame(data).sort_values('Mês_Num')
+
+    except Exception as e:
+        st.session_state['erro_clima_rain'] = str(e)
+        return pd.DataFrame()
+
+# ==========================================
+# 2. RENDERIZAÇÃO DA PÁGINA
+# ==========================================
+
 def render_tab():
-    st.markdown("### 📚 Contexto Territorial")
-    
+    st.markdown("### 🌦️ Climatologia")
+
     geometry = st.session_state.get('current_geometry')
     source_name = st.session_state.get('source_name', 'Desconhecido')
     
     if not geometry:
-        st.warning("⚠️ Selecione um imóvel na aba 'Início' para carregar os dados de contexto.")
+        st.warning("⚠️ Selecione um imóvel na aba 'Início' primeiro.")
         return
 
-    # Extração de Coordenadas
+    # Extrai o centroide para consultas e para a CHAVE ÚNICA
     centroide = geometry.centroid(1).coordinates().getInfo()
     lon_dec, lat_dec = centroide[0], centroide[1]
 
-    def decimal_to_dms(deg, is_lat):
-        direction = 'N' if is_lat and deg >= 0 else 'S' if is_lat else 'E' if deg >= 0 else 'O'
-        deg = abs(deg)
-        d = int(deg)
-        m = int((deg - d) * 60)
-        s = (deg - d - m/60) * 3600
-        return f"{d}° {m}' {s:.2f}'' {direction}"
+    # --- A GRANDE CORREÇÃO DO FANTASMA ---
+    # Criamos um RG único para o imóvel baseando-se no local exato dele
+    identificador_imovel = f"{source_name}_{lat_dec}_{lon_dec}"
 
-    lat_dms = decimal_to_dms(lat_dec, True)
-    lon_dms = decimal_to_dms(lon_dec, False)
+    # Limpeza automática: se o imóvel mudou de lugar, apaga os gráficos antigos da memória!
+    if st.session_state.get('last_clim_source') != identificador_imovel:
+        chaves_para_deletar = [k for k in st.session_state.keys() if k.startswith('clim_') or k.startswith('erro_clima')]
+        for k in chaves_para_deletar:
+            del st.session_state[k]
+        st.session_state['last_clim_source'] = identificador_imovel
 
-    # ==========================================
-    # BLOCO SUPERIOR: LOCALIZAÇÃO (Largura Total)
-    # ==========================================
-    st.markdown(f"**Imóvel Analisado:** {source_name}")
+    # --- CLASSIFICAÇÃO KÖPPEN ---
+    dados_koppen = utils.get_koppen_class(lat_dec, lon_dec)
+    if dados_koppen and "erro" not in dados_koppen:
+        sigla = dados_koppen.get('Classificacao', 'N/A')
+        desc = dados_koppen.get('Descricao', 'Sem descrição')
+        st.success(f"**Classificação Climática (Köppen):** {sigla} - {desc}", icon="🌡️")
+
+    st.write("---")
+
+    # --- ESCOLHA DA ABRANGÊNCIA ---
+    st.write("**Selecione a área de análise para os gráficos:**")
+    abrangencia = st.radio(
+        "Abrangência:", 
+        options=["Município", "Perímetro do Imóvel"], 
+        index=0, 
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
+    # --- DEFINIR A GEOMETRIA ALVO ---
+    target_geometry = geometry
+    area_label = source_name
     
-    with st.spinner("Mapeando intersecção municipal..."):
-        chave_unica = f"{source_name}_{lat_dec}_{lon_dec}"
-        dados_muns = utils.obter_municipios_interseccao(geometry, chave_unica)
+    escopo_id = "mun" if abrangencia == "Município" else "perim"
+    
+    # A chave do cache agora carrega o RG único do imóvel + se é município ou perímetro
+    chave_cache = f"{identificador_imovel}_{escopo_id}"
 
-    mun_selecionado = None
-    if not dados_muns or "erro" in dados_muns[0]:
-        st.error("Não foi possível identificar o município de intersecção.")
-    else:
-        if len(dados_muns) == 1:
-            mun = dados_muns[0]
-            st.success(f"**Inteiramente localizado em:** {mun['municipio']} (Área Identificada: {mun['area_ha']:,.2f} ha)".replace(",", "X").replace(".", ",").replace("X", "."))
-            mun_selecionado = mun
-        else:
-            st.warning(f"**Atenção:** O imóvel intercepta {len(dados_muns)} municípios diferentes.")
-            for m in dados_muns:
-                pct = m['porcentagem']
-                area_fmt = f"{m['area_ha']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                st.markdown(f"**{m['municipio']}** ({pct:.1f}% | {area_fmt} ha)")
-                st.progress(int(pct) / 100.0)
-            
-            nomes_opcoes = [m['municipio'] for m in dados_muns]
-            escolha = st.selectbox("Selecione o município base para gerar o contexto:", nomes_opcoes)
-            mun_selecionado = next(m for m in dados_muns if m['municipio'] == escolha)
-
-    st.divider()
-
-    # ==========================================
-    # CONSULTA CENTRALIZADA DE DADOS
-    # ==========================================
-    if mun_selecionado:
-        with st.spinner("Consultando bases oficiais (IBGE, ANA, OSRM)..."):
-            dados_ibge = utils.get_ibge_context_by_code(
-                mun_selecionado['cod_ibge'], mun_selecionado['nome_puro'], mun_selecionado['uf'], lat_dec, lon_dec
-            )
-            dados_altimetria = utils.get_altimetria_municipio(mun_selecionado['cod_ibge'], lat_dec, lon_dec)
-            dados_rota = utils.get_distancia_capital(mun_selecionado['cod_ibge'], mun_selecionado['uf'])
-            dados_extras = consultar_camadas_extras(lat_dec, lon_dec)
-            dados_bacia = utils.get_bacia_info(lat_dec, lon_dec)
-
-        # Divisão em duas colunas equilibradas
-        col1, col2 = st.columns(2, gap="medium")
-
-        # ==========================================
-        # COLUNA 1: GEOGRAFIA HUMANA E INFRAESTRUTURA
-        # ==========================================
-        with col1:
-            # --- DADOS POLÍTICOS ---
-            st.subheader("🏛️ Dados Político-Administrativos")
-            if "erro" in dados_ibge:
-                st.error(f"{dados_ibge['erro']}")
+    if abrangencia == "Município":
+        with st.spinner("Mapeando limites do município..."):
+            mun_dados = utils.get_limites_municipio_clima(lon_dec, lat_dec)
+            if mun_dados:
+                target_geometry = ee.Geometry(mun_dados["geojson"])
+                area_label = f"{mun_dados['nome']} - {mun_dados['uf']}"
             else:
-                def fmt(num, dec=0):
-                    try:
-                        val = float(num)
-                        return f"{val:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                    except: return str(num)
+                st.warning("Município não localizado. Utilizando o perímetro do imóvel.")
+                escopo_id = "perim"
+                chave_cache = f"{identificador_imovel}_perim"
 
-                pop = fmt(dados_ibge['populacao'], 0)
-                area = fmt(dados_ibge['area_km2'], 0)
-                dens = fmt(dados_ibge['densidade'], 2)
-                alt_media = f"{dados_altimetria['media']:.0f}" if "erro" not in dados_altimetria else "N/A"
+    st.info(f"Gerando gráficos climáticos para: **{area_label}**")
+    
+    col_temp, col_rain = st.columns(2, gap="medium")
 
-                with st.container(border=True):
-                    st.markdown(f"### {dados_ibge['municipio']} - {dados_ibge['uf']}")
-                    st.caption(f"📍 Centroide: {lat_dms}, {lon_dms} | Código IBGE: {dados_ibge['codigo_ibge']}")
-                    st.divider()
-                    
-                    c_a, c_b, c_c = st.columns(3)
-                    c_a.metric("👥 População", pop)
-                    c_b.metric("📏 Área (km²)", area)
-                    c_c.metric("⛰️ Alt. Média", f"{alt_media}m")
-                    
-                    st.metric("🏙️ Densidade Demográfica", f"{dens} hab/km²")
-                    st.divider()
-                    
-                    st.markdown("**Regionalização**")
-                    st.markdown(f"""
-                    * **Intermediária:** {dados_ibge['regiao_intermediaria']}
-                    * **Imediata:** {dados_ibge['regiao_imediata']}
-                    """)
-                    st.caption("Fonte: IBGE (Censo 2022) | NASA SRTM")
-
-            # --- LOGÍSTICA ---
-            st.write("")
-            st.subheader("🛣️ Logística (Sede ➔ Capital)")
-            with st.container(border=True):
-                if "erro" in dados_rota:
-                    st.warning(f"{dados_rota['erro']}")
-                else:
-                    dist_km = f"{dados_rota['distancia_km']:.1f}".replace(".", ",")
-                    c_rota1, c_rota2 = st.columns(2)
-                    c_rota1.metric("Distância (Rodovia)", f"{dist_km} km")
-                    c_rota2.metric("Tempo Estimado", dados_rota['tempo_estimado'])
-                    st.caption("Fonte: Coordenadas IBGE / Rotas OSRM")
-
-
-        # ==========================================
-        # COLUNA 2: GEOGRAFIA FÍSICA
-        # ==========================================
-        with col2:
-            # --- MEIO AMBIENTE ---
-            st.subheader("🌿 Enquadramento Ambiental")
-            with st.container(border=True):
-                bioma_raw = dados_extras['bioma']
-                bioma_display = bioma_raw.title() if bioma_raw else "Não Identificado"
+    # --- COLUNA 1: TEMPERATURA ---
+    with col_temp:
+        st.subheader("🌡️ Temperatura")
+        with st.container(border=True):
+            st.markdown("**Médias Históricas (WorldClim)**")
+            
+            state_key_temp = f'clim_temp_{escopo_id}'
+            
+            if st.button("📉 Gerar Gráfico de Temperatura", key=f"btn_temp_{escopo_id}", use_container_width=True):
+                with st.spinner("Processando WorldClim..."):
+                    df_temp = get_worldclim_data(target_geometry, chave_cache)
+                    if not df_temp.empty:
+                        st.session_state[state_key_temp] = df_temp
+                    elif 'erro_clima_temp' in st.session_state:
+                        st.error(f"Erro: {st.session_state['erro_clima_temp']}")
+            
+            if state_key_temp in st.session_state:
+                df = st.session_state[state_key_temp]
                 
-                icone = "🌱"
-                b_up = bioma_display.upper()
-                if "AMAZÔNIA" in b_up: icone = "🌳"
-                elif "CERRADO" in b_up: icone = "🌾"
-                elif "CAATINGA" in b_up: icone = "🌵"
-                elif "MATA" in b_up: icone = "🍂"
-                elif "PANTANAL" in b_up: icone = "🐊"
-
-                st.metric("Bioma Predominante", bioma_display)
-                st.write("") 
+                med = df['Média (°C)'].mean()
+                mini = df['Mínima (°C)'].mean()
+                maxi = df['Máxima (°C)'].mean()
                 
-                if dados_extras['amazonia_legal']:
-                    st.markdown("✅ **Pertence à Amazônia Legal**")
-                else:
-                    st.markdown("🚫 **Fora da Amazônia Legal**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Média Anual", f"{med:.1f}".replace(".", ",") + " °C")
+                c2.metric("Mínima Média", f"{mini:.1f}".replace(".", ",") + " °C")
+                c3.metric("Máxima Média", f"{maxi:.1f}".replace(".", ",") + " °C")
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima (°C)'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima (°C)'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(230, 126, 34, 0.2)', showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima (°C)'], mode='lines+markers', name='Máxima', line=dict(color='#e74c3c', width=1, dash='dot')))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima (°C)'], mode='lines+markers', name='Mínima', line=dict(color='#3498db', width=1, dash='dot')))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Média (°C)'], mode='lines+markers', name='Média', line=dict(color='#e67e22', width=3)))
+
+                fig.update_layout(
+                    height=350, margin=dict(l=20, r=20, t=20, b=20),
+                    yaxis_title="Temperatura (°C)", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(f"Fonte: WorldClim V1 | Escala: {abrangencia}")
+
+                excel_data = to_excel_horizontal(df)
+                st.download_button(
+                    label="📥 Baixar Dados",
+                    data=excel_data,
+                    file_name=f'temperatura_{chave_cache}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True,
+                    key=f"dl_temp_{escopo_id}"
+                )
+
+    # --- COLUNA 2: PRECIPITAÇÃO ---
+    with col_rain:
+        st.subheader("☔ Precipitação")
+        with st.container(border=True):
+            st.markdown("**Médias Mensais (CHIRPS - 0.05°)**")
+            
+            state_key_rain = f'clim_rain_{escopo_id}'
+            
+            if st.button("🌧️ Gerar Gráfico de Chuva", key=f"btn_rain_{escopo_id}", use_container_width=True):
+                with st.spinner("Processando CHIRPS..."):
+                    df_rain = get_chirps_data(target_geometry, chave_cache)
+                    if not df_rain.empty:
+                        st.session_state[state_key_rain] = df_rain
+                    else:
+                        msg = st.session_state.get('erro_clima_rain', 'Erro desconhecido.')
+                        st.error(f"Erro CHIRPS: {msg}")
+
+            if state_key_rain in st.session_state:
+                df = st.session_state[state_key_rain]
                 
-                st.write("")
-                st.caption(f"{icone} Fonte: IBGE (Biomas 2019 & Limites Legais)")
+                total_anual = df['Chuva (mm)'].sum()
+                st.metric("Acumulado Anual Médio", f"{total_anual:,.0f}".replace(",", ".") + " mm")
+                
+                fig = px.bar(
+                    df, x="Mês", y="Chuva (mm)",
+                    text_auto='.0f',
+                    color="Chuva (mm)", color_continuous_scale="Blues"
+                )
+                
+                fig.update_traces(textangle=0, textposition='outside', cliponaxis=False)
+                fig.update_layout(
+                    height=350, margin=dict(l=20, r=20, t=20, b=20),
+                    yaxis_title="Precipitação (mm)",
+                    coloraxis_showscale=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(f"Fonte: CHIRPS (Série Histórica) | Escala: {abrangencia}")
 
-            # --- HIDROGRAFIA ---
-            st.write("")
-            st.subheader("💧 Hidrografia")
-            with st.container(border=True):
-                if "erro" in dados_bacia:
-                    st.warning(f"{dados_bacia['erro']}")
-                else:
-                    st.markdown(f"**Bacia:** {dados_bacia['nome_bacia']}")
-                    st.markdown(f"*Suprabacia: {dados_bacia['suprabacia']}*")
-                    st.markdown("---")
-                    st.markdown(f"**Curso Principal:** {dados_bacia['curso_prin']}")
-                    st.caption("Fonte: IBGE/CNRH - Bacias Nível 6")
-
-        # ==========================================
-        # BLOCO INFERIOR: REDAÇÃO DO LAUDO (Largura Total)
-        # ==========================================
-        st.divider()
-        st.subheader("📝 Resumo")
-        
-        distancia_real = dados_rota.get('distancia_km', 0) if "erro" not in dados_rota else 0
-        altitude_real = dados_altimetria.get('media', 0) if "erro" not in dados_altimetria else "N/A"
-        
-        texto_laudo = utils.gerar_texto_resumo_laudo(
-            uf=mun_selecionado['uf'], 
-            mun_nome=dados_ibge['municipio'], 
-            pop=dados_ibge['populacao'], 
-            area_km2=dados_ibge['area_km2'], 
-            lat_dec=lat_dec,
-            lon_dec=lon_dec,
-            lat_dms=lat_dms, 
-            lon_dms=lon_dms, 
-            altitude=altitude_real, 
-            dist_km=distancia_real
-        )
-        
-        st.info(texto_laudo)
+                excel_data = to_excel_horizontal(df)
+                st.download_button(
+                    label="📥 Baixar Dados",
+                    data=excel_data,
+                    file_name=f'precipitacao_{chave_cache}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True,
+                    key=f"dl_rain_{escopo_id}"
+                )
