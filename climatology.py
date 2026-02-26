@@ -37,8 +37,9 @@ def get_worldclim_data(geometry_gee):
     try:
         geo_simple = geometry_gee.simplify(maxError=100)
         
+        # SÉRIE AMPLIADA E ALINHADA COM O CHIRPS: 1981 a 2025
         dataset = ee.ImageCollection("ECMWF/ERA5/MONTHLY")\
-            .filterDate('2010-01-01', '2020-12-31')\
+            .filterDate('1981-01-01', '2025-12-31')\
             .select(['mean_2m_air_temperature', 'maximum_2m_air_temperature', 'minimum_2m_air_temperature'])
 
         def calc_monthly_temp(m):
@@ -86,8 +87,10 @@ def get_worldclim_data(geometry_gee):
 def get_chirps_data(geometry_gee):
     try:
         geo_simple = geometry_gee.simplify(maxError=100)
+        
+        # SÉRIE AMPLIADA: Desde a origem do satélite até os dias de hoje
         dataset = ee.ImageCollection("UCSB-CHG/CHIRPS/PENTAD")\
-            .filterDate('2000-01-01', '2025-12-31')\
+            .filterDate('1981-01-01', '2025-12-31')\
             .select('precipitation')
 
         def calc_monthly_climatology(m):
@@ -141,8 +144,7 @@ def render_tab():
     centroide = geometry.centroid(1).coordinates().getInfo()
     lon_dec, lat_dec = centroide[0], centroide[1]
 
-    # --- A CORREÇÃO MESTRA ESTÁ AQUI ---
-    # Arredondamos para 5 casas decimais para travar o "RG" do imóvel e evitar a exclusão dos gráficos!
+    # --- CHAVE DE MEMÓRIA BLINDADA ---
     identificador_imovel = f"{source_name}_{lat_dec:.5f}_{lon_dec:.5f}"
 
     if st.session_state.get('last_clim_source') != identificador_imovel:
@@ -198,7 +200,7 @@ def render_tab():
             state_key_temp = f'clim_temp_{escopo_id}'
             
             if st.button("📉 Gerar Gráfico de Temperatura", key=f"btn_temp_{escopo_id}", use_container_width=True):
-                with st.spinner("Processando reanálise climática..."):
+                with st.spinner("Processando reanálise climática (1981-2025)..."):
                     df_temp = get_worldclim_data(target_geometry)
                     if not df_temp.empty:
                         st.session_state[state_key_temp] = df_temp
@@ -230,7 +232,8 @@ def render_tab():
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption(f"Fonte: ERA5 (2010-2020) | Escopo: {abrangencia}")
+                # Texto da fonte atualizado
+                st.caption(f"Fonte: ERA5/ECMWF (1981-2025) | Escopo: {abrangencia}")
 
                 excel_data = to_excel_horizontal(df)
                 st.download_button(
@@ -251,7 +254,7 @@ def render_tab():
             state_key_rain = f'clim_rain_{escopo_id}'
             
             if st.button("🌧️ Gerar Gráfico de Chuva", key=f"btn_rain_{escopo_id}", use_container_width=True):
-                with st.spinner("Processando satélites de chuva..."):
+                with st.spinner("Processando satélites de chuva (1981-2025)..."):
                     df_rain = get_chirps_data(target_geometry)
                     if not df_rain.empty:
                         st.session_state[state_key_rain] = df_rain
@@ -278,7 +281,8 @@ def render_tab():
                     coloraxis_showscale=False
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption(f"Fonte: CHIRPS (Série Histórica) | Escopo: {abrangencia}")
+                # Texto da fonte atualizado
+                st.caption(f"Fonte: CHIRPS (1981-2025) | Escopo: {abrangencia}")
 
                 excel_data = to_excel_horizontal(df)
                 st.download_button(
