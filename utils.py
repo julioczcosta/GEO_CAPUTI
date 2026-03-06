@@ -579,7 +579,7 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
         if mun_nome.upper() == nome_capital.upper():
             texto = (
                 f"{mun_nome} é a capital do estado ({uf}), situada na {direcao}. "
-                f"Sua população é de {pop_fmt} habitantes, segundo dados do Censo 2022 do IBGE (Instituto Brasileiro de Geografia e Estatística), "
+                f"Sua população é de {pop_fmt} habitantes, segundo dados do Censo 2022 do Instituto Brasileiro de Geografia e Estatística (IBGE), "
                 f"distribuída em uma área de {area_fmt} quilômetros quadrados. "
                 f"Localiza-se à latitude {lat_dms} e à longitude {lon_dms}, com altitude de {alt_fmt} metros."
             )
@@ -588,7 +588,7 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
             texto = (
                 f"{mun_nome} é um município brasileiro situado na {direcao} do estado ({uf}), "
                 f"a aproximadamente {dist_fmt} quilômetros da capital, {nome_capital}. "
-                f"Sua população é de {pop_fmt} habitantes, segundo dados do Censo 2022 do IBGE (Instituto Brasileiro de Geografia e Estatística), "
+                f"Sua população é de {pop_fmt} habitantes, segundo dados do Censo 2022 do Instituto Brasileiro de Geografia e Estatística (IBGE), "
                 f"distribuída em uma área de {area_fmt} quilômetros quadrados. "
                 f"Localiza-se à latitude {lat_dms} e à longitude {lon_dms}, com altitude de {alt_fmt} metros."
             )
