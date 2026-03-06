@@ -557,7 +557,6 @@ def obter_direcao_estado(uf, lat, lon):
     
     return "região"
 
-@st.cache_data(show_spinner=False)
 def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_dms, lon_dms, altitude, dist_km):
     try:
         direcao = obter_direcao_estado(uf, lat_dec, lon_dec)
