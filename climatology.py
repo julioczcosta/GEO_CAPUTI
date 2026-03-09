@@ -118,7 +118,7 @@ def get_chirps_data(geometry_gee):
                 data.append({
                     "Mês_Num": m_num,
                     "Mês": MESES_PT[m_num],
-                    "Chuva (mm)": float(p['rain'])
+                    "Chuva (mm)":round(float(p['rain']), 2)
                 })
                 
         return pd.DataFrame(data).sort_values('Mês_Num')
@@ -270,7 +270,7 @@ def render_tab():
                 
                 fig = px.bar(
                     df, x="Mês", y="Chuva (mm)",
-                    text_auto='.0f',
+                    text_auto='.2f',
                     color="Chuva (mm)", color_continuous_scale="Blues"
                 )
                 
