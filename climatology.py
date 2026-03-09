@@ -73,9 +73,9 @@ def get_worldclim_data(geometry_gee):
                 data.append({
                     "Mês_Num": m_num,
                     "Mês": MESES_PT[m_num], 
-                    "Média (°C)": float(p['avg']),
-                    "Mínima (°C)": float(p['min']),
-                    "Máxima (°C)": float(p['max'])
+                    "Média (°C)": float(p['avg'], 2),
+                    "Mínima (°C)": float(p['min', 2]),
+                    "Máxima (°C)": float(p['max', 2])
                 })
         
         return pd.DataFrame(data).sort_values('Mês_Num')
@@ -222,9 +222,9 @@ def render_tab():
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima (°C)'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
                 fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima (°C)'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(230, 126, 34, 0.2)', showlegend=False, hoverinfo='skip'))
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima (°C)'], mode='lines+markers', name='Máxima', line=dict(color='#e74c3c', width=1, dash='dot')))
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima (°C)'], mode='lines+markers', name='Mínima', line=dict(color='#3498db', width=1, dash='dot')))
-                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Média (°C)'], mode='lines+markers', name='Média', line=dict(color='#e67e22', width=3)))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Máxima (°C)'], mode='lines+markers', name='Máxima', line=dict(color='#e74c3c', width=1, dash='dot'), hovertemplate='%{y:.2f}°C'))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Mínima (°C)'], mode='lines+markers', name='Mínima', line=dict(color='#3498db', width=1, dash='dot'), hovertemplate='%{y:.2f}°C'))
+                fig.add_trace(go.Scatter(x=df['Mês'], y=df['Média (°C)'], mode='lines+markers', name='Média', line=dict(color='#e67e22', width=3), hovertemplate='%{y:.2f}°C'))
 
                 fig.update_layout(
                     height=350, margin=dict(l=20, r=20, t=20, b=20),
