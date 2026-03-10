@@ -18,10 +18,8 @@ def render_tab():
         return
 
     # ==========================================
-    # 🧹 FAXINA AUTOMÁTICA (O Segredo para não misturar fazendas)
+    # 🧹 FAXINA AUTOMÁTICA
     # ==========================================
-    # Se o nome do imóvel mudou desde a última vez que abrimos essa aba,
-    # apagamos todas as imagens e visualizações antigas da memória.
     if st.session_state.get('last_sentinel_source') != source_name:
         utils.reset_preview()
         st.session_state['camadas_fixas'] = []
@@ -89,7 +87,7 @@ def render_tab():
         except: area_alvo_ha = 100
 
     # ==========================================
-    # 🛡️ TRAVA DE ESCALA E SEGURANÇA (DYNAMIC SCALE)
+    # 🛡️ TRAVA DE ESCALA E SEGURANÇA
     # ==========================================
     escala_processamento = 10 
     
@@ -103,11 +101,13 @@ def render_tab():
 
     st.divider()
 
-    # --- Lógica de Data Dinâmica ---
+    # --- Lógica de Data Dinâmica (DESDE 2000) ---
     agora = datetime.now()
     mes_atual = agora.month
     ano_atual = agora.year
-    lista_anos = list(range(2020, ano_atual + 2))
+    
+    # MÁQUINA DO TEMPO: Do ano 2000 até o ano atual
+    lista_anos = list(range(2000, ano_atual + 1)) 
     try: idx_ano_atual = lista_anos.index(ano_atual)
     except ValueError: idx_ano_atual = len(lista_anos) - 1
 
@@ -143,39 +143,91 @@ def render_tab():
         try: m.centerObject(geom_alvo, 13)
         except: pass
 
-        # PROCESSAMENTO (Visualizar)
+        # ==========================================
+        # 🚀 O MOTOR MULTI-SATÉLITE
+        # ==========================================
         if btn_visualizar:
             utils.reset_preview()
-            with st.spinner("Buscando imagens e filtrando nuvens..."):
+            with st.spinner(f"Buscando imagens de {mes}/{ano} e filtrando nuvens..."):
                 try:
                     region_viz = geom_alvo.bounds().buffer(buffer_metros, 100).bounds()
-                    
-                    coll = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                        .filterBounds(region_viz)
-                        .filterDate(f'{ano}-{mes:02d}-01', f'{ano}-{mes:02d}-28')
-                        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', max_nuvens)))
 
-                    if coll.size().getInfo() > 0:
-                        img = coll.median().clip(region_viz)
+                    # 1. SELEÇÃO INTELIGENTE DA CONSTELAÇÃO E FONTE
+                    if ano >= 2016:
+                        # SENTINEL-2 (Alta Resolução 10m)
+                        sat_name = "Sentinel-2"
+                        atribuicao_fonte = "Sentinel-2/ESA"
+                        col_id = 'COPERNICUS/S2_SR_HARMONIZED'
+                        cloud_pct = 'CLOUDY_PIXEL_PERCENTAGE'
+                        b_red, b_green, b_blue, b_nir = 'B4', 'B3', 'B2', 'B8'
+                        vis_min, vis_max = 0, 3000
+                        
+                        coll = (ee.ImageCollection(col_id)
+                            .filterBounds(region_viz)
+                            .filterDate(f'{ano}-{mes:02d}-01', f'{ano}-{mes:02d}-28')
+                            .filter(ee.Filter.lt(cloud_pct, max_nuvens)))
+                            
+                        if coll.size().getInfo() > 0:
+                            img = coll.median().clip(region_viz)
+                        else:
+                            img = None
+
+                    else:
+                        # FAMÍLIA LANDSAT (Resolução 30m - Máquina do Tempo)
+                        if ano >= 2013:
+                            sat_name = "Landsat 8"
+                            atribuicao_fonte = "Landsat 8/USGS"
+                            col_id = 'LANDSAT/LC08/C02/T1_L2'
+                            b_red, b_green, b_blue, b_nir = 'SR_B4', 'SR_B3', 'SR_B2', 'SR_B5'
+                        elif ano == 2012:
+                            sat_name = "Landsat 7"
+                            atribuicao_fonte = "Landsat 7/USGS"
+                            col_id = 'LANDSAT/LE07/C02/T1_L2'
+                            b_red, b_green, b_blue, b_nir = 'SR_B3', 'SR_B2', 'SR_B1', 'SR_B4'
+                        else:
+                            sat_name = "Landsat 5"
+                            atribuicao_fonte = "Landsat 5/USGS"
+                            col_id = 'LANDSAT/LT05/C02/T1_L2'
+                            b_red, b_green, b_blue, b_nir = 'SR_B3', 'SR_B2', 'SR_B1', 'SR_B4'
+                            
+                        cloud_pct = 'CLOUD_COVER'
+                        vis_min, vis_max = 0.0, 0.3 
+                        
+                        def scale_landsat(image):
+                            optical = image.select('SR_B.').multiply(0.0000275).add(-0.2)
+                            return image.addBands(optical, None, True)
+
+                        coll = (ee.ImageCollection(col_id)
+                            .filterBounds(region_viz)
+                            .filterDate(f'{ano}-{mes:02d}-01', f'{ano}-{mes:02d}-28')
+                            .filter(ee.Filter.lt(cloud_pct, max_nuvens)))
+                            
+                        if coll.size().getInfo() > 0:
+                            img = coll.map(scale_landsat).median().clip(region_viz)
+                        else:
+                            img = None
+
+                    # 2. RENDERIZAÇÃO E CÁLCULOS
+                    if img is not None:
                         vis, nome_camada = {}, ""
                         download_bands = []
 
                         if tipo_visualizacao == "RGB":
-                            vis = {'min': 0, 'max': 3000, 'bands': ['B4', 'B3', 'B2']}
-                            nome_camada = f"RGB {mes}/{ano}"
-                            download_bands = ['B4', 'B3', 'B2']
+                            vis = {'min': vis_min, 'max': vis_max, 'bands': [b_red, b_green, b_blue]}
+                            nome_camada = f"RGB {sat_name} {mes}/{ano}"
+                            download_bands = [b_red, b_green, b_blue]
                             type_suffix = "RGB"
                             
                         elif tipo_visualizacao == "Falsa Cor":
-                            vis = {'min': 0, 'max': 3000, 'bands': ['B8', 'B4', 'B3']}
-                            nome_camada = f"Falsa Cor {mes}/{ano}"
-                            download_bands = ['B8', 'B4', 'B3']
+                            vis = {'min': vis_min, 'max': vis_max, 'bands': [b_nir, b_red, b_green]}
+                            nome_camada = f"Falsa Cor {sat_name} {mes}/{ano}"
+                            download_bands = [b_nir, b_red, b_green]
                             type_suffix = "FalsaCor"
                             
                         elif tipo_visualizacao == "NDVI":
-                            img = img.normalizedDifference(['B8', 'B4']).rename('NDVI')
+                            img = img.normalizedDifference([b_nir, b_red]).rename('NDVI')
                             vis = {'min': 0, 'max': 0.8, 'palette': ['#d73027', '#f46d43', '#fdae61', '#fee08b', '#d9ef8b', '#a6d96a', '#66bd63', '#1a9850']}
-                            nome_camada = f"NDVI {mes}/{ano}"
+                            nome_camada = f"NDVI {sat_name} {mes}/{ano}"
                             download_bands = ['NDVI']
                             type_suffix = "NDVI"
                             
@@ -186,19 +238,9 @@ def render_tab():
                             grad = f"linear-gradient(to right, {', '.join(vis['palette'])})"
                             st.session_state['ndvi_colorbar'] = f"""<div style="position: fixed; bottom: 30px; left: 10px; z-index:9999; background: white; padding: 10px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-family: sans-serif;"><div style="font-size: 12px; color: #555; text-align: center; margin-bottom: 4px;">NDVI</div><div style="height: 12px; width: 150px; background: {grad}; border-radius: 4px;"></div><div style="display: flex; justify-content: space-between; font-size: 10px; color: #555; margin-top: 4px;"><span>Solo</span><span>Vigor</span></div></div>"""
 
-                        raw_source = st.session_state.get('source_name', 'Imovel')
-                        
-                        if "CAR:" in raw_source: file_prefix = "CAR"
-                        elif "KML:" in raw_source:
-                            clean_name = raw_source.replace("KML: ", "").replace(".kml", "").replace(".kmz", "").strip()
-                            file_prefix = clean_name.replace(" ", "_")
-                        else: file_prefix = "Sentinel"
-                            
-                        if is_multipart and selecao != opcoes[0]:
-                            gleba_num = selecao.split(" ")[2] 
-                            filename_final = f"{file_prefix}_Bloco{gleba_num}_{type_suffix}_{mes}_{ano}"
-                        else:
-                            filename_final = f"{file_prefix}_AreaTotal_{type_suffix}_{mes}_{ano}"
+                        # --- LÓGICA DE NOMEAÇÃO SIMPLIFICADA SOLICITADA ---
+                        filename_final = f"{type_suffix}_{mes:02d}_{ano}"
+                        # --------------------------------------------------
 
                         img_download = img.select(download_bands)
                         
@@ -213,16 +255,20 @@ def render_tab():
                         
                         url = img_download.getDownloadURL(params_download)
                         
+                        # CAIXA FLUTUANTE DE ATRIBUIÇÃO DA FONTE SOLICITADA
+                        atribuicao_html = f"""<div style="position: fixed; bottom: 10px; right: 10px; z-index:9999; background: rgba(255, 255, 255, 0.7); padding: 2px 6px; border-radius: 4px; font-family: sans-serif; font-size: 10px; color: #555; pointer-events: none;">{atribuicao_fonte}</div>"""
+
                         st.session_state['camada_preview'] = {
                             'ee_object': img, 
                             'vis_params': vis, 
                             'name': nome_camada, 
                             'type': tipo_visualizacao,
                             'download_url': url,
-                            'filename': filename_final 
+                            'filename': filename_final,
+                            'fonte_atribuicao': atribuicao_html # Guardamos o HTML da fonte
                         }
                     else: 
-                        st.warning(f"☁️ Nenhuma imagem clara o suficiente encontrada (Máx. {max_nuvens}% nuvens).")
+                        st.warning(f"☁️ Nenhuma imagem clara o suficiente encontrada (Máx. {max_nuvens}% nuvens) para este período.")
                 except Exception as e: 
                     st.error(f"Erro GEE: {e}")
 
@@ -234,6 +280,9 @@ def render_tab():
             prev = st.session_state['camada_preview']
             m.add_layer(prev['ee_object'], prev['vis_params'], "* " + prev['name'])
             
+            # Adiciona os elementos flutuantes no mapa
+            if prev.get('fonte_atribuicao'): m.add_html(prev['fonte_atribuicao']) # FONTE SOLICITADA
+
             if prev.get('type') == "NDVI":
                 if st.session_state['ndvi_colorbar']: m.add_html(st.session_state['ndvi_colorbar'])
                 if st.session_state['ndvi_stats']: m.add_html(st.session_state['ndvi_stats'])
