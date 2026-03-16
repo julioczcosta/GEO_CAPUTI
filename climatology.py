@@ -73,9 +73,9 @@ def get_worldclim_data(geometry_gee):
                 data.append({
                     "Mês_Num": m_num,
                     "Mês": MESES_PT[m_num], 
-                    "Média (°C)": float(p['avg'], 2),
-                    "Mínima (°C)": float(p['min', 2]),
-                    "Máxima (°C)": float(p['max', 2])
+                    "Média (°C)": round(float(p['avg']), 2),
+                    "Mínima (°C)": round(float(p['min']), 2),
+                    "Máxima (°C)": round(float(p['max']), 2)
                 })
         
         return pd.DataFrame(data).sort_values('Mês_Num')
