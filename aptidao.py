@@ -426,13 +426,28 @@ def render_tab():
             # Tooltip só para camadas pequenas, para evitar travamento.
             if len(gdf_visual) <= 100:
                 fields_tooltip = [
-                    c for c in ["simb_apt", "legenda_ap"]
+                    c for c in ["simb_apt", "classe_norm"]
                     if c in gdf_visual.columns
                 ]
+                
+                aliases_tooltip = { "simb_apt": "Aptidão:", "classe_norm": "Classe:"}
 
                 if fields_tooltip:
-                    tooltip_apt = folium.GeoJsonTooltip(fields=fields_tooltip)
-
+                    tooltip_apt = folium.GeoJsonTooltip(
+                        fields=fields_tooltip,
+                        aliases=[aliases_tooltip.get(c, c) for c in fields_tooltip],
+                        sticky=False,
+                        style="""
+                        background-color: rgba(255, 255, 255, 0.92);
+                        border: 1px solid #999;
+                        border-radius: 4px;
+                        padding: 6px;
+                        font-size: 12px;
+                        max-width: 260px;
+                        white-space: normal;
+                    """
+                )
+                    
             folium.GeoJson(
                 gdf_visual,
                 name="Aptidão Agrícola",
