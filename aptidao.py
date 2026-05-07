@@ -4,7 +4,7 @@ import folium
 from folium.features import DivIcon
 from streamlit_folium import st_folium
 import plotly.express as px
-from shapely.geometry import Polygon, Point
+from shapely.geometry import Polygon, Point, box
 import pandas as pd
 import tempfile
 import zipfile
@@ -37,7 +37,7 @@ COLOR_MAP_LEGENDA = {
 
 def obter_epsg_por_latlon(lon, lat):
     """
-    Calcula o EPSG UTM local com base na longitude e latitude.
+    Calcula o EPSG UTM local.
     Hemisfério Sul: EPSG 327XX
     Hemisfério Norte: EPSG 326XX
     """
@@ -48,7 +48,7 @@ def obter_epsg_por_latlon(lon, lat):
 def uniao_geometrias(gdf):
     """
     Une geometrias usando union_all() quando disponível.
-    Mantém compatibilidade com versões anteriores do GeoPandas/Shapely.
+    Mantém compatibilidade com versões anteriores.
     """
     try:
         return gdf.geometry.union_all()
@@ -58,17 +58,16 @@ def uniao_geometrias(gdf):
 
 def normalizar_classe_embrapa(txt):
     """
-    Normaliza o texto da legenda da Embrapa para a classe usada na paleta.
+    Normaliza a legenda da Embrapa para a classe usada na paleta.
     Exemplo:
     '2(a)bc Aptidão REGULAR...' -> '2'
     """
     txt = str(txt).strip()
+    txt_lower = txt.lower()
 
     for k in COLOR_MAP_LEGENDA.keys():
         if txt.startswith(k):
             return k
-
-    txt_lower = txt.lower()
 
     if txt_lower in ["none", "nan", "", "null", "<na>"]:
         return "Sem Inf."
@@ -120,19 +119,89 @@ def corrigir_sigla_reforcada(row):
     return s
 
 
-def preparar_visualizacao_intersectada(gdf_intersect, epsg_metro):
+def aplicar_fit_bounds(mapa, bounds, margem=0.02):
     """
-    Prepara camada visual leve para o Folium:
-    - usa somente a interseção;
-    - mantém apenas colunas necessárias;
-    - simplifica geometria em metros;
-    - remove geometrias vazias;
+    Ajusta o mapa para enquadrar os limites informados.
+    """
+    try:
+        minx, miny, maxx, maxy = bounds
+
+        if minx == maxx:
+            minx -= margem
+            maxx += margem
+
+        if miny == maxy:
+            miny -= margem
+            maxy += margem
+
+        mapa.fit_bounds([[miny, minx], [maxy, maxx]])
+    except Exception:
+        pass
+
+
+def preparar_visualizacao_entorno(gdf_embrapa, gdf_bbox_visual, epsg_metro):
+    """
+    Prepara a camada visual do ENTORNO:
+    - usa toda a base Embrapa retornada pelo bbox visual;
+    - recorta pelo retângulo do entorno;
+    - NÃO recorta pelos buffers/pontos;
+    - mantém colunas necessárias;
+    - simplifica geometria;
     - retorna em EPSG:4326.
     """
-    if gdf_intersect is None or gdf_intersect.empty:
+    if gdf_embrapa is None or gdf_embrapa.empty:
         return None
 
-    gdf_visual = gdf_intersect.copy()
+    gdf_visual = gdf_embrapa.copy()
+
+    if gdf_visual.crs is None:
+        gdf_visual = gdf_visual.set_crs(epsg=4326, allow_override=True)
+
+    try:
+        gdf_visual_utm = gdf_visual.to_crs(epsg=epsg_metro)
+        gdf_bbox_utm = gdf_bbox_visual.to_crs(epsg=epsg_metro)
+
+        gdf_visual = gpd.overlay(
+            gdf_visual_utm,
+            gdf_bbox_utm,
+            how="intersection",
+            keep_geom_type=False
+        )
+
+    except Exception:
+        gdf_visual = gdf_visual.to_crs(epsg=epsg_metro)
+
+    if gdf_visual.empty:
+        return None
+
+    if "legenda_ap" in gdf_visual.columns:
+        gdf_visual["legenda_ap"] = (
+            gdf_visual["legenda_ap"]
+            .astype(str)
+            .str.replace(r"\.", "", regex=True)
+            .str.strip()
+        )
+    else:
+        gdf_visual["legenda_ap"] = "Sem Inf."
+
+    if "simb_apt" in gdf_visual.columns:
+        gdf_visual["simb_apt"] = (
+            gdf_visual["simb_apt"]
+            .astype(str)
+            .str.replace(r"\.", "", regex=True)
+            .str.strip()
+        )
+    else:
+        gdf_visual["simb_apt"] = "---"
+
+    gdf_visual["classe_norm"] = gdf_visual["legenda_ap"].apply(
+        normalizar_classe_embrapa
+    )
+
+    gdf_visual["simb_apt"] = gdf_visual.apply(
+        corrigir_sigla_reforcada,
+        axis=1
+    )
 
     cols_visuais = [
         c for c in ["simb_apt", "legenda_ap", "classe_norm", "geometry"]
@@ -141,12 +210,9 @@ def preparar_visualizacao_intersectada(gdf_intersect, epsg_metro):
 
     gdf_visual = gdf_visual[cols_visuais].copy()
 
-    if gdf_visual.crs is None:
-        gdf_visual = gdf_visual.set_crs(epsg=epsg_metro, allow_override=True)
-
     try:
         gdf_visual["geometry"] = gdf_visual.geometry.simplify(
-            tolerance=10,
+            tolerance=20,
             preserve_topology=True
         )
     except Exception:
@@ -356,7 +422,7 @@ def render_tab():
     # ------------------------------------------------------------
     m = folium.Map(
         location=[centroid_geral.y, centroid_geral.x],
-        zoom_start=13,
+        zoom_start=10,
         tiles=None
     )
 
@@ -365,6 +431,8 @@ def render_tab():
         attr="Google",
         name="Satélite"
     ).add_to(m)
+
+    bounds_mapa = gdf_raw.total_bounds
 
     fg_user = folium.FeatureGroup(name="Elementos do KMZ")
 
@@ -429,17 +497,15 @@ def render_tab():
     fg_user.add_to(m)
 
     # ------------------------------------------------------------
-    # Se já processou, adiciona camada da aptidão
+    # Se já processou, adiciona camada da aptidão do entorno
     # ------------------------------------------------------------
     if st.session_state.get("aptidao_concluida") and st.session_state.get("aptidao_data"):
         data = st.session_state["aptidao_data"]
 
         if data.get("visual") is not None and not data["visual"].empty:
             gdf_visual = data["visual"].copy()
+            bounds_mapa = gdf_visual.total_bounds
 
-            # ----------------------------------------------------
-            # Blindagem da classe para não perder as cores
-            # ----------------------------------------------------
             if "classe_norm" not in gdf_visual.columns:
                 if "legenda_ap" in gdf_visual.columns:
                     gdf_visual["classe_norm"] = gdf_visual["legenda_ap"].apply(
@@ -495,7 +561,6 @@ def render_tab():
 
             tooltip_apt = None
 
-            # Tooltip curto para evitar caixa gigante no mapa
             if len(gdf_visual) <= 100:
                 fields_tooltip = [
                     c for c in ["simb_apt", "classe_norm", "legenda_curta"]
@@ -526,7 +591,7 @@ def render_tab():
 
             folium.GeoJson(
                 gdf_visual,
-                name="Aptidão Agrícola",
+                name="Aptidão Agrícola - Entorno",
                 style_function=lambda x: {
                     "fillColor": cor_aptidao(x),
                     "color": "none",
@@ -593,6 +658,10 @@ def render_tab():
                             st.warning("Arquivo vazio ou sem geometria válida para cálculo.")
                             st.stop()
 
+                        # ------------------------------------------------
+                        # GEOMETRIA DE CÁLCULO:
+                        # usada apenas para tabela e gráfico
+                        # ------------------------------------------------
                         gdf_calculo = gpd.GeoDataFrame(
                             pd.concat(lista_calc, ignore_index=True),
                             geometry="geometry",
@@ -606,14 +675,37 @@ def render_tab():
                             crs=gdf_calculo.crs
                         )
 
-                        bounds = gdf_uniao.to_crs(epsg=4326).total_bounds
+                        # ------------------------------------------------
+                        # GEOMETRIA VISUAL:
+                        # usa a extensão bruta do KML/KMZ inteiro
+                        # NÃO usa os buffers
+                        # ------------------------------------------------
+                        bounds_visual = gdf_raw.total_bounds
 
-                        margem = 0.05
+                        # Margem visual em graus.
+                        # 0.15 equivale aproximadamente a 15 km.
+                        # Aumente para 0.20 ou 0.30 se quiser mais entorno.
+                        margem_visual = 0.15
+
+                        bbox_visual_geom = box(
+                            bounds_visual[0] - margem_visual,
+                            bounds_visual[1] - margem_visual,
+                            bounds_visual[2] + margem_visual,
+                            bounds_visual[3] + margem_visual
+                        )
+
+                        gdf_bbox_visual = gpd.GeoDataFrame(
+                            geometry=[bbox_visual_geom],
+                            crs="EPSG:4326"
+                        )
+
+                        bbox_bounds = gdf_bbox_visual.total_bounds
+
                         bbox_str = (
-                            f"{bounds[0] - margem},"
-                            f"{bounds[1] - margem},"
-                            f"{bounds[2] + margem},"
-                            f"{bounds[3] + margem}"
+                            f"{bbox_bounds[0]},"
+                            f"{bbox_bounds[1]},"
+                            f"{bbox_bounds[2]},"
+                            f"{bbox_bounds[3]}"
                         )
 
                         wfs_url = (
@@ -641,6 +733,18 @@ def render_tab():
                                 allow_override=True
                             )
 
+                        # ------------------------------------------------
+                        # VISUAL: ENTORNO COMPLETO DO BBOX
+                        # ------------------------------------------------
+                        gdf_visual = preparar_visualizacao_entorno(
+                            gdf_embrapa,
+                            gdf_bbox_visual,
+                            epsg_metro
+                        )
+
+                        # ------------------------------------------------
+                        # ESTATÍSTICA: APENAS INTERSEÇÃO COM ELEMENTOS
+                        # ------------------------------------------------
                         gdf_embrapa_utm = gdf_embrapa.to_crs(epsg=epsg_metro)
 
                         gdf_intersect = gpd.overlay(
@@ -651,7 +755,6 @@ def render_tab():
                         )
 
                         stats = None
-                        gdf_visual = None
 
                         if not gdf_intersect.empty:
                             gdf_intersect["area_ha"] = gdf_intersect.geometry.area / 10000
@@ -693,12 +796,11 @@ def render_tab():
                                 .reset_index()
                             )
 
-                            stats = stats[
-                                ~stats["classe_norm"].isin(
-                                    ["None", "nan", "", "Sem Inf.", "Sem Inf"]
-                                )
-                            ].copy()
+                            mask_validos = ~stats["classe_norm"].astype(str).str.lower().isin(
+                                ["none", "nan", "", "sem inf.", "sem inf", "null", "<na>"]
+                            )
 
+                            stats = stats[mask_validos].copy()
                             stats = stats[stats["area_ha"] > 0.001].copy()
 
                             if not stats.empty:
@@ -712,11 +814,6 @@ def render_tab():
                                 ).reset_index(drop=True)
                             else:
                                 stats = None
-
-                            gdf_visual = preparar_visualizacao_intersectada(
-                                gdf_intersect,
-                                epsg_metro
-                            )
 
                         else:
                             st.warning("A área não apresentou interseção com a base de aptidão agrícola.")
@@ -735,6 +832,8 @@ def render_tab():
     # ------------------------------------------------------------
     # Controle de camadas e renderização do mapa
     # ------------------------------------------------------------
+    aplicar_fit_bounds(m, bounds_mapa)
+
     folium.LayerControl().add_to(m)
 
     st_folium(
@@ -764,7 +863,7 @@ def render_tab():
                     )
                     stats["legenda_ap"] = stats[col_0]
 
-            st.markdown("#### 📊 Resultados")
+            st.markdown("#### 📊 Resultados da Interseção")
 
             c_chart, c_table = st.columns([0.4, 0.6], gap="medium")
 
@@ -797,11 +896,11 @@ def render_tab():
                     columns={
                         "legenda_ap": "Classe",
                         "simb_apt": "Sigla",
-                        "area_ha": "Área (ha)"
+                        "area_ha": "Área Intersectada (ha)"
                     }
                 )
 
-                cols_to_show = ["Classe", "Sigla", "Área (ha)", "%"]
+                cols_to_show = ["Classe", "Sigla", "Área Intersectada (ha)", "%"]
                 cols_final = [c for c in cols_to_show if c in df_show.columns]
                 df_show = df_show[cols_final]
 
@@ -810,7 +909,10 @@ def render_tab():
                     column_config={
                         "Classe": st.column_config.TextColumn("Classe", width="medium"),
                         "Sigla": st.column_config.TextColumn("Sigla", width="small"),
-                        "Área (ha)": st.column_config.NumberColumn("Área (ha)", format="%.4f"),
+                        "Área Intersectada (ha)": st.column_config.NumberColumn(
+                            "Área Intersectada (ha)",
+                            format="%.4f"
+                        ),
                         "%": st.column_config.NumberColumn("%", format="%.2f%%")
                     },
                     use_container_width=True,
@@ -818,4 +920,4 @@ def render_tab():
                 )
 
         else:
-            st.info("Nenhuma classe de aptidão agrícola significativa foi identificada para a área analisada.")
+            st.info("Nenhuma classe de aptidão agrícola significativa foi identificada dentro dos elementos analisados.")
