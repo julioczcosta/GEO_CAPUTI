@@ -11,6 +11,7 @@ import zipfile
 import os
 import bs4
 
+
 # ============================================================
 # 1. CONFIGURAÇÕES E CORES
 # ============================================================
@@ -26,7 +27,7 @@ COLOR_MAP_LEGENDA = {
     "Unidade de conservação": "#234D27",
     "Corpos d'água": "#61D6FF",
     "Área urbana": "#FF0000",
-    "Sem Inf.": "#DDDDDD"
+    "Sem Inf.": "#DDDDDD",
 }
 
 
@@ -36,7 +37,7 @@ COLOR_MAP_LEGENDA = {
 
 def obter_epsg_por_latlon(lon, lat):
     """
-    Calcula o EPSG UTM local com base em longitude e latitude.
+    Calcula o EPSG UTM local com base na longitude e latitude.
     Hemisfério Sul: EPSG 327XX
     Hemisfério Norte: EPSG 326XX
     """
@@ -57,7 +58,9 @@ def uniao_geometrias(gdf):
 
 def normalizar_classe_embrapa(txt):
     """
-    Normaliza a legenda longa da Embrapa para a chave curta usada na paleta.
+    Normaliza o texto da legenda da Embrapa para a classe usada na paleta.
+    Exemplo:
+    '2(a)bc Aptidão REGULAR...' -> '2'
     """
     txt = str(txt).strip()
 
@@ -65,8 +68,22 @@ def normalizar_classe_embrapa(txt):
         if txt.startswith(k):
             return k
 
-    if txt.lower() in ["none", "nan", ""]:
+    txt_lower = txt.lower()
+
+    if txt_lower in ["none", "nan", "", "null", "<na>"]:
         return "Sem Inf."
+
+    if "terra indígena" in txt_lower or "terra indigena" in txt_lower:
+        return "Terra indígena"
+
+    if "unidade de conservação" in txt_lower or "unidade de conservacao" in txt_lower:
+        return "Unidade de conservação"
+
+    if "corpos d" in txt_lower or "água" in txt_lower or "agua" in txt_lower:
+        return "Corpos d'água"
+
+    if "área urbana" in txt_lower or "area urbana" in txt_lower:
+        return "Área urbana"
 
     return txt
 
@@ -89,9 +106,9 @@ def corrigir_sigla_reforcada(row):
     invalidos = ["none", "nan", "", "null", "<na>"]
 
     if s.lower() in invalidos:
-        if "unidade de conservação" in c_norm:
+        if "unidade de conservação" in c_norm or "unidade de conservacao" in c_norm:
             return "UC"
-        if "terra indígena" in c_norm:
+        if "terra indígena" in c_norm or "terra indigena" in c_norm:
             return "TI"
         if "corpos d" in c_norm:
             return "Água"
@@ -127,7 +144,6 @@ def preparar_visualizacao_intersectada(gdf_intersect, epsg_metro):
     if gdf_visual.crs is None:
         gdf_visual = gdf_visual.set_crs(epsg=epsg_metro, allow_override=True)
 
-    # Simplificação em metros. Ajuste para 20 ou 30 se ainda pesar.
     try:
         gdf_visual["geometry"] = gdf_visual.geometry.simplify(
             tolerance=10,
@@ -419,18 +435,78 @@ def render_tab():
         data = st.session_state["aptidao_data"]
 
         if data.get("visual") is not None and not data["visual"].empty:
-            gdf_visual = data["visual"]
+            gdf_visual = data["visual"].copy()
+
+            # ----------------------------------------------------
+            # Blindagem da classe para não perder as cores
+            # ----------------------------------------------------
+            if "classe_norm" not in gdf_visual.columns:
+                if "legenda_ap" in gdf_visual.columns:
+                    gdf_visual["classe_norm"] = gdf_visual["legenda_ap"].apply(
+                        normalizar_classe_embrapa
+                    )
+                else:
+                    gdf_visual["classe_norm"] = "Sem Inf."
+
+            if "legenda_ap" in gdf_visual.columns:
+                mask_sem_inf = (
+                    gdf_visual["classe_norm"]
+                    .astype(str)
+                    .str.lower()
+                    .isin(["sem inf.", "sem inf", "none", "nan", "", "<na>", "null"])
+                )
+
+                gdf_visual.loc[mask_sem_inf, "classe_norm"] = (
+                    gdf_visual.loc[mask_sem_inf, "legenda_ap"]
+                    .apply(normalizar_classe_embrapa)
+                )
+
+                gdf_visual["legenda_curta"] = (
+                    gdf_visual["legenda_ap"]
+                    .astype(str)
+                    .str.slice(0, 70)
+                )
+            else:
+                gdf_visual["legenda_curta"] = ""
+
+            def cor_aptidao(feature):
+                props = feature.get("properties", {})
+
+                classe = props.get("classe_norm", "Sem Inf.")
+                legenda = props.get("legenda_ap", "")
+
+                classe_str = str(classe).strip()
+
+                if classe_str.lower() in [
+                    "sem inf.",
+                    "sem inf",
+                    "none",
+                    "nan",
+                    "",
+                    "<na>",
+                    "null"
+                ]:
+                    classe_str = normalizar_classe_embrapa(legenda)
+
+                return COLOR_MAP_LEGENDA.get(
+                    classe_str,
+                    get_color_embrapa(legenda)
+                )
 
             tooltip_apt = None
 
-            # Tooltip só para camadas pequenas, para evitar travamento.
+            # Tooltip curto para evitar caixa gigante no mapa
             if len(gdf_visual) <= 100:
                 fields_tooltip = [
-                    c for c in ["simb_apt", "classe_norm"]
+                    c for c in ["simb_apt", "classe_norm", "legenda_curta"]
                     if c in gdf_visual.columns
                 ]
-                
-                aliases_tooltip = { "simb_apt": "Aptidão:", "classe_norm": "Classe:"}
+
+                aliases_tooltip = {
+                    "simb_apt": "Aptidão:",
+                    "classe_norm": "Classe:",
+                    "legenda_curta": "Descrição:"
+                }
 
                 if fields_tooltip:
                     tooltip_apt = folium.GeoJsonTooltip(
@@ -438,24 +514,21 @@ def render_tab():
                         aliases=[aliases_tooltip.get(c, c) for c in fields_tooltip],
                         sticky=False,
                         style="""
-                        background-color: rgba(255, 255, 255, 0.92);
-                        border: 1px solid #999;
-                        border-radius: 4px;
-                        padding: 6px;
-                        font-size: 12px;
-                        max-width: 260px;
-                        white-space: normal;
-                    """
-                )
-                    
+                            background-color: rgba(255, 255, 255, 0.92);
+                            border: 1px solid #999;
+                            border-radius: 4px;
+                            padding: 6px;
+                            font-size: 12px;
+                            max-width: 260px;
+                            white-space: normal;
+                        """
+                    )
+
             folium.GeoJson(
                 gdf_visual,
                 name="Aptidão Agrícola",
                 style_function=lambda x: {
-                    "fillColor": COLOR_MAP_LEGENDA.get(
-                        x["properties"].get("classe_norm", "Sem Inf."),
-                        get_color_embrapa(x["properties"].get("legenda_ap", ""))
-                    ),
+                    "fillColor": cor_aptidao(x),
                     "color": "none",
                     "fillOpacity": 0.6
                 },
@@ -563,7 +636,10 @@ def render_tab():
                             st.rerun()
 
                         if gdf_embrapa.crs is None:
-                            gdf_embrapa = gdf_embrapa.set_crs(epsg=4326, allow_override=True)
+                            gdf_embrapa = gdf_embrapa.set_crs(
+                                epsg=4326,
+                                allow_override=True
+                            )
 
                         gdf_embrapa_utm = gdf_embrapa.to_crs(epsg=epsg_metro)
 
@@ -580,7 +656,6 @@ def render_tab():
                         if not gdf_intersect.empty:
                             gdf_intersect["area_ha"] = gdf_intersect.geometry.area / 10000
 
-                            # Limpeza das strings principais
                             if "legenda_ap" in gdf_intersect.columns:
                                 gdf_intersect["legenda_ap"] = (
                                     gdf_intersect["legenda_ap"]
@@ -619,7 +694,9 @@ def render_tab():
                             )
 
                             stats = stats[
-                                ~stats["classe_norm"].isin(["None", "nan", "", "Sem Inf."])
+                                ~stats["classe_norm"].isin(
+                                    ["None", "nan", "", "Sem Inf.", "Sem Inf"]
+                                )
                             ].copy()
 
                             stats = stats[stats["area_ha"] > 0.001].copy()
@@ -636,8 +713,6 @@ def render_tab():
                             else:
                                 stats = None
 
-                            # Camada visual otimizada:
-                            # usa apenas a interseção e simplifica a geometria.
                             gdf_visual = preparar_visualizacao_intersectada(
                                 gdf_intersect,
                                 epsg_metro
@@ -677,13 +752,16 @@ def render_tab():
         stats = st.session_state["aptidao_data"].get("stats")
 
         if stats is not None and not stats.empty:
-            # Patch para dados antigos no session_state
             if "classe_norm" not in stats.columns:
                 if "legenda_ap" in stats.columns:
-                    stats["classe_norm"] = stats["legenda_ap"].apply(normalizar_classe_embrapa)
+                    stats["classe_norm"] = stats["legenda_ap"].apply(
+                        normalizar_classe_embrapa
+                    )
                 else:
                     col_0 = stats.columns[0]
-                    stats["classe_norm"] = stats[col_0].apply(normalizar_classe_embrapa)
+                    stats["classe_norm"] = stats[col_0].apply(
+                        normalizar_classe_embrapa
+                    )
                     stats["legenda_ap"] = stats[col_0]
 
             st.markdown("#### 📊 Resultados")
