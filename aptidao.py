@@ -210,7 +210,12 @@ def opacidade_por_feature(feature):
     if classe in ["2", "6", "Sem Inf."]:
         return 0.32
 
-    if classe in ["Terra indígena", "Unidade de conservação", "Corpos d'água", "Área urbana"]:
+    if classe in [
+        "Terra indígena",
+        "Unidade de conservação",
+        "Corpos d'água",
+        "Área urbana"
+    ]:
         return 0.55
 
     return 0.48
@@ -504,7 +509,7 @@ def render_tab():
             m.get_root().html.add_child(folium.Element(legenda_html))
 
     # ============================================================
-    # DEPOIS: ELEMENTOS DO KML/KMZ POR CIMA
+    # DEPOIS: ELEMENTOS DO KML/KMZ POR CIMA, MAS NÃO INTERATIVOS
     # ============================================================
     fg_user = folium.FeatureGroup(name="Elementos do KMZ", overlay=True, show=True)
 
@@ -517,12 +522,9 @@ def render_tab():
                 "weight": 4,
                 "fillColor": "#FFD700",
                 "fillOpacity": 0.10,
+                "interactive": False,
             },
-            tooltip=folium.GeoJsonTooltip(
-                fields=["name"] if "name" in gdf_perimetro.columns else [],
-                aliases=["Elemento:"],
-                sticky=True
-            ) if "name" in gdf_perimetro.columns else "Perímetro"
+            tooltip=None,
         ).add_to(fg_user)
 
     if not gdf_outros.empty:
@@ -534,12 +536,9 @@ def render_tab():
                 "weight": 4,
                 "fillColor": "#FF0000",
                 "fillOpacity": 0.08,
+                "interactive": False,
             },
-            tooltip=folium.GeoJsonTooltip(
-                fields=["name"] if "name" in gdf_outros.columns else [],
-                aliases=["Elemento:"],
-                sticky=True
-            ) if "name" in gdf_outros.columns else "Elemento"
+            tooltip=None,
         ).add_to(fg_user)
 
     if not gdf_pontos.empty:
@@ -550,13 +549,13 @@ def render_tab():
 
             folium.Marker(
                 [lat, lon],
-                popup=nome,
-                tooltip=nome,
-                icon=folium.Icon(color=cor, icon="info-sign")
+                icon=folium.Icon(color=cor, icon="info-sign"),
+                interactive=False,
             ).add_to(fg_user)
 
             folium.map.Marker(
                 [lat, lon],
+                interactive=False,
                 icon=DivIcon(
                     icon_size=(170, 36),
                     icon_anchor=(0, 0),
@@ -569,7 +568,8 @@ def render_tab():
                             -1px -1px 0 #000,
                              1px -1px 0 #000,
                             -1px  1px 0 #000,
-                             1px  1px 0 #000;">
+                             1px  1px 0 #000;
+                        pointer-events: none;">
                         {nome}
                     </div>
                     """
