@@ -4,7 +4,7 @@ import folium
 from folium.features import DivIcon
 from streamlit_folium import st_folium
 import plotly.express as px
-from shapely.geometry import Polygon, Point, box
+from shapely.geometry import Polygon, Point
 import pandas as pd
 import tempfile
 import zipfile
@@ -36,11 +36,7 @@ COLOR_MAP_LEGENDA = {
 # ============================================================
 
 def obter_epsg_por_latlon(lon, lat):
-    """
-    Calcula o EPSG UTM local.
-    Hemisfério Sul: EPSG 327XX
-    Hemisfério Norte: EPSG 326XX
-    """
+    """Calcula UTM local."""
     zona = int((lon + 180) / 6) + 1
     return 32700 + zona if lat < 0 else 32600 + zona
 
@@ -48,7 +44,7 @@ def obter_epsg_por_latlon(lon, lat):
 def uniao_geometrias(gdf):
     """
     Une geometrias usando union_all() quando disponível.
-    Mantém compatibilidade com versões anteriores.
+    Mantém compatibilidade com versões antigas.
     """
     try:
         return gdf.geometry.union_all()
@@ -58,7 +54,7 @@ def uniao_geometrias(gdf):
 
 def normalizar_classe_embrapa(txt):
     """
-    Normaliza a legenda da Embrapa para a classe usada na paleta.
+    Normaliza o texto da Embrapa para a chave curta de cor.
     Exemplo:
     '2(a)bc Aptidão REGULAR...' -> '2'
     """
@@ -88,9 +84,6 @@ def normalizar_classe_embrapa(txt):
 
 
 def get_color_embrapa(txt):
-    """
-    Retorna a cor da classe da Embrapa.
-    """
     key = normalizar_classe_embrapa(txt)
     return COLOR_MAP_LEGENDA.get(key, "#DDDDDD")
 
@@ -119,35 +112,14 @@ def corrigir_sigla_reforcada(row):
     return s
 
 
-def aplicar_fit_bounds(mapa, bounds, margem=0.02):
+def preparar_visual_embrapa(gdf_embrapa):
     """
-    Ajusta o mapa para enquadrar os limites informados.
-    """
-    try:
-        minx, miny, maxx, maxy = bounds
+    Mantém a lógica original:
+    mostra TODO o entorno retornado pelo WFS da Embrapa.
 
-        if minx == maxx:
-            minx -= margem
-            maxx += margem
-
-        if miny == maxy:
-            miny -= margem
-            maxy += margem
-
-        mapa.fit_bounds([[miny, minx], [maxy, maxx]])
-    except Exception:
-        pass
-
-
-def preparar_visualizacao_entorno(gdf_embrapa, gdf_bbox_visual, epsg_metro):
-    """
-    Prepara a camada visual do ENTORNO:
-    - usa toda a base Embrapa retornada pelo bbox visual;
-    - recorta pelo retângulo do entorno;
-    - NÃO recorta pelos buffers/pontos;
-    - mantém colunas necessárias;
-    - simplifica geometria;
-    - retorna em EPSG:4326.
+    Não faz overlay com buffers.
+    Não recorta pela geometria dos elementos.
+    Apenas limpa campos e cria classe_norm para cor/tooltip.
     """
     if gdf_embrapa is None or gdf_embrapa.empty:
         return None
@@ -157,22 +129,7 @@ def preparar_visualizacao_entorno(gdf_embrapa, gdf_bbox_visual, epsg_metro):
     if gdf_visual.crs is None:
         gdf_visual = gdf_visual.set_crs(epsg=4326, allow_override=True)
 
-    try:
-        gdf_visual_utm = gdf_visual.to_crs(epsg=epsg_metro)
-        gdf_bbox_utm = gdf_bbox_visual.to_crs(epsg=epsg_metro)
-
-        gdf_visual = gpd.overlay(
-            gdf_visual_utm,
-            gdf_bbox_utm,
-            how="intersection",
-            keep_geom_type=False
-        )
-
-    except Exception:
-        gdf_visual = gdf_visual.to_crs(epsg=epsg_metro)
-
-    if gdf_visual.empty:
-        return None
+    gdf_visual = gdf_visual.to_crs(epsg=4326)
 
     if "legenda_ap" in gdf_visual.columns:
         gdf_visual["legenda_ap"] = (
@@ -203,29 +160,60 @@ def preparar_visualizacao_entorno(gdf_embrapa, gdf_bbox_visual, epsg_metro):
         axis=1
     )
 
-    cols_visuais = [
-        c for c in ["simb_apt", "legenda_ap", "classe_norm", "geometry"]
-        if c in gdf_visual.columns
-    ]
-
-    gdf_visual = gdf_visual[cols_visuais].copy()
-
-    try:
-        gdf_visual["geometry"] = gdf_visual.geometry.simplify(
-            tolerance=20,
-            preserve_topology=True
-        )
-    except Exception:
-        pass
+    gdf_visual["legenda_curta"] = (
+        gdf_visual["legenda_ap"]
+        .astype(str)
+        .str.slice(0, 90)
+    )
 
     gdf_visual = gdf_visual[
         gdf_visual.geometry.notna() & ~gdf_visual.geometry.is_empty
     ].copy()
 
-    if gdf_visual.empty:
-        return None
+    return gdf_visual
 
-    return gdf_visual.to_crs(epsg=4326)
+
+def cor_aptidao_por_feature(feature):
+    """
+    Define cor da camada de aptidão.
+    """
+    props = feature.get("properties", {})
+    classe = props.get("classe_norm", "")
+    legenda = props.get("legenda_ap", "")
+
+    classe_str = str(classe).strip()
+
+    if classe_str.lower() in [
+        "sem inf.",
+        "sem inf",
+        "none",
+        "nan",
+        "",
+        "<na>",
+        "null"
+    ]:
+        classe_str = normalizar_classe_embrapa(legenda)
+
+    return COLOR_MAP_LEGENDA.get(
+        classe_str,
+        get_color_embrapa(legenda)
+    )
+
+
+def opacidade_por_feature(feature):
+    """
+    Reduz a opacidade das classes muito dominantes para evitar o efeito de 'quadradão'.
+    """
+    props = feature.get("properties", {})
+    classe = str(props.get("classe_norm", "")).strip()
+
+    if classe in ["2", "6", "Sem Inf."]:
+        return 0.32
+
+    if classe in ["Terra indígena", "Unidade de conservação", "Corpos d'água", "Área urbana"]:
+        return 0.55
+
+    return 0.48
 
 
 # ============================================================
@@ -233,10 +221,6 @@ def preparar_visualizacao_entorno(gdf_embrapa, gdf_bbox_visual, epsg_metro):
 # ============================================================
 
 def carregar_kmz_kml_bs4(uploaded_file):
-    """
-    Lê KML/KMZ/ZIP usando BeautifulSoup.
-    Retorna GeoDataFrame em EPSG:4326.
-    """
     try:
         suffix = os.path.splitext(uploaded_file.name)[1]
 
@@ -322,7 +306,7 @@ def carregar_kmz_kml_bs4(uploaded_file):
 
 
 # ============================================================
-# 4. RENDERIZAÇÃO DA ABA
+# 4. RENDERIZAÇÃO
 # ============================================================
 
 def render_tab():
@@ -363,7 +347,7 @@ def render_tab():
         return
 
     # ------------------------------------------------------------
-    # Leitura do KML/KMZ
+    # Lê KML/KMZ
     # ------------------------------------------------------------
     gdf_raw, erro = carregar_kmz_kml_bs4(uploaded_file)
 
@@ -375,9 +359,6 @@ def render_tab():
         st.warning("Arquivo sem geometria válida.")
         return
 
-    # ------------------------------------------------------------
-    # Preparação das geometrias do usuário
-    # ------------------------------------------------------------
     centroid_geral = uniao_geometrias(gdf_raw).centroid
     epsg_metro = obter_epsg_por_latlon(centroid_geral.x, centroid_geral.y)
 
@@ -393,7 +374,10 @@ def render_tab():
             .str.lower()
         )
 
-        mask_av = gdf_poligonos_raw["name_lower"].str.contains("avaliando", na=False)
+        mask_av = gdf_poligonos_raw["name_lower"].str.contains(
+            "avaliando",
+            na=False
+        )
 
         if mask_av.any():
             gdf_perimetro = gdf_poligonos_raw[mask_av].copy()
@@ -422,7 +406,7 @@ def render_tab():
     # ------------------------------------------------------------
     m = folium.Map(
         location=[centroid_geral.y, centroid_geral.x],
-        zoom_start=10,
+        zoom_start=13,
         tiles=None
     )
 
@@ -432,170 +416,56 @@ def render_tab():
         name="Satélite"
     ).add_to(m)
 
-    bounds_mapa = gdf_raw.total_bounds
-
-    fg_user = folium.FeatureGroup(name="Elementos do KMZ")
-
-    if not gdf_perimetro.empty:
-        folium.GeoJson(
-            gdf_perimetro,
-            name="Perímetro",
-            style_function=lambda x: {
-                "color": "black",
-                "weight": 3,
-                "fillColor": "#FFD700",
-                "fillOpacity": 0.1
-            },
-            tooltip="Perímetro"
-        ).add_to(fg_user)
-
-    if not gdf_outros.empty:
-        folium.GeoJson(
-            gdf_outros,
-            name="Outras Áreas",
-            style_function=lambda x: {
-                "color": "red",
-                "weight": 2,
-                "fillColor": "none"
-            },
-            tooltip="Elemento"
-        ).add_to(fg_user)
-
-    if not gdf_pontos.empty:
-        for _, row in gdf_pontos.iterrows():
-            nome = row["name"]
-            lat, lon = row.geometry.y, row.geometry.x
-            cor = "green" if "avaliando" in str(nome).lower() else "red"
-
-            folium.Marker(
-                [lat, lon],
-                popup=nome,
-                icon=folium.Icon(color=cor, icon="info-sign")
-            ).add_to(fg_user)
-
-            folium.map.Marker(
-                [lat, lon],
-                icon=DivIcon(
-                    icon_size=(150, 36),
-                    icon_anchor=(0, 0),
-                    html=f"""
-                    <div style="
-                        font-size: 11px;
-                        font-weight: bold;
-                        color: white;
-                        text-shadow:
-                            -1px -1px 0 #000,
-                             1px -1px 0 #000,
-                            -1px  1px 0 #000,
-                             1px  1px 0 #000;">
-                        {nome}
-                    </div>
-                    """
-                )
-            ).add_to(fg_user)
-
-    fg_user.add_to(m)
-
-    # ------------------------------------------------------------
-    # Se já processou, adiciona camada da aptidão do entorno
-    # ------------------------------------------------------------
+    # ============================================================
+    # PRIMEIRO: CAMADA DE APTIDÃO COMO FUNDO
+    # ============================================================
     if st.session_state.get("aptidao_concluida") and st.session_state.get("aptidao_data"):
         data = st.session_state["aptidao_data"]
 
         if data.get("visual") is not None and not data["visual"].empty:
             gdf_visual = data["visual"].copy()
-            bounds_mapa = gdf_visual.total_bounds
 
-            if "classe_norm" not in gdf_visual.columns:
-                if "legenda_ap" in gdf_visual.columns:
-                    gdf_visual["classe_norm"] = gdf_visual["legenda_ap"].apply(
-                        normalizar_classe_embrapa
-                    )
-                else:
-                    gdf_visual["classe_norm"] = "Sem Inf."
+            fields_tooltip = [
+                c for c in ["simb_apt", "classe_norm", "legenda_curta"]
+                if c in gdf_visual.columns
+            ]
 
-            if "legenda_ap" in gdf_visual.columns:
-                mask_sem_inf = (
-                    gdf_visual["classe_norm"]
-                    .astype(str)
-                    .str.lower()
-                    .isin(["sem inf.", "sem inf", "none", "nan", "", "<na>", "null"])
-                )
-
-                gdf_visual.loc[mask_sem_inf, "classe_norm"] = (
-                    gdf_visual.loc[mask_sem_inf, "legenda_ap"]
-                    .apply(normalizar_classe_embrapa)
-                )
-
-                gdf_visual["legenda_curta"] = (
-                    gdf_visual["legenda_ap"]
-                    .astype(str)
-                    .str.slice(0, 70)
-                )
-            else:
-                gdf_visual["legenda_curta"] = ""
-
-            def cor_aptidao(feature):
-                props = feature.get("properties", {})
-
-                classe = props.get("classe_norm", "Sem Inf.")
-                legenda = props.get("legenda_ap", "")
-
-                classe_str = str(classe).strip()
-
-                if classe_str.lower() in [
-                    "sem inf.",
-                    "sem inf",
-                    "none",
-                    "nan",
-                    "",
-                    "<na>",
-                    "null"
-                ]:
-                    classe_str = normalizar_classe_embrapa(legenda)
-
-                return COLOR_MAP_LEGENDA.get(
-                    classe_str,
-                    get_color_embrapa(legenda)
-                )
+            aliases_tooltip = {
+                "simb_apt": "Aptidão:",
+                "classe_norm": "Classe:",
+                "legenda_curta": "Descrição:"
+            }
 
             tooltip_apt = None
-
-            if len(gdf_visual) <= 100:
-                fields_tooltip = [
-                    c for c in ["simb_apt", "classe_norm", "legenda_curta"]
-                    if c in gdf_visual.columns
-                ]
-
-                aliases_tooltip = {
-                    "simb_apt": "Aptidão:",
-                    "classe_norm": "Classe:",
-                    "legenda_curta": "Descrição:"
-                }
-
-                if fields_tooltip:
-                    tooltip_apt = folium.GeoJsonTooltip(
-                        fields=fields_tooltip,
-                        aliases=[aliases_tooltip.get(c, c) for c in fields_tooltip],
-                        sticky=False,
-                        style="""
-                            background-color: rgba(255, 255, 255, 0.92);
-                            border: 1px solid #999;
-                            border-radius: 4px;
-                            padding: 6px;
-                            font-size: 12px;
-                            max-width: 260px;
-                            white-space: normal;
-                        """
-                    )
+            if fields_tooltip:
+                tooltip_apt = folium.GeoJsonTooltip(
+                    fields=fields_tooltip,
+                    aliases=[aliases_tooltip.get(c, c) for c in fields_tooltip],
+                    sticky=True,
+                    style="""
+                        background-color: rgba(255, 255, 255, 0.94);
+                        border: 1px solid #777;
+                        border-radius: 4px;
+                        padding: 6px;
+                        font-size: 12px;
+                        max-width: 260px;
+                        white-space: normal;
+                    """
+                )
 
             folium.GeoJson(
                 gdf_visual,
-                name="Aptidão Agrícola - Entorno",
+                name="Aptidão Agrícola",
                 style_function=lambda x: {
-                    "fillColor": cor_aptidao(x),
-                    "color": "none",
-                    "fillOpacity": 0.6
+                    "fillColor": cor_aptidao_por_feature(x),
+                    "color": "transparent",
+                    "weight": 0,
+                    "fillOpacity": opacidade_por_feature(x),
+                },
+                highlight_function=lambda x: {
+                    "weight": 2,
+                    "color": "#222222",
+                    "fillOpacity": min(opacidade_por_feature(x) + 0.18, 0.75),
                 },
                 tooltip=tooltip_apt
             ).add_to(m)
@@ -633,10 +503,85 @@ def render_tab():
             legenda_html += "</div>"
             m.get_root().html.add_child(folium.Element(legenda_html))
 
+    # ============================================================
+    # DEPOIS: ELEMENTOS DO KML/KMZ POR CIMA
+    # ============================================================
+    fg_user = folium.FeatureGroup(name="Elementos do KMZ", overlay=True, show=True)
+
+    if not gdf_perimetro.empty:
+        folium.GeoJson(
+            gdf_perimetro,
+            name="Perímetro",
+            style_function=lambda x: {
+                "color": "#000000",
+                "weight": 4,
+                "fillColor": "#FFD700",
+                "fillOpacity": 0.10,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["name"] if "name" in gdf_perimetro.columns else [],
+                aliases=["Elemento:"],
+                sticky=True
+            ) if "name" in gdf_perimetro.columns else "Perímetro"
+        ).add_to(fg_user)
+
+    if not gdf_outros.empty:
+        folium.GeoJson(
+            gdf_outros,
+            name="Outras Áreas",
+            style_function=lambda x: {
+                "color": "#FF0000",
+                "weight": 4,
+                "fillColor": "#FF0000",
+                "fillOpacity": 0.08,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["name"] if "name" in gdf_outros.columns else [],
+                aliases=["Elemento:"],
+                sticky=True
+            ) if "name" in gdf_outros.columns else "Elemento"
+        ).add_to(fg_user)
+
+    if not gdf_pontos.empty:
+        for _, row in gdf_pontos.iterrows():
+            nome = row["name"]
+            lat, lon = row.geometry.y, row.geometry.x
+            cor = "green" if "avaliando" in str(nome).lower() else "red"
+
+            folium.Marker(
+                [lat, lon],
+                popup=nome,
+                tooltip=nome,
+                icon=folium.Icon(color=cor, icon="info-sign")
+            ).add_to(fg_user)
+
+            folium.map.Marker(
+                [lat, lon],
+                icon=DivIcon(
+                    icon_size=(170, 36),
+                    icon_anchor=(0, 0),
+                    html=f"""
+                    <div style="
+                        font-size: 11px;
+                        font-weight: bold;
+                        color: white;
+                        text-shadow:
+                            -1px -1px 0 #000,
+                             1px -1px 0 #000,
+                            -1px  1px 0 #000,
+                             1px  1px 0 #000;">
+                        {nome}
+                    </div>
+                    """
+                )
+            ).add_to(fg_user)
+
+    fg_user.add_to(m)
+
     # ------------------------------------------------------------
     # Botão Processar
     # ------------------------------------------------------------
-    else:
+    if not st.session_state.get("aptidao_concluida"):
         with c2:
             if st.button("🚀 Processar", use_container_width=True):
                 with st.spinner("Analisando aptidão agrícola..."):
@@ -658,10 +603,6 @@ def render_tab():
                             st.warning("Arquivo vazio ou sem geometria válida para cálculo.")
                             st.stop()
 
-                        # ------------------------------------------------
-                        # GEOMETRIA DE CÁLCULO:
-                        # usada apenas para tabela e gráfico
-                        # ------------------------------------------------
                         gdf_calculo = gpd.GeoDataFrame(
                             pd.concat(lista_calc, ignore_index=True),
                             geometry="geometry",
@@ -676,36 +617,19 @@ def render_tab():
                         )
 
                         # ------------------------------------------------
-                        # GEOMETRIA VISUAL:
-                        # usa a extensão bruta do KML/KMZ inteiro
-                        # NÃO usa os buffers
+                        # BBOX IGUAL À LÓGICA ORIGINAL:
+                        # usa união dos elementos/buffers + margem.
+                        # A camada visual será todo o retorno do WFS.
                         # ------------------------------------------------
-                        bounds_visual = gdf_raw.total_bounds
+                        bounds = gdf_uniao.to_crs(epsg=4326).total_bounds
 
-                        # Margem visual em graus.
-                        # 0.15 equivale aproximadamente a 15 km.
-                        # Aumente para 0.20 ou 0.30 se quiser mais entorno.
-                        margem_visual = 0.15
-
-                        bbox_visual_geom = box(
-                            bounds_visual[0] - margem_visual,
-                            bounds_visual[1] - margem_visual,
-                            bounds_visual[2] + margem_visual,
-                            bounds_visual[3] + margem_visual
-                        )
-
-                        gdf_bbox_visual = gpd.GeoDataFrame(
-                            geometry=[bbox_visual_geom],
-                            crs="EPSG:4326"
-                        )
-
-                        bbox_bounds = gdf_bbox_visual.total_bounds
+                        margem = 0.05
 
                         bbox_str = (
-                            f"{bbox_bounds[0]},"
-                            f"{bbox_bounds[1]},"
-                            f"{bbox_bounds[2]},"
-                            f"{bbox_bounds[3]}"
+                            f"{bounds[0] - margem},"
+                            f"{bounds[1] - margem},"
+                            f"{bounds[2] + margem},"
+                            f"{bounds[3] + margem}"
                         )
 
                         wfs_url = (
@@ -734,16 +658,14 @@ def render_tab():
                             )
 
                         # ------------------------------------------------
-                        # VISUAL: ENTORNO COMPLETO DO BBOX
+                        # VISUAL:
+                        # mantém o entorno completo retornado pela Embrapa.
                         # ------------------------------------------------
-                        gdf_visual = preparar_visualizacao_entorno(
-                            gdf_embrapa,
-                            gdf_bbox_visual,
-                            epsg_metro
-                        )
+                        gdf_visual = preparar_visual_embrapa(gdf_embrapa)
 
                         # ------------------------------------------------
-                        # ESTATÍSTICA: APENAS INTERSEÇÃO COM ELEMENTOS
+                        # ESTATÍSTICA:
+                        # somente interseção com elementos/buffers.
                         # ------------------------------------------------
                         gdf_embrapa_utm = gdf_embrapa.to_crs(epsg=epsg_metro)
 
@@ -830,10 +752,8 @@ def render_tab():
                         st.error(f"Erro ao processar aptidão agrícola: {e}")
 
     # ------------------------------------------------------------
-    # Controle de camadas e renderização do mapa
+    # Renderização do mapa
     # ------------------------------------------------------------
-    aplicar_fit_bounds(m, bounds_mapa)
-
     folium.LayerControl().add_to(m)
 
     st_folium(
