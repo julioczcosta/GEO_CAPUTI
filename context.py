@@ -50,6 +50,7 @@ def consultar_camadas_extras(lat, lon):
                 resultados["amazonia_legal"] = True
     except Exception as e:
         print(f"[DEBUG AMZ] ERRO={e}")
+    return resultados
     
 # --- RENDERIZAÇÃO DA ABA ---
 def render_tab():
