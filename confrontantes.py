@@ -865,12 +865,9 @@ def render_tab():
                 area_fmt = f"{area:.2f} ha" if area else "—"
                 sob_html = ""
                 if classificacao == "Sobreposição":
-                    sob_html = f"""
-                        <div class="detalhe-linha">
-                            <span class="detalhe-chave">Área Sobreposta</span>
-                            <span class="detalhe-valor" style="color:#c0392b;">{area_sob:.4f} ha</span>
-                        </div>
-                    """
+                    sob_html = ""
+                if classificacao == "Sobreposição":
+                    sob_html = f'<div class="detalhe-linha"><span class="detalhe-chave">Área Sobreposta</span><span class="detalhe-valor" style="color:#c0392b;">{area_sob:.4f} ha</span></div>'
 
                 uf_fonte = row_sel.get('_uf_fonte', '—')
 
