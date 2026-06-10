@@ -590,6 +590,16 @@ def render_tab():
 
     gdf_res = st.session_state['confrontantes_resultado']
     gdf_wgs = st.session_state['confrontantes_imovel_wgs']
+    # Compatibilidade: cria numeração se vier de sessão antiga
+    if "_num" not in gdf_res.columns:
+        gdf_res = gdf_res.copy()
+        gdf_res["_ordem"] = gdf_res["_classificacao"].apply(
+            lambda x: 0 if x == "Sobreposição" else 1
+        )
+        gdf_res = gdf_res.sort_values("_ordem").reset_index(drop=True)
+        gdf_res["_num"] = range(2, len(gdf_res) + 2)
+        gdf_res = gdf_res.drop(columns=["_ordem"])
+        st.session_state['confrontantes_resultado'] = gdf_res
 
     n_sob = len(gdf_res[gdf_res["_classificacao"] == "Sobreposição"])
     n_conf = len(gdf_res[gdf_res["_classificacao"] == "Confrontante"])
