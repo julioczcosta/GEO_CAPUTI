@@ -8,6 +8,7 @@ import consulta_car
 import consulta_bases
 import impedimentos
 import aptidao
+import confrontantes
 import hmac
 import base64
 from streamlit_option_menu import option_menu
@@ -68,13 +69,11 @@ st.markdown("""
        1. LAYOUT E ESPAÇAMENTO
        ============================================================ */
     
-    /* Aumenta o espaço no topo para a Logo não ficar espremida */
     .block-container {
         padding-top: 3.5rem !important; 
         padding-bottom: 3rem;
     }
     
-    /* Ajuste fino para o menu horizontal (option_menu) centralizar verticalmente */
     div[data-testid="stHorizontalBlock"] {
         align-items: center;
     }
@@ -83,14 +82,12 @@ st.markdown("""
        2. TIPOGRAFIA E CORES
        ============================================================ */
     
-    /* Fontes modernas e cor Chumbo para títulos */
     h1, h2, h3, h4, h5 { 
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
         color: #2C3E50; 
         font-weight: 600;
     }
     
-    /* Texto de ajuda (captions) mais legível */
     .stCaption {
         color: #666;
         font-size: 0.9rem;
@@ -100,7 +97,6 @@ st.markdown("""
        3. SIDEBAR (MENU LATERAL)
        ============================================================ */
     
-    /* Box do Imóvel Ativo (Verde Claro com Texto Verde Escuro) */
     .imovel-box {
         background-color: #e8f5e9; 
         color: #1b5e20; 
@@ -119,8 +115,6 @@ st.markdown("""
        4. BOTÕES (SISTEMA BICOLOR: VERDE & CHUMBO)
        ============================================================ */
 
-    /* TIPO A: BOTÃO PRIMÁRIO (Use type="primary" no Python)
-       Cor: Fundo Verde Sólido, Texto Branco */
     div.stButton > button[kind="primary"] {
         background-color: #009e60 !important;
         border-color: #009e60 !important;
@@ -130,7 +124,6 @@ st.markdown("""
         transition: all 0.3s ease;
     }
     
-    /* Hover do Primário (Fica um verde mais escuro) */
     div.stButton > button[kind="primary"]:hover {
         background-color: #007f4d !important;
         border-color: #007f4d !important;
@@ -138,8 +131,6 @@ st.markdown("""
         transform: translateY(-1px);
     }
 
-    /* TIPO B: BOTÃO SECUNDÁRIO/PADRÃO (Sem type="primary")
-       Cor: Fundo Transparente, Borda e Texto Chumbo */
     div.stButton > button:not([kind="primary"]) {
         background-color: transparent !important;
         color: #2C3E50 !important;
@@ -150,7 +141,6 @@ st.markdown("""
         transition: all 0.3s ease;
     }
 
-    /* Hover do Secundário (Fica Chumbo Sólido com Texto Branco) */
     div.stButton > button:not([kind="primary"]):hover {
         background-color: #2C3E50 !important;
         color: white !important;
@@ -162,19 +152,16 @@ st.markdown("""
        5. COMPONENTES EXTRAS
        ============================================================ */
     
-    /* Inputs (Caixas de texto) com foco Verde */
     div[data-baseweb="input"] > div:focus-within {
         border-color: #009e60 !important;
         box-shadow: none !important;
     }
 
-    /* Checkboxes e Radios com cor de seleção Verde */
     div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {
         background-color: #009e60 !important; 
         border-color: #009e60 !important;
     }
 
-    /* Alertas e Infos (Suavizar bordas) */
     .stAlert {
         border-radius: 8px;
         border: none;
@@ -189,15 +176,12 @@ if hasattr(utils, 'init_gee'):
 if hasattr(utils, 'init_session_state'):
     utils.init_session_state()
 
-# --- BARRA LATERAL (MENU LIMPO) ---
+# --- BARRA LATERAL ---
 with st.sidebar:
-    # Mostra quem está logado de forma discreta
     usuario_logado = st.session_state.get("user_email", "Usuário")
     st.caption(f"👤 {usuario_logado}")
-    st.write("") # Espaço
+    st.write("")
     
-    # SELETOR DE MODO (Sem título "Menu" e sem label "Navegação")
-    # Trocamos "Ferramentas Avulsas" por "Consultas Públicas"
     modo_operacao = st.radio(
         "Navegação", 
         ["Diagnóstico do Imóvel", "Consultas Públicas"],
@@ -207,7 +191,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # BOX DO IMÓVEL ATIVO
     if 'last_code' in st.session_state and modo_operacao == "Diagnóstico do Imóvel":
         imovel_nome = st.session_state['last_code']
         st.markdown(f"""
@@ -255,44 +238,34 @@ except FileNotFoundError:
     st.markdown("<h1 style='text-align: center;'>GEOCAPUTI</h1>", unsafe_allow_html=True)
 
 # =========================================================
-# 🧭 BARRA DE NAVEGAÇÃO MODERNA (OPTION MENU)
+# 🧭 BARRA DE NAVEGAÇÃO
 # =========================================================
 
-# Estilo personalizado do Menu (AUMENTADO A ALTURA AQUI)
 styles_menu = {
     "container": {"padding": "0!important", "background-color": "#f8f9fa"},
-    
-    # Ícone maior
     "icon": {"color": "#555", "font-size": "16px"}, 
-    
-    # Texto maior e botões mais altos (Padding 12px)
     "nav-link": {
         "font-size": "16px", 
         "text-align": "center", 
         "margin": "0px", 
-        "padding-top": "12px",     # Aumenta a altura para cima
-        "padding-bottom": "12px",  # Aumenta a altura para baixo
+        "padding-top": "12px",
+        "padding-bottom": "12px",
         "--hover-color": "#eee"
     },
-    
-    "nav-link-selected": {"background-color": "#009e60", "font-weight": "600"}, # Verde GEOCAPUTI
+    "nav-link-selected": {"background-color": "#009e60", "font-weight": "600"},
 }
 
 if modo_operacao == "Diagnóstico do Imóvel":
-    # ---------------------------------------------------------
-    # MENU DIAGNÓSTICO
-    # ---------------------------------------------------------
     selected = option_menu(
         menu_title=None, 
-        options=["Início", "Contexto", "Imagens de Satélite", "Climatologia", "Impedimentos"],
-        icons=["house", "geo-alt", "layers", "cloud-rain", "exclamation-triangle"], 
+        options=["Início", "Contexto", "Imagens de Satélite", "Climatologia", "Impedimentos", "Confrontantes"],
+        icons=["house", "geo-alt", "layers", "cloud-rain", "exclamation-triangle", "people-fill"], 
         menu_icon="cast", 
         default_index=0, 
         orientation="horizontal",
         styles=styles_menu
     )
 
-    # Roteamento das Páginas
     if selected == "Início":
         home.render_tab()
     elif selected == "Contexto":
@@ -303,12 +276,10 @@ if modo_operacao == "Diagnóstico do Imóvel":
         climatology.render_tab()
     elif selected == "Impedimentos":
         impedimentos.render_tab()
+    elif selected == "Confrontantes":
+        confrontantes.render_tab()
 
 else:
-    # ---------------------------------------------------------
-    # MENU CONSULTAS PÚBLICAS (Antigo Ferramentas)
-    # ---------------------------------------------------------
-    
     selected_tool = option_menu(
         menu_title=None, 
         options=["Consulta CAR", "Consulta INCRA", "Aptidão Agrícola"],
