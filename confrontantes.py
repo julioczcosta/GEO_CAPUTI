@@ -343,7 +343,157 @@ def extrair_area(row):
     return None
 
 # ==========================================
-# 4. RENDERIZAÇÃO
+# 4. GERAÇÃO DE KML
+# ==========================================
+
+def _geom_to_kml_polygons(geom):
+    """Converte geometria shapely em tags <Polygon> do KML."""
+    if geom is None or geom.is_empty:
+        return ""
+
+    if geom.geom_type == 'Polygon':
+        polys = [geom]
+    elif geom.geom_type == 'MultiPolygon':
+        polys = list(geom.geoms)
+    else:
+        return ""
+
+    parts = []
+    for poly in polys:
+        if poly.is_empty:
+            continue
+        coords = " ".join([f"{p[0]},{p[1]},0" for p in poly.exterior.coords])
+        parts.append(
+            f'<Polygon><outerBoundaryIs><LinearRing>'
+            f'<coordinates>{coords}</coordinates>'
+            f'</LinearRing></outerBoundaryIs></Polygon>'
+        )
+
+    if len(parts) > 1:
+        return '<MultiGeometry>' + ''.join(parts) + '</MultiGeometry>'
+    if len(parts) == 1:
+        return parts[0]
+    return ""
+
+
+# Estilos KML (cores em formato AABBGGRR)
+_KML_STYLES = """
+    <Style id="imovel">
+        <LineStyle><color>ffffe500</color><width>4</width></LineStyle>
+        <PolyStyle><color>20ffe500</color></PolyStyle>
+    </Style>
+    <Style id="sobreposicao">
+        <LineStyle><color>ff2b39c0</color><width>3</width></LineStyle>
+        <PolyStyle><color>662b39c0</color></PolyStyle>
+    </Style>
+    <Style id="confrontante">
+        <LineStyle><color>ff17a0d4</color><width>3</width></LineStyle>
+        <PolyStyle><color>4017a0d4</color></PolyStyle>
+    </Style>
+"""
+
+
+def _placemark(num, nome, descricao, style_id, geom):
+    """Gera um Placemark KML."""
+    coords = _geom_to_kml_polygons(geom)
+    if not coords:
+        return ""
+    desc_safe = (descricao
+                 .replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+    return (
+        '<Placemark>'
+        f'<name>#{num} - {nome}</name>'
+        f'<description><![CDATA[{desc_safe}]]></description>'
+        f'<styleUrl>#{style_id}</styleUrl>'
+        f'{coords}'
+        '</Placemark>'
+    )
+
+
+def gerar_kml_completo(gdf_imovel, gdf_res, codigo_imovel):
+    """KML único com o imóvel + todos confrontantes/sobreposições numerados."""
+    geom_imovel = gdf_imovel.unary_union
+
+    placemarks = [
+        _placemark(
+            1, "Imóvel Analisado",
+            f"Código: {codigo_imovel}",
+            "imovel", geom_imovel
+        )
+    ]
+
+    for idx, row in gdf_res.iterrows():
+        num = int(row["_num"])
+        classificacao = row["_classificacao"]
+        cod = extrair_codigo_car(row)
+        mun = extrair_municipio(row)
+        status = extrair_status(row)
+        area = extrair_area(row)
+        area_sob = row.get("_area_sobreposicao_ha", 0)
+
+        desc = (
+            f"Tipo: {classificacao}\n"
+            f"Código CAR: {cod}\n"
+            f"Município: {mun}\n"
+            f"Área Declarada: {area if area else '—'} ha\n"
+            f"Status: {status}"
+        )
+        if classificacao == "Sobreposição":
+            desc += f"\nÁrea Sobreposta: {area_sob:.4f} ha"
+
+        style = "sobreposicao" if classificacao == "Sobreposição" else "confrontante"
+        nome = f"{classificacao} - {cod}"
+
+        placemarks.append(_placemark(num, nome, desc, style, row.geometry))
+
+    kml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<kml xmlns="http://www.opengis.net/kml/2.2">'
+        '<Document>'
+        f'<name>Confrontantes_{codigo_imovel}</name>'
+        f'{_KML_STYLES}'
+        + ''.join(placemarks) +
+        '</Document></kml>'
+    )
+    return kml.encode('utf-8')
+
+
+def gerar_kml_individual(row, num):
+    """KML de um único registro (confrontante ou sobreposição)."""
+    classificacao = row["_classificacao"]
+    cod = extrair_codigo_car(row)
+    mun = extrair_municipio(row)
+    status = extrair_status(row)
+    area = extrair_area(row)
+    area_sob = row.get("_area_sobreposicao_ha", 0)
+
+    desc = (
+        f"Tipo: {classificacao}\n"
+        f"Código CAR: {cod}\n"
+        f"Município: {mun}\n"
+        f"Área Declarada: {area if area else '—'} ha\n"
+        f"Status: {status}"
+    )
+    if classificacao == "Sobreposição":
+        desc += f"\nÁrea Sobreposta: {area_sob:.4f} ha"
+
+    style = "sobreposicao" if classificacao == "Sobreposição" else "confrontante"
+    nome = f"{classificacao} - {cod}"
+
+    kml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<kml xmlns="http://www.opengis.net/kml/2.2">'
+        '<Document>'
+        f'<name>{cod}</name>'
+        f'{_KML_STYLES}'
+        + _placemark(num, nome, desc, style, row.geometry) +
+        '</Document></kml>'
+    )
+    return kml.encode('utf-8')
+
+
+# ==========================================
+# 5. RENDERIZAÇÃO
 # ==========================================
 
 def render_tab():
@@ -419,6 +569,14 @@ def render_tab():
             else:
                 areas_sob.append(0.0)
         gdf_resultado["_area_sobreposicao_ha"] = areas_sob
+
+        # Ordena (sobreposição primeiro) e numera a partir de 2 (#1 = imóvel)
+        gdf_resultado["_ordem"] = gdf_resultado["_classificacao"].apply(
+            lambda x: 0 if x == "Sobreposição" else 1
+        )
+        gdf_resultado = gdf_resultado.sort_values("_ordem").reset_index(drop=True)
+        gdf_resultado["_num"] = range(2, len(gdf_resultado) + 2)
+        gdf_resultado = gdf_resultado.drop(columns=["_ordem"])
 
         st.session_state['confrontantes_resultado'] = gdf_resultado
         st.session_state['confrontantes_imovel_wgs'] = gdf_wgs
@@ -505,19 +663,19 @@ def render_tab():
         ).add_to(m)
         folium.TileLayer("OpenStreetMap", name="Mapa").add_to(m)
 
-        # FeatureGroups para garantir ordem de empilhamento correta
-        fg_cars = folium.FeatureGroup(name="CARs Identificados", show=True)
-        fg_imovel = folium.FeatureGroup(name="Imóvel (KML)", show=True)
-
-        # 1º — CARs classificados (camada inferior)
+        # ---- 1º: CARs (cada um em seu FeatureGroup numerado) ----
         for _, row in gdf_res.iterrows():
             classificacao = row["_classificacao"]
+            num = int(row["_num"])
+
             if classificacao == "Sobreposição":
                 cor = "#c0392b"
+                emoji = "🔴"
                 peso = 2.5
                 fill_opacity = 0.4
             else:
                 cor = "#d4a017"
+                emoji = "🟡"
                 peso = 2
                 fill_opacity = 0.2
 
@@ -529,9 +687,15 @@ def render_tab():
             area_sob = row.get("_area_sobreposicao_ha", 0)
             sob_str = f"<br><b>Área Sobreposta:</b> {area_sob:.4f} ha" if classificacao == "Sobreposição" else ""
 
+            cod_short = cod[:25] + "..." if len(cod) > 25 else cod
+            fg_nome = f"{emoji} #{num} - {classificacao} ({cod_short})"
+            fg_item = folium.FeatureGroup(name=fg_nome, show=True)
+
             tooltip_html = f"""
                 <div style="font-family:sans-serif;font-size:12px;line-height:1.5;min-width:220px;">
-                    <div style="font-weight:700;color:{cor};margin-bottom:4px;text-transform:uppercase;">{classificacao}</div>
+                    <div style="font-weight:700;color:{cor};margin-bottom:4px;text-transform:uppercase;">
+                        #{num} · {classificacao}
+                    </div>
                     <b>Código:</b> <span style="font-family:monospace;">{cod}</span><br>
                     <b>Município:</b> {mun}<br>
                     <b>Área:</b> {area_str}<br>
@@ -541,6 +705,7 @@ def render_tab():
             """
 
             try:
+                # Polígono
                 folium.GeoJson(
                     row.geometry.__geo_interface__,
                     style_function=lambda x, c=cor, p=peso, fo=fill_opacity: {
@@ -548,13 +713,34 @@ def render_tab():
                         'fillColor': c, 'fillOpacity': fo
                     },
                     tooltip=folium.Tooltip(tooltip_html)
-                ).add_to(fg_cars)
+                ).add_to(fg_item)
+
+                # Marcador numérico no centroide
+                centroide = row.geometry.centroid
+                folium.Marker(
+                    location=[centroide.y, centroide.x],
+                    icon=folium.DivIcon(
+                        html=(
+                            f'<div style="background:{cor};color:white;'
+                            f'border-radius:50%;width:30px;height:30px;'
+                            f'display:flex;align-items:center;justify-content:center;'
+                            f'font-weight:700;font-size:13px;font-family:sans-serif;'
+                            f'border:2.5px solid white;'
+                            f'box-shadow:0 2px 6px rgba(0,0,0,0.4);">'
+                            f'{num}</div>'
+                        ),
+                        icon_size=(30, 30),
+                        icon_anchor=(15, 15)
+                    )
+                ).add_to(fg_item)
             except:
                 continue
 
-        fg_cars.add_to(m)
+            fg_item.add_to(m)
 
-        # 2º — Imóvel principal POR ÚLTIMO (sempre no topo)
+        # ---- 2º: Imóvel principal POR ÚLTIMO (sempre no topo) ----
+        fg_imovel = folium.FeatureGroup(name="🔷 #1 - Imóvel Analisado", show=True)
+
         folium.GeoJson(
             gdf_wgs,
             style_function=lambda x: {
@@ -564,23 +750,55 @@ def render_tab():
                 'fillOpacity': 0.05,
                 'dashArray': '8, 4'
             },
-            tooltip=folium.Tooltip(f"<b>Imóvel Analisado:</b> {codigo_display}")
+            tooltip=folium.Tooltip(f"<b>#1 · Imóvel Analisado:</b> {codigo_display}")
+        ).add_to(fg_imovel)
+
+        # Marcador #1 no centroide do imóvel
+        cent_imovel = gdf_wgs.unary_union.centroid
+        folium.Marker(
+            location=[cent_imovel.y, cent_imovel.x],
+            icon=folium.DivIcon(
+                html=(
+                    '<div style="background:#00E5FF;color:#003844;'
+                    'border-radius:50%;width:34px;height:34px;'
+                    'display:flex;align-items:center;justify-content:center;'
+                    'font-weight:800;font-size:15px;font-family:sans-serif;'
+                    'border:3px solid white;'
+                    'box-shadow:0 2px 8px rgba(0,0,0,0.45);">1</div>'
+                ),
+                icon_size=(34, 34),
+                icon_anchor=(17, 17)
+            )
         ).add_to(fg_imovel)
 
         fg_imovel.add_to(m)
 
         folium.LayerControl(collapsed=True).add_to(m)
 
-        # Key dinâmica baseada no resultado força re-mount limpo do mapa
-        map_key = f"mapa_conf_{len(gdf_res)}_{int(area_total_sob*100)}"
+        # Key dinâmica força re-mount limpo do mapa
+        map_key = f"mapa_conf_{len(gdf_res)}"
         st_folium(m, height=540, use_container_width=True, key=map_key)
 
     with col_tabela:
         st.markdown("##### Registros Encontrados")
-        st.caption("Selecione uma linha para ver detalhes abaixo")
+        st.caption("Selecione uma linha para ver detalhes e baixar")
+
+        # Botão de download completo (imóvel + todos)
+        kml_completo = gerar_kml_completo(gdf_wgs, gdf_res, codigo_display)
+        st.download_button(
+            label=f"📥 Baixar KML Completo ({len(gdf_res) + 1} feições)",
+            data=kml_completo,
+            file_name=f"confrontantes_{codigo_display.replace(' ', '_').replace(':', '')}.kml",
+            mime="application/vnd.google-earth.kml+xml",
+            use_container_width=True,
+            key="dl_kml_completo"
+        )
+
+        st.write("")
 
         linhas = []
-        for idx, row in gdf_res.iterrows():
+        for _, row in gdf_res.iterrows():
+            num = int(row["_num"])
             cod = extrair_codigo_car(row)
             mun = extrair_municipio(row)
             area = extrair_area(row)
@@ -590,7 +808,7 @@ def render_tab():
             icone = "🔴" if classificacao == "Sobreposição" else "🟡"
 
             linhas.append({
-                "_idx": idx,
+                "#": num,
                 "Tipo": f"{icone} {classificacao}",
                 "Código CAR": cod[:30] + "..." if len(cod) > 30 else cod,
                 "Município": mun,
@@ -599,16 +817,13 @@ def render_tab():
             })
 
         df_display = pd.DataFrame(linhas)
-        # Ordena: Sobreposição primeiro
-        df_display["_ordem"] = df_display["Tipo"].apply(lambda x: 0 if "🔴" in x else 1)
-        df_display = df_display.sort_values("_ordem").drop(columns=["_ordem", "_idx"]).reset_index(drop=True)
 
         event = st.dataframe(
             df_display,
             use_container_width=True,
             selection_mode="single-row",
             on_select="rerun",
-            height=500,
+            height=440,
             hide_index=True,
             key="tabela_confrontantes"
         )
@@ -617,17 +832,13 @@ def render_tab():
     if len(event.selection.rows) > 0:
         idx_sel = event.selection.rows[0]
 
-        gdf_ordenado = gdf_res.copy()
-        gdf_ordenado["_ordem"] = gdf_ordenado["_classificacao"].apply(
-            lambda x: 0 if x == "Sobreposição" else 1
-        )
-        gdf_ordenado = gdf_ordenado.sort_values("_ordem").reset_index(drop=True)
-
-        if idx_sel < len(gdf_ordenado):
-            row_sel = gdf_ordenado.iloc[idx_sel]
+        # gdf_res já está ordenado e numerado no session_state
+        if idx_sel < len(gdf_res):
+            row_sel = gdf_res.iloc[idx_sel]
+            num_sel = int(row_sel["_num"])
 
             st.markdown("---")
-            st.markdown("##### 📋 Detalhes do Registro")
+            st.markdown(f"##### 📋 Detalhes do Registro #{num_sel}")
 
             cod = extrair_codigo_car(row_sel)
             mun = extrair_municipio(row_sel)
@@ -655,8 +866,14 @@ def render_tab():
 
                 st.markdown(f"""
                     <div class="detalhe-card">
-                        <span class="badge {badge_class}">{classificacao}</span>
-                        <div class="detalhe-titulo" style="margin-top:10px;">{mun}</div>
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <span style="background:#2C3E50;color:white;border-radius:50%;
+                                         width:32px;height:32px;display:inline-flex;
+                                         align-items:center;justify-content:center;
+                                         font-weight:700;font-size:14px;">#{num_sel}</span>
+                            <span class="badge {badge_class}">{classificacao}</span>
+                        </div>
+                        <div class="detalhe-titulo" style="margin-top:12px;">{mun}</div>
                         <div style="margin:8px 0 14px 0;">
                             <span class="detalhe-codigo">{cod}</span>
                         </div>
@@ -676,10 +893,28 @@ def render_tab():
                     </div>
                 """, unsafe_allow_html=True)
 
+                st.write("")
+
+                # Botão de download individual
+                try:
+                    kml_ind = gerar_kml_individual(row_sel, num_sel)
+                    cod_clean = cod.replace('/', '_').replace(' ', '_')[:40]
+                    st.download_button(
+                        label=f"📥 Baixar KML deste registro (#{num_sel})",
+                        data=kml_ind,
+                        file_name=f"{num_sel:02d}_{cod_clean}.kml",
+                        mime="application/vnd.google-earth.kml+xml",
+                        use_container_width=True,
+                        key=f"dl_kml_ind_{num_sel}"
+                    )
+                except Exception as e:
+                    st.caption(f"Não foi possível gerar o KML: {e}")
+
                 with st.expander("Ver todos os atributos disponíveis"):
                     attrs = {
                         k: v for k, v in row_sel.items()
-                        if k not in ['geometry', '_classificacao', '_area_sobreposicao_ha', '_uf_fonte', '_ordem']
+                        if k not in ['geometry', '_classificacao', '_area_sobreposicao_ha',
+                                     '_uf_fonte', '_ordem', '_num']
                         and str(v).strip() not in ['nan', 'None', 'NaT', '']
                     }
                     if attrs:
@@ -695,24 +930,29 @@ def render_tab():
                     centro_sel = [row_sel.geometry.centroid.y, row_sel.geometry.centroid.x]
                     m2 = folium.Map(location=centro_sel, zoom_start=15, tiles="Esri World Imagery")
 
-                    folium.GeoJson(
-                        gdf_wgs,
-                        style_function=lambda x: {
-                            'color': '#00FFFF', 'weight': 2,
-                            'fillColor': '#00FFFF', 'fillOpacity': 0.1
-                        }
-                    ).add_to(m2)
-
                     cor_sel = "#c0392b" if classificacao == "Sobreposição" else "#d4a017"
+
+                    # CAR primeiro
                     folium.GeoJson(
                         row_sel.geometry.__geo_interface__,
                         style_function=lambda x, c=cor_sel: {
                             'color': c, 'weight': 3,
                             'fillColor': c, 'fillOpacity': 0.45
                         },
-                        tooltip=folium.Tooltip(f"<b>{cod}</b>")
+                        tooltip=folium.Tooltip(f"<b>#{num_sel} · {cod}</b>")
                     ).add_to(m2)
 
-                    st_folium(m2, height=380, use_container_width=True, key="mapa_detalhe_confrontante")
+                    # Imóvel por cima (tracejado)
+                    folium.GeoJson(
+                        gdf_wgs,
+                        style_function=lambda x: {
+                            'color': '#00E5FF', 'weight': 3,
+                            'fillColor': '#00E5FF', 'fillOpacity': 0.05,
+                            'dashArray': '8, 4'
+                        }
+                    ).add_to(m2)
+
+                    st_folium(m2, height=380, use_container_width=True,
+                              key=f"mapa_detalhe_{num_sel}")
                 except:
                     st.caption("Não foi possível renderizar o mapa.")
