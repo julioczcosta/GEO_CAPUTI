@@ -32,22 +32,19 @@ def consultar_camadas_extras(lat, lon):
         except: continue
 
     # 2. AMAZÔNIA LEGAL
-    for geom_col in colunas_geometria:
-        try:
-            params_amz = {
-                "service": "WFS", "version": "1.0.0", "request": "GetFeature",
-                "typeName": "CGMAT:lim_amazonia_legal_2022", "outputFormat": "application/json",
-                "cql_filter": f"INTERSECTS({geom_col}, POINT({lon} {lat}))"
-            }
-            resp_amz = requests.get(base_url, params=params_amz, headers=headers, timeout=10)
-            if resp_amz.status_code == 200:
-                data_amz = resp_amz.json()
-                if data_amz.get("features"):
-                    resultados["amazonia_legal"] = True
-                    break
-        except: continue
-
-    return resultados
+    try:
+        params_amz = {
+            "service": "WFS", "version": "1.0.0", "request": "GetFeature",
+            "typeName": "CGEO:AmazoniaLegalLimites", "outputFormat": "application/json",
+            "cql_filter": f"INTERSECTS(the_geom, POINT({lon} {lat}))"
+        }
+        resp_amz = requests.get(base_url, params=params_amz, headers=headers, timeout=10)
+        if resp_amz.status_code == 200:
+            data_amz = resp_amz.json()
+            if data_amz.get("features"):
+                resultados["amazonia_legal"] = True
+    except:
+        pass
 
 # --- RENDERIZAÇÃO DA ABA ---
 def render_tab():
