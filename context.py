@@ -38,14 +38,19 @@ def consultar_camadas_extras(lat, lon):
             "typeName": "CGEO:AmazoniaLegalLimites", "outputFormat": "application/json",
             "cql_filter": f"INTERSECTS(the_geom, POINT({lon} {lat}))"
         }
+        print(f"[DEBUG AMZ] lat={lat}, lon={lon}")
+        print(f"[DEBUG AMZ] cql_filter=INTERSECTS(the_geom, POINT({lon} {lat}))")
         resp_amz = requests.get(base_url, params=params_amz, headers=headers, timeout=10)
+        print(f"[DEBUG AMZ] status={resp_amz.status_code}")
+        print(f"[DEBUG AMZ] resposta={resp_amz.text[:500]}")
         if resp_amz.status_code == 200:
             data_amz = resp_amz.json()
+            print(f"[DEBUG AMZ] features={len(data_amz.get('features', []))}")
             if data_amz.get("features"):
                 resultados["amazonia_legal"] = True
-    except:
-        pass
-
+    except Exception as e:
+        print(f"[DEBUG AMZ] ERRO={e}")
+    
 # --- RENDERIZAÇÃO DA ABA ---
 def render_tab():
     st.markdown("### 📚 Contexto Territorial")
