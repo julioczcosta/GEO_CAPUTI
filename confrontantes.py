@@ -505,18 +505,11 @@ def render_tab():
         ).add_to(m)
         folium.TileLayer("OpenStreetMap", name="Mapa").add_to(m)
 
-        # Imóvel principal
-        folium.GeoJson(
-            gdf_wgs,
-            name="Imóvel (KML)",
-            style_function=lambda x: {
-                'color': '#00FFFF', 'weight': 3,
-                'fillColor': '#00FFFF', 'fillOpacity': 0.08
-            },
-            tooltip=folium.Tooltip(f"<b>Imóvel:</b> {codigo_display}")
-        ).add_to(m)
+        # FeatureGroups para garantir ordem de empilhamento correta
+        fg_cars = folium.FeatureGroup(name="CARs Identificados", show=True)
+        fg_imovel = folium.FeatureGroup(name="Imóvel (KML)", show=True)
 
-        # CARs classificados
+        # 1º — CARs classificados (camada inferior)
         for _, row in gdf_res.iterrows():
             classificacao = row["_classificacao"]
             if classificacao == "Sobreposição":
@@ -555,12 +548,32 @@ def render_tab():
                         'fillColor': c, 'fillOpacity': fo
                     },
                     tooltip=folium.Tooltip(tooltip_html)
-                ).add_to(m)
+                ).add_to(fg_cars)
             except:
                 continue
 
+        fg_cars.add_to(m)
+
+        # 2º — Imóvel principal POR ÚLTIMO (sempre no topo)
+        folium.GeoJson(
+            gdf_wgs,
+            style_function=lambda x: {
+                'color': '#00E5FF',
+                'weight': 4,
+                'fillColor': '#00E5FF',
+                'fillOpacity': 0.05,
+                'dashArray': '8, 4'
+            },
+            tooltip=folium.Tooltip(f"<b>Imóvel Analisado:</b> {codigo_display}")
+        ).add_to(fg_imovel)
+
+        fg_imovel.add_to(m)
+
         folium.LayerControl(collapsed=True).add_to(m)
-        st_folium(m, height=540, use_container_width=True, key="mapa_confrontantes")
+
+        # Key dinâmica baseada no resultado força re-mount limpo do mapa
+        map_key = f"mapa_conf_{len(gdf_res)}_{int(area_total_sob*100)}"
+        st_folium(m, height=540, use_container_width=True, key=map_key)
 
     with col_tabela:
         st.markdown("##### Registros Encontrados")
