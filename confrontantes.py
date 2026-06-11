@@ -192,6 +192,8 @@ def detectar_ufs(gdf):
         "CGEB:Brasil_UF_2022",
         "BC250:lim_unidade_federacao_a",
         "CGEO:UF_2022",
+        "PNADC:uf_poligono",
+        "CGEO:APL_Malha_UF_2010"     
     ]
     campos_sigla = ['SIGLA_UF', 'sigla_uf', 'sigla', 'SIGLA', 'uf', 'UF', 'cd_uf', 'sigla_estado']
 
