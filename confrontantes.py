@@ -181,45 +181,74 @@ CSS_CONFRONTANTES = """
 # ==========================================
 
 def detectar_ufs(gdf):
-    """Detecta UFs que o bbox do imóvel toca, via WFS do IBGE."""
-    try:
-        bounds = gdf.total_bounds
-        bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
+    """Detecta UFs que o bbox do imóvel toca, com múltiplas camadas + fallback."""
+    bounds = gdf.total_bounds
+    bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
 
-        params = {
-            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
-            "typeName": "CGEO:Brasil_UF_2022", "outputFormat": "application/json",
-            "srsName": "EPSG:4674",
-            "BBOX": f"{bbox},EPSG:4674"
-        }
-        resp = requests.get(
-            "https://geoservicos.ibge.gov.br/geoserver/ows",
-            params=params, timeout=10,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            ufs = []
-            for f in data.get("features", []):
-                props = f["properties"]
-                sigla = (props.get("SIGLA_UF") or props.get("sigla")
-                         or props.get("uf") or props.get("SIGLA"))
-                if sigla:
-                    ufs.append(sigla.lower())
-            if ufs:
-                return list(set(ufs))
-    except:
-        pass
+    # Tenta várias camadas conhecidas do IBGE
+    camadas_uf = [
+        "CGEO:Brasil_UF_2022",
+        "CGEO:Brasil_UF_2024",
+        "CGEB:Brasil_UF_2022",
+        "BC250:lim_unidade_federacao_a",
+        "CGEO:UF_2022",
+    ]
+    campos_sigla = ['SIGLA_UF', 'sigla_uf', 'sigla', 'SIGLA', 'uf', 'UF', 'cd_uf', 'sigla_estado']
 
-    # Fallback: nominatim
+    for layer in camadas_uf:
+        try:
+            params = {
+                "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                "typeName": layer, "outputFormat": "application/json",
+                "srsName": "EPSG:4674",
+                "BBOX": f"{bbox},EPSG:4674"
+            }
+            resp = requests.get(
+                "https://geoservicos.ibge.gov.br/geoserver/ows",
+                params=params, timeout=10,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            if resp.status_code == 200 and resp.text.strip().startswith("{"):
+                data = resp.json()
+                ufs = []
+                for f in data.get("features", []):
+                    props = f.get("properties", {})
+                    for campo in campos_sigla:
+                        if campo in props and props[campo]:
+                            val = str(props[campo]).strip().lower()
+                            if len(val) == 2:
+                                ufs.append(val)
+                                break
+                if ufs:
+                    return list(set(ufs))
+        except:
+            continue
+
+    # Fallback robusto via Nominatim
     try:
         centroid = gdf.to_crs("EPSG:4326").unary_union.centroid
-        url = f"https://nominatim.openstreetmap.org/reverse?lat={centroid.y}&lon={centroid.x}&format=json"
-        r = requests.get(url, headers={"User-Agent": "GEOCAPUTI/1.0"}, timeout=8)
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={centroid.y}&lon={centroid.x}&format=json&addressdetails=1"
+        r = requests.get(url, headers={"User-Agent": "GEOCAPUTI/1.0"}, timeout=10)
         if r.status_code == 200:
-            estado = r.json().get("address", {}).get("ISO3166-2-lvl4", "").replace("BR-", "").lower()
-            if estado:
-                return [estado]
+            addr = r.json().get("address", {})
+            for campo in ["ISO3166-2-lvl4", "state_code"]:
+                val = addr.get(campo, "")
+                if "BR-" in val:
+                    return [val.replace("BR-", "").lower()]
+            # Última tentativa: mapear nome do estado
+            estado_nome = addr.get("state", "").lower()
+            mapa_uf = {
+                "acre": "ac", "alagoas": "al", "amapá": "ap", "amazonas": "am",
+                "bahia": "ba", "ceará": "ce", "distrito federal": "df",
+                "espírito santo": "es", "goiás": "go", "maranhão": "ma",
+                "mato grosso": "mt", "mato grosso do sul": "ms", "minas gerais": "mg",
+                "pará": "pa", "paraíba": "pb", "paraná": "pr", "pernambuco": "pe",
+                "piauí": "pi", "rio de janeiro": "rj", "rio grande do norte": "rn",
+                "rio grande do sul": "rs", "rondônia": "ro", "roraima": "rr",
+                "santa catarina": "sc", "são paulo": "sp", "sergipe": "se", "tocantins": "to"
+            }
+            if estado_nome in mapa_uf:
+                return [mapa_uf[estado_nome]]
     except:
         pass
 
