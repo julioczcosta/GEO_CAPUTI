@@ -85,7 +85,8 @@ def render_tab():
 
     mun_selecionado = None
     if not dados_muns or "erro" in dados_muns[0]:
-        st.error("Não foi possível identificar o município de intersecção.")
+        erro_real = dados_muns[0].get("erro", "lista vazia") if dados_muns else "sem retorno"
+        st.error(f"Não foi possível identificar o município de intersecção.\n\n**Detalhe técnico:** `{erro_real}`")
     else:
         if len(dados_muns) == 1:
             mun = dados_muns[0]
