@@ -226,44 +226,94 @@ def carregar_kml_geopandas(uploaded_file):
 
 @st.cache_data(show_spinner=False)
 def obter_municipios_interseccao(_geom_gee, cache_id):
+    """Detecta municípios que intersectam o imóvel via WFS do IBGE."""
     try:
-        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
-        interseccao = mun_col.filterBounds(_geom_gee)
-
-        def calc_area(feat):
-            inter = feat.geometry().intersection(_geom_gee, 10)
-            area_ha = inter.area(10).divide(10000)
-            return feat.set('area_imovel_ha', area_ha)
-
-        muns_area = interseccao.map(calc_area)
-        features = muns_area.getInfo()['features']
-
+        from shapely.geometry import shape as shapely_shape
+        
+        # Converte geometria GEE para shapely
+        geojson = _geom_gee.getInfo()
+        geom_shapely = shapely_shape(geojson)
+        gdf_imovel = gpd.GeoDataFrame({'geometry': [geom_shapely]}, crs="EPSG:4674")
+        bounds = gdf_imovel.total_bounds
+        bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
+        
+        # Tenta múltiplas camadas WFS do IBGE
+        camadas_mun = [
+            "CCAR:BC250_2025_lml_municipio_a",
+            "PNADC:municipio_poligono",
+            "CGEO:APL_Malha_Municipio_2010",
+            "BC250:lim_municipio_a",
+        ]
+        
+        gdf_muns = gpd.GeoDataFrame()
+        for layer in camadas_mun:
+            try:
+                params = {
+                    "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                    "typeName": layer, "outputFormat": "application/json",
+                    "srsName": "EPSG:4674",
+                    "BBOX": f"{bbox},EPSG:4674"
+                }
+                resp = requests.get(
+                    "https://geoservicos.ibge.gov.br/geoserver/ows",
+                    params=params, timeout=15,
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                if resp.status_code == 200 and resp.text.strip().startswith("{"):
+                    data = resp.json()
+                    if data.get("features"):
+                        gdf_muns = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
+                        break
+            except:
+                continue
+        
+        if gdf_muns.empty:
+            return [{"erro": "Nenhuma camada de municípios do IBGE retornou dados"}]
+        
+        # Calcula interseções
+        utm_crs = gdf_imovel.estimate_utm_crs()
+        gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
+        gdf_muns_utm = gdf_muns.to_crs(utm_crs)
+        geom_imovel_utm = gdf_imovel_utm.geometry.iloc[0]
+        
         resultados = []
         area_total = 0
-
-        for f in features:
-            props = f['properties']
-            nome = props.get('NM_MUN', 'Desconhecido')
-            uf = props.get('SIGLA_UF', '')
-            area = props.get('area_imovel_ha', 0)
-            cod_ibge = props.get('CD_MUN')
-
-            if area > 0.05:
-                resultados.append({
-                    'municipio': f"{nome} - {uf}".strip(" -"),
-                    'nome_puro': nome,
-                    'uf': uf,
-                    'area_ha': area,
-                    'cod_ibge': str(cod_ibge)
-                })
-                area_total += area
-
+        
+        for _, mun in gdf_muns_utm.iterrows():
+            try:
+                if not mun.geometry.intersects(geom_imovel_utm):
+                    continue
+                inter = mun.geometry.intersection(geom_imovel_utm)
+                if inter.is_empty:
+                    continue
+                area_ha = inter.area / 10000
+                
+                if area_ha > 0.05:
+                    props = mun.to_dict()
+                    nome = (props.get('nm_municipio') or props.get('NM_MUN') 
+                            or props.get('nome') or props.get('nm_mun') or 'Desconhecido')
+                    uf = (props.get('sigla_uf') or props.get('SIGLA_UF') 
+                          or props.get('uf') or props.get('sigla') or '')
+                    cod_ibge = (props.get('cd_municipio') or props.get('CD_MUN') 
+                                or props.get('cd_geocodi') or props.get('geocodigo') or '')
+                    
+                    resultados.append({
+                        'municipio': f"{nome} - {uf}".strip(" -"),
+                        'nome_puro': nome,
+                        'uf': uf,
+                        'area_ha': area_ha,
+                        'cod_ibge': str(cod_ibge)
+                    })
+                    area_total += area_ha
+            except:
+                continue
+        
         for r in resultados:
             r['porcentagem'] = (r['area_ha'] / area_total) * 100 if area_total > 0 else 0
         
         resultados = sorted(resultados, key=lambda x: x['area_ha'], reverse=True)
-        return resultados
-
+        return resultados if resultados else [{"erro": "Nenhum município encontrado na interseção"}]
+        
     except Exception as e:
         return [{"erro": str(e)}]
 
