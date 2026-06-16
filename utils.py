@@ -666,18 +666,215 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
     except Exception as e:
         return f"Erro ao gerar redação: {str(e)}"
 
-@st.cache_data(show_spinner=False)
-def get_limites_municipio_clima(lon, lat):
-    """Busca a geometria oficial do município no MapBiomas para a análise climática."""
+@st.cache_data(show_spinner=False, ttl=86400)
+def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
+    """
+    Localiza a geometria municipal para a climatologia com múltiplos fallbacks.
+
+    Ordem de tentativa:
+    1) MapBiomas municípios-2020 por interseção com o perímetro completo;
+    2) MapBiomas municípios-2020 pelo ponto/centroide;
+    3) WFS IBGE por interseção espacial, usando várias camadas conhecidas.
+    """
+
+    UF_POR_CODIGO = {
+        '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
+        '21': 'MA', '22': 'PI', '23': 'CE', '24': 'RN', '25': 'PB', '26': 'PE', '27': 'AL',
+        '28': 'SE', '29': 'BA', '31': 'MG', '32': 'ES', '33': 'RJ', '35': 'SP',
+        '41': 'PR', '42': 'SC', '43': 'RS', '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF'
+    }
+
+    def _limpar_valor(valor):
+        if valor is None:
+            return ""
+        txt = str(valor).strip()
+        if txt.lower() in ["", "none", "nan", "null", "<na>"]:
+            return ""
+        return txt
+
+    def _primeiro(props, campos):
+        if not props:
+            return ""
+        props_lower = {str(k).lower(): v for k, v in props.items()}
+        for campo in campos:
+            if campo in props:
+                val = _limpar_valor(props.get(campo))
+                if val:
+                    return val
+            val = _limpar_valor(props_lower.get(str(campo).lower()))
+            if val:
+                return val
+        return ""
+
+    def _uf_por_codigo(cod):
+        cod_txt = "".join(ch for ch in str(cod) if ch.isdigit())
+        return UF_POR_CODIGO.get(cod_txt[:2], "") if cod_txt else ""
+
+    def _extrair_nome_uf_cod(props):
+        nome = _primeiro(props, [
+            "NM_MUN", "nm_mun", "nm_municipio", "nome_municipio",
+            "nome", "municipio", "NM_MUNICIPIO", "name"
+        ])
+        uf = _primeiro(props, [
+            "SIGLA_UF", "sigla_uf", "uf", "UF", "sigla", "SIGLA", "nm_uf"
+        ])
+        cod = _primeiro(props, [
+            "CD_MUN", "cd_mun", "cd_municipio", "CD_MUNICIPIO",
+            "geocodigo", "cd_geocodi", "codigo_ibge", "cod_ibge"
+        ])
+
+        if not uf and cod:
+            uf = _uf_por_codigo(cod)
+
+        return nome or "Município", uf or "", str(cod) if cod else ""
+
+    def _json_safe_geometry(geom_mapping):
+        try:
+            return json.loads(json.dumps(geom_mapping))
+        except Exception:
+            return geom_mapping
+
+    # 1) Preferencial: MapBiomas por interseção com o perímetro completo.
+    try:
+        if _geometry_gee is not None:
+            geo_simple = _geometry_gee.simplify(maxError=100)
+            mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
+            candidatos = mun_col.filterBounds(geo_simple)
+
+            def _add_area_inter(feature):
+                inter = feature.geometry().intersection(geo_simple, ee.ErrorMargin(100))
+                return feature.set("_area_inter_m2", inter.area(100))
+
+            candidatos = (
+                candidatos
+                .map(_add_area_inter)
+                .filter(ee.Filter.gt("_area_inter_m2", 0))
+                .sort("_area_inter_m2", False)
+            )
+
+            if candidatos.size().getInfo() > 0:
+                feat = ee.Feature(candidatos.first()).getInfo()
+                props = feat.get("properties", {})
+                nome, uf, cod = _extrair_nome_uf_cod(props)
+
+                return {
+                    "geojson": feat.get("geometry"),
+                    "nome": nome,
+                    "uf": uf,
+                    "cod_ibge": cod,
+                    "metodo": "MapBiomas municípios-2020 por interseção do perímetro"
+                }
+    except Exception:
+        pass
+
+    # 2) Fallback atual: MapBiomas pelo ponto do centroide.
     try:
         mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
-        mun_info = mun_col.filterBounds(ee.Geometry.Point([lon, lat])).limit(1).getInfo()['features']
+        ponto = ee.Geometry.Point([float(lon), float(lat)])
+        mun_info = mun_col.filterBounds(ponto).limit(1).getInfo().get("features", [])
+
         if mun_info:
+            props = mun_info[0].get("properties", {})
+            nome, uf, cod = _extrair_nome_uf_cod(props)
+
             return {
-                "geojson": mun_info[0]['geometry'],
-                "nome": mun_info[0]['properties'].get('NM_MUN', 'Município'),
-                "uf": mun_info[0]['properties'].get('SIGLA_UF', '')
+                "geojson": mun_info[0].get("geometry"),
+                "nome": nome,
+                "uf": uf,
+                "cod_ibge": cod,
+                "metodo": "MapBiomas municípios-2020 pelo centroide"
             }
     except Exception:
-        return None
+        pass
+
+    # 3) Fallback IBGE WFS: várias camadas + maior interseção com o imóvel.
+    try:
+        if gpd is not None and _geometry_gee is not None:
+            geojson = _geometry_gee.getInfo()
+            geom_shapely = shape(geojson)
+            gdf_imovel = gpd.GeoDataFrame({"geometry": [geom_shapely]}, crs="EPSG:4674")
+            bounds = gdf_imovel.total_bounds
+            bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
+
+            camadas_mun = [
+                "CCAR:BC250_2025_lml_municipio_a",
+                "PNADC:municipio_poligono",
+                "CGEO:APL_Malha_Municipio_2010",
+                "BC250:lim_municipio_a",
+            ]
+
+            for layer in camadas_mun:
+                try:
+                    params = {
+                        "service": "WFS",
+                        "version": "2.0.0",
+                        "request": "GetFeature",
+                        "typeName": layer,
+                        "outputFormat": "application/json",
+                        "srsName": "EPSG:4674",
+                        "BBOX": f"{bbox},EPSG:4674"
+                    }
+                    resp = requests.get(
+                        "https://geoservicos.ibge.gov.br/geoserver/ows",
+                        params=params,
+                        timeout=15,
+                        headers={"User-Agent": "Mozilla/5.0"}
+                    )
+
+                    if resp.status_code != 200 or not resp.text.strip().startswith("{"):
+                        continue
+
+                    data = resp.json()
+                    if not data.get("features"):
+                        continue
+
+                    gdf_muns = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
+                    if gdf_muns.empty:
+                        continue
+
+                    if gdf_muns.crs is None:
+                        gdf_muns = gdf_muns.set_crs("EPSG:4674", allow_override=True)
+                    else:
+                        gdf_muns = gdf_muns.to_crs("EPSG:4674")
+
+                    utm_crs = gdf_imovel.estimate_utm_crs()
+                    gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
+                    gdf_muns_utm = gdf_muns.to_crs(utm_crs)
+                    geom_imovel_utm = gdf_imovel_utm.geometry.iloc[0]
+
+                    areas = []
+                    for _, row in gdf_muns_utm.iterrows():
+                        try:
+                            if not row.geometry.intersects(geom_imovel_utm):
+                                areas.append(0.0)
+                                continue
+                            inter = row.geometry.intersection(geom_imovel_utm)
+                            areas.append(0.0 if inter.is_empty else inter.area / 10000)
+                        except Exception:
+                            areas.append(0.0)
+
+                    gdf_muns = gdf_muns.copy()
+                    gdf_muns["_area_inter_ha"] = areas
+                    gdf_muns = gdf_muns[gdf_muns["_area_inter_ha"] > 0.05]
+
+                    if gdf_muns.empty:
+                        continue
+
+                    row_sel = gdf_muns.sort_values("_area_inter_ha", ascending=False).iloc[0]
+                    props = row_sel.drop(labels=["geometry"], errors="ignore").to_dict()
+                    nome, uf, cod = _extrair_nome_uf_cod(props)
+
+                    return {
+                        "geojson": _json_safe_geometry(mapping(row_sel.geometry)),
+                        "nome": nome,
+                        "uf": uf,
+                        "cod_ibge": cod,
+                        "metodo": f"IBGE WFS por interseção ({layer})"
+                    }
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     return None
+

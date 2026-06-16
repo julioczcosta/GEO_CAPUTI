@@ -352,20 +352,28 @@ def render_tab():
     # Área de análise: sempre município
     # ----------------------------------------------------------
     with st.spinner("Mapeando limites climáticos do município..."):
-        mun_dados = utils.get_limites_municipio_clima(lon_dec, lat_dec)
+        mun_dados = utils.get_limites_municipio_clima(
+            lon_dec,
+            lat_dec,
+            _geometry_gee=geometry,
+            cache_id=identificador_imovel
+        )
 
     if not mun_dados:
         st.error(
             "Não foi possível localizar o município para a análise climatológica. "
+            "A tentativa foi feita por interseção do perímetro, centroide e WFS do IBGE. "
             "Verifique se o perímetro do imóvel foi carregado corretamente."
         )
         return
 
     target_geometry = ee.Geometry(mun_dados["geojson"])
-    area_label = f"{mun_dados['nome']} - {mun_dados['uf']}"
+    area_label = f"{mun_dados['nome']} - {mun_dados['uf']}".strip(" -")
     escopo_id = "mun"
 
     st.info(f"Área de análise climatológica: **{area_label}**")
+    if mun_dados.get("metodo"):
+        st.caption(f"Município localizado por: {mun_dados['metodo']}")
 
     # ----------------------------------------------------------
     # Botão único de processamento
