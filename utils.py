@@ -229,14 +229,14 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
     """Detecta municípios que intersectam o imóvel via WFS do IBGE."""
     try:
         from shapely.geometry import shape as shapely_shape
-        
+
         # Converte geometria GEE para shapely
         geojson = _geom_gee.getInfo()
         geom_shapely = shapely_shape(geojson)
         gdf_imovel = gpd.GeoDataFrame({'geometry': [geom_shapely]}, crs="EPSG:4674")
         bounds = gdf_imovel.total_bounds
         bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
-        
+
         # Tenta múltiplas camadas WFS do IBGE
         camadas_mun = [
             "CCAR:BC250_2025_lml_municipio_a",
@@ -244,7 +244,7 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
             "CGEO:APL_Malha_Municipio_2010",
             "BC250:lim_municipio_a",
         ]
-        
+
         gdf_muns = gpd.GeoDataFrame()
         for layer in camadas_mun:
             try:
@@ -266,19 +266,27 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
                         break
             except:
                 continue
-        
+
         if gdf_muns.empty:
             return [{"erro": "Nenhuma camada de municípios do IBGE retornou dados"}]
-        
-        # Calcula interseções
+
+        # Calcula interseções em UTM (área precisa)
         utm_crs = gdf_imovel.estimate_utm_crs()
         gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
         gdf_muns_utm = gdf_muns.to_crs(utm_crs)
         geom_imovel_utm = gdf_imovel_utm.geometry.iloc[0]
-        
+
+        # Tabela de UF por código IBGE (fallback)
+        UF_POR_CODIGO = {
+            '11':'RO','12':'AC','13':'AM','14':'RR','15':'PA','16':'AP','17':'TO',
+            '21':'MA','22':'PI','23':'CE','24':'RN','25':'PB','26':'PE','27':'AL',
+            '28':'SE','29':'BA','31':'MG','32':'ES','33':'RJ','35':'SP',
+            '41':'PR','42':'SC','43':'RS','50':'MS','51':'MT','52':'GO','53':'DF'
+        }
+
         resultados = []
         area_total = 0
-        
+
         for _, mun in gdf_muns_utm.iterrows():
             try:
                 if not mun.geometry.intersects(geom_imovel_utm):
@@ -287,16 +295,27 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
                 if inter.is_empty:
                     continue
                 area_ha = inter.area / 10000
-                
+
                 if area_ha > 0.05:
                     props = mun.to_dict()
-                    nome = (props.get('nm_municipio') or props.get('NM_MUN') 
-                            or props.get('nome') or props.get('nm_mun') or 'Desconhecido')
-                    uf = (props.get('sigla_uf') or props.get('SIGLA_UF') 
-                          or props.get('uf') or props.get('sigla') or '')
-                    cod_ibge = (props.get('cd_municipio') or props.get('CD_MUN') 
-                                or props.get('cd_geocodi') or props.get('geocodigo') or '')
-                    
+
+                    nome = (props.get('nm_municipio') or props.get('NM_MUN')
+                            or props.get('nome') or props.get('nm_mun')
+                            or props.get('nome_municipio') or 'Desconhecido')
+
+                    cod_ibge = (props.get('cd_municipio') or props.get('CD_MUN')
+                                or props.get('cd_geocodi') or props.get('geocodigo')
+                                or props.get('cd_mun') or props.get('codigo_ibge') or '')
+
+                    # Tenta UF pelos atributos
+                    uf = (props.get('sigla_uf') or props.get('SIGLA_UF')
+                          or props.get('uf') or props.get('sigla')
+                          or props.get('nm_uf') or '')
+
+                    # Fallback: deriva UF dos 2 primeiros dígitos do código IBGE
+                    if not uf and cod_ibge:
+                        uf = UF_POR_CODIGO.get(str(cod_ibge)[:2], '')
+
                     resultados.append({
                         'municipio': f"{nome} - {uf}".strip(" -"),
                         'nome_puro': nome,
@@ -307,13 +326,13 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
                     area_total += area_ha
             except:
                 continue
-        
+
         for r in resultados:
             r['porcentagem'] = (r['area_ha'] / area_total) * 100 if area_total > 0 else 0
-        
+
         resultados = sorted(resultados, key=lambda x: x['area_ha'], reverse=True)
         return resultados if resultados else [{"erro": "Nenhum município encontrado na interseção"}]
-        
+
     except Exception as e:
         return [{"erro": str(e)}]
 
