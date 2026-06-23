@@ -62,6 +62,7 @@ def render_tab():
     # Extração de Coordenadas
     centroide = geometry.centroid(1).coordinates().getInfo()
     lon_dec, lat_dec = centroide[0], centroide[1]
+    st.write(f"DEBUG centroide -> lat: {lat_dec}, lon: {lon_dec}")   # <-- temporária
 
     def decimal_to_dms(deg, is_lat):
         direction = 'N' if is_lat and deg >= 0 else 'S' if is_lat else 'E' if deg >= 0 else 'O'
