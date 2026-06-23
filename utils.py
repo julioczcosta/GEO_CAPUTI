@@ -596,6 +596,48 @@ def get_distancia_capital(cod_ibge, uf):
     except Exception as e:
         return {"erro": f"Falha no OSRM: {e}"}
 
+
+@st.cache_data(show_spinner=False)
+def _carregar_armazens_conab():
+    """Baixa o cadastro de armazéns da CONAB uma vez e devolve os pontos."""
+    if gpd is None:
+        return None
+    url = "https://portaldeinformacoes.conab.gov.br/downloads/arquivos/ArmazensCadastrados.txt"
+    try:
+        df = pd.read_csv(url, delimiter=';', encoding='latin1', on_bad_lines='skip')
+        df['latitude'] = pd.to_numeric(df['latitude'].astype(str).str.replace(',', '.'), errors='coerce')
+        df['longitude'] = pd.to_numeric(df['longitude'].astype(str).str.replace(',', '.'), errors='coerce')
+        df = df.dropna(subset=['latitude', 'longitude'])
+        gdf = gpd.GeoDataFrame(
+            df, geometry=gpd.points_from_xy(df['longitude'], df['latitude']), crs="EPSG:4674"
+        )
+        return gdf
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def get_armazens_proximos(lat, lon, raio_km=100):
+    """Conta armazéns CONAB e soma a capacidade num raio em torno do imóvel."""
+    gdf_arm = _carregar_armazens_conab()
+    if gdf_arm is None or gdf_arm.empty:
+        return {"erro": "Cadastro CONAB indisponível."}
+    try:
+        ponto = gpd.GeoDataFrame(geometry=gpd.points_from_xy([lon], [lat]), crs="EPSG:4674")
+        utm = ponto.estimate_utm_crs()
+        buffer_geom = ponto.to_crs(utm).buffer(raio_km * 1000)
+        buffer_4674 = gpd.GeoDataFrame(geometry=buffer_geom, crs=utm).to_crs("EPSG:4674")
+        dentro = gpd.sjoin(gdf_arm, buffer_4674, how='inner', predicate='intersects')
+        col_cap = next(
+            (c for c in ['qtd_capacidade_estatica(t)', 'capacidade'] if c in dentro.columns),
+            None
+        )
+        cap = float(dentro[col_cap].sum()) if col_cap else 0.0
+        return {"quantidade": len(dentro), "capacidade_t": cap, "raio_km": raio_km}
+    except Exception as e:
+        return {"erro": f"Falha ao processar armazéns: {e}"}
+    
+    
 # ==========================================
 # 8. REDAÇÃO DO LAUDO E CLIMATOLOGIA EXTRA
 # ==========================================

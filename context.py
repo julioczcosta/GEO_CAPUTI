@@ -175,6 +175,20 @@ def render_tab():
                     c_rota2.metric("Tempo Estimado", dados_rota['tempo_estimado'])
                     st.caption("Fonte: Coordenadas IBGE / Rotas OSRM")
 
+            # --- ARMAZENAGEM ---
+            st.write("")
+            st.subheader("🏭 Armazenagem (raio de 100 km)")
+            with st.container(border=True):
+                dados_arm = utils.get_armazens_proximos(lat_dec, lon_dec, raio_km=100)
+                if "erro" in dados_arm:
+                    st.warning(dados_arm["erro"])
+                else:
+                    cap_fmt = f"{dados_arm['capacidade_t']:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    c_arm1, c_arm2 = st.columns(2)
+                    c_arm1.metric("Unidades Próximas", dados_arm["quantidade"])
+                    c_arm2.metric("Capacidade Estática", f"{cap_fmt} t")
+                    st.caption("Fonte: CONAB — Armazéns Cadastrados")
+
 
         # ==========================================
         # COLUNA 2: GEOGRAFIA FÍSICA
