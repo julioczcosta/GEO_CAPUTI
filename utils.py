@@ -259,12 +259,15 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
                     params=params, timeout=15,
                     headers={"User-Agent": "Mozilla/5.0"}
                 )
+                print(f">>> {layer}: status={resp.status_code}, tam={len(resp.text)}")
                 if resp.status_code == 200 and resp.text.strip().startswith("{"):
                     data = resp.json()
+                    print(f"    features: {len(data.get('features', []))}")
                     if data.get("features"):
                         gdf_muns = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
                         break
             except:
+                print(f">>> {layer} FALHOU: {e}")
                 continue
 
         if gdf_muns.empty:
