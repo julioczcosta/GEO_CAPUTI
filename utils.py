@@ -604,12 +604,38 @@ def _carregar_armazens_conab():
         return None
     url = "https://portaldeinformacoes.conab.gov.br/downloads/arquivos/ArmazensCadastrados.txt"
     try:
-        df = pd.read_csv(url, delimiter=';', encoding='latin1', on_bad_lines='skip')
-        df['latitude'] = pd.to_numeric(df['latitude'].astype(str).str.replace(',', '.'), errors='coerce')
-        df['longitude'] = pd.to_numeric(df['longitude'].astype(str).str.replace(',', '.'), errors='coerce')
+        df = pd.read_csv(
+            url, delimiter=';', encoding='latin1',
+            on_bad_lines='skip', dtype=str, engine='python'
+        )
+        # Normaliza nomes de coluna (tira espaços acidentais)
+        df.columns = [c.strip() for c in df.columns]
+
+        # Função de conversão segura: pega só o primeiro número válido da célula
+        def _to_float(serie):
+            s = serie.astype(str).str.strip()
+            # troca vírgula decimal por ponto
+            s = s.str.replace(',', '.', regex=False)
+            # se houver mais de um ponto (lixo concatenado), mantém só o primeiro número
+            s = s.str.extract(r'(-?\d+\.?\d*)', expand=False)
+            return pd.to_numeric(s, errors='coerce')
+
+        df['latitude'] = _to_float(df['latitude'])
+        df['longitude'] = _to_float(df['longitude'])
         df = df.dropna(subset=['latitude', 'longitude'])
+
+        # Sanidade: coordenadas do Brasil
+        df = df[
+            (df['latitude'].between(-34, 6)) &
+            (df['longitude'].between(-74, -34))
+        ]
+
+        if df.empty:
+            return None
+
         gdf = gpd.GeoDataFrame(
-            df, geometry=gpd.points_from_xy(df['longitude'], df['latitude']), crs="EPSG:4674"
+            df, geometry=gpd.points_from_xy(df['longitude'], df['latitude']),
+            crs="EPSG:4674"
         )
         return gdf
     except Exception:
