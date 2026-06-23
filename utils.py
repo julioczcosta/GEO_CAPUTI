@@ -654,11 +654,21 @@ def get_armazens_proximos(lat, lon, raio_km=100):
         buffer_geom = ponto.to_crs(utm).buffer(raio_km * 1000)
         buffer_4674 = gpd.GeoDataFrame(geometry=buffer_geom, crs=utm).to_crs("EPSG:4674")
         dentro = gpd.sjoin(gdf_arm, buffer_4674, how='inner', predicate='intersects')
+
         col_cap = next(
             (c for c in ['qtd_capacidade_estatica(t)', 'capacidade'] if c in dentro.columns),
             None
         )
-        cap = float(dentro[col_cap].sum()) if col_cap else 0.0
+
+        cap = 0.0
+        if col_cap:
+            cap_serie = (
+                dentro[col_cap].astype(str).str.strip()
+                .str.replace(',', '.', regex=False)
+                .str.extract(r'(-?\d+\.?\d*)', expand=False)
+            )
+            cap = float(pd.to_numeric(cap_serie, errors='coerce').fillna(0).sum())
+
         return {"quantidade": len(dentro), "capacidade_t": cap, "raio_km": raio_km}
     except Exception as e:
         return {"erro": f"Falha ao processar armazéns: {e}"}
