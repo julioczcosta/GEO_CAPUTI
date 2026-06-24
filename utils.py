@@ -994,5 +994,49 @@ def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
     except Exception:
         pass
 
+    # 4) Fallback robusto: consulta WFS pelo PONTO (lon/lat), só com shapely.
+    #    Não depende de Earth Engine nem de geopandas — última linha de defesa.
+    try:
+        ponto = Point(float(lon), float(lat))
+        m = 0.02  # ~2 km de margem ao redor do ponto
+        bbox = f"{lon-m},{lat-m},{lon+m},{lat+m}"
+        for layer in ("CGMAT:qg_2025_030_munic", "CGMAT:qg_2024_030_munic", "CGMAT:qg_2023_030_munic"):
+            try:
+                resp = ibge_wfs_get({
+                    "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                    "typeName": layer, "outputFormat": "application/json",
+                    "srsName": "EPSG:4674", "BBOX": f"{bbox},EPSG:4674"
+                })
+                if resp.status_code != 200 or not resp.text.strip().startswith("{"):
+                    continue
+                feats = resp.json().get("features", [])
+                if not feats:
+                    continue
+
+                escolhido = None
+                for f in feats:
+                    try:
+                        if shape(f["geometry"]).intersects(ponto):
+                            escolhido = f
+                            break
+                    except Exception:
+                        continue
+                if escolhido is None:
+                    escolhido = feats[0]  # fallback: primeiro do bbox
+
+                props = escolhido.get("properties", {})
+                nome, uf, cod = _extrair_nome_uf_cod(props)
+                return {
+                    "geojson": _json_safe_geometry(escolhido.get("geometry")),
+                    "nome": nome,
+                    "uf": uf,
+                    "cod_ibge": cod,
+                    "metodo": f"IBGE WFS pelo ponto ({layer})"
+                }
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     return None
 
