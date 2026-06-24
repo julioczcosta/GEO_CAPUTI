@@ -565,21 +565,29 @@ def get_distancia_capital(cod_ibge, uf):
     lat_cap, lon_cap = COORDENADAS_CAPITAIS[uf]
     
     try:
-        session = requests.Session()
+        import time
         url_wfs = "https://geoservicos.ibge.gov.br/geoserver/ows"
+        # Camada de pontos de sede verificada via GetCapabilities (workspace CGMAT, estável)
         params_wfs = {
             "service": "WFS", "version": "1.0.0", "request": "GetFeature",
-            "typeName": "CCAR:BC250_2025_lml_cidade_p", "outputFormat": "application/json",
+            "typeName": "CGMAT:pbqg22_00_Bc250_2021Cidade", "outputFormat": "application/json",
             "cql_filter": f"geocodigo='{cod_ibge}'"
         }
-        r_wfs = session.get(url_wfs, params=params_wfs, timeout=10)
-        
+        r_wfs = None
+        for attempt in range(3):
+            r_wfs = requests.get(url_wfs, params=params_wfs, timeout=30,
+                                 headers={"User-Agent": "Mozilla/5.0"})
+            if r_wfs.status_code in (502, 503, 504):
+                time.sleep(2 ** attempt)  # servidor instável — espera e tenta de novo
+                continue
+            break
+
         if r_wfs.status_code != 200 or not r_wfs.json().get("features"):
             return {"erro": "Sede municipal não localizada no IBGE."}
-            
+
         coords = r_wfs.json()["features"][0]["geometry"]["coordinates"]
         lon_sede, lat_sede = coords[0], coords[1]
-        
+
     except Exception as e:
         return {"erro": f"Falha ao buscar sede: {e}"}
 
