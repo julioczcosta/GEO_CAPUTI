@@ -185,17 +185,14 @@ def detectar_ufs(gdf):
     bounds = gdf.total_bounds
     bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
 
-    # Tenta várias camadas conhecidas do IBGE
+    # Camadas de município do IBGE (CGMAT) — trazem 'sigla_uf' por feature.
+    # Verificadas via GetCapabilities; substituem as camadas UF antigas (workspaces removidos).
     camadas_uf = [
-        "CGEO:Brasil_UF_2022",
-        "CGEO:Brasil_UF_2024",
-        "CGEB:Brasil_UF_2022",
-        "BC250:lim_unidade_federacao_a",
-        "CGEO:UF_2022",
-        "PNADC:uf_poligono",
-        "CGEO:APL_Malha_UF_2010"     
+        "CGMAT:qg_2025_030_munic",
+        "CGMAT:qg_2024_030_munic",
+        "CGMAT:qg_2023_030_munic",
     ]
-    campos_sigla = ['SIGLA_UF', 'sigla_uf', 'sigla', 'SIGLA', 'uf', 'UF', 'cd_uf', 'sigla_estado']
+    campos_sigla = ['SIGLA_UF', 'sigla_uf', 'sigla', 'SIGLA', 'uf', 'UF', 'sigla_estado']
 
     for layer in camadas_uf:
         try:
@@ -205,11 +202,18 @@ def detectar_ufs(gdf):
                 "srsName": "EPSG:4674",
                 "BBOX": f"{bbox},EPSG:4674"
             }
-            resp = requests.get(
-                "https://geoservicos.ibge.gov.br/geoserver/ows",
-                params=params, timeout=10,
-                headers={"User-Agent": "Mozilla/5.0"}
-            )
+            resp = None
+            for attempt in range(3):
+                resp = requests.get(
+                    "https://geoservicos.ibge.gov.br/geoserver/ows",
+                    params=params, timeout=30,
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                if resp.status_code in (502, 503, 504):
+                    import time
+                    time.sleep(2 ** attempt)  # servidor instável — espera e tenta de novo
+                    continue
+                break
             if resp.status_code == 200 and resp.text.strip().startswith("{"):
                 data = resp.json()
                 ufs = []

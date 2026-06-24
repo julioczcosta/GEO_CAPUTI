@@ -27,6 +27,20 @@ except ImportError:
     gpd = None
     fiona = None
 
+IBGE_WFS_URL = "https://geoservicos.ibge.gov.br/geoserver/ows"
+
+def ibge_wfs_get(params, timeout=30, retries=3):
+    """GET no WFS do IBGE com retry/backoff para 502/503/504 (servidor instável)."""
+    resp = None
+    for attempt in range(retries):
+        resp = requests.get(IBGE_WFS_URL, params=params, timeout=timeout,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code in (502, 503, 504):
+            time.sleep(2 ** attempt)
+            continue
+        break
+    return resp
+
 # ==========================================
 # 1. INICIALIZAÇÃO E STATE
 # ==========================================
@@ -414,13 +428,13 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
         reg_int, reg_ime = "---", "---"
         try:
             bbox = f"{lon-0.001},{lat-0.001},{lon+0.001},{lat+0.001}"
-            url_wfs = "https://geoservicos.ibge.gov.br/geoserver/ows"
-            p_int = {"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CGEO:RG2017_rgint", "outputFormat": "application/json", "bbox": bbox}
-            r_int = session.get(url_wfs, params=p_int, timeout=5).json()
-            if r_int.get("features"): reg_int = r_int["features"][0]["properties"].get("first_nome", "---")
+            # Regiões geográficas (Divisão Regional 2017) — camadas CGMAT verificadas via GetCapabilities
+            p_int = {"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CGMAT:qg_2025_120_reggeoginterm", "outputFormat": "application/json", "bbox": bbox}
+            r_int = ibge_wfs_get(p_int).json()
+            if r_int.get("features"): reg_int = r_int["features"][0]["properties"].get("nm_rgint", "---")
 
-            p_ime = {"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CGMAT:qg_2024_110_reggeogimed_agreg", "outputFormat": "application/json", "bbox": bbox}
-            r_ime = session.get(url_wfs, params=p_ime, timeout=5).json()
+            p_ime = {"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CGMAT:qg_2025_110_reggeogimed", "outputFormat": "application/json", "bbox": bbox}
+            r_ime = ibge_wfs_get(p_ime).json()
             if r_ime.get("features"): reg_ime = r_ime["features"][0]["properties"].get("nm_rgi", "---")
         except: pass
 
@@ -434,18 +448,16 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
 @st.cache_data
 def get_bacia_info(lat, lon):
     try:
-        session = requests.Session()
-        url = "https://geoservicos.ibge.gov.br/geoserver/ows"
         bbox = f"{lon-0.01},{lat-0.01},{lon+0.01},{lat+0.01}"
-        
+
         try:
-            r = session.get(url, params={"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_6", "outputFormat": "application/json", "bbox": bbox}, timeout=6).json()
+            r = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_6", "outputFormat": "application/json", "bbox": bbox}).json()
             props = r["features"][0]["properties"] if r.get("features") else {}
         except: props = {}
 
         if not props:
             try:
-                r = session.get(url, params={"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_4", "outputFormat": "application/json", "bbox": bbox}, timeout=6).json()
+                r = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_4", "outputFormat": "application/json", "bbox": bbox}).json()
                 props = r["features"][0]["properties"] if r.get("features") else {}
             except: pass
 
@@ -892,10 +904,9 @@ def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
             bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
 
             camadas_mun = [
-                "CCAR:BC250_2025_lml_municipio_a",
-                "PNADC:municipio_poligono",
-                "CGEO:APL_Malha_Municipio_2010",
-                "BC250:lim_municipio_a",
+                "CGMAT:qg_2025_030_munic",
+                "CGMAT:qg_2024_030_munic",
+                "CGMAT:qg_2023_030_munic",
             ]
 
             for layer in camadas_mun:
@@ -909,12 +920,7 @@ def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
                         "srsName": "EPSG:4674",
                         "BBOX": f"{bbox},EPSG:4674"
                     }
-                    resp = requests.get(
-                        "https://geoservicos.ibge.gov.br/geoserver/ows",
-                        params=params,
-                        timeout=15,
-                        headers={"User-Agent": "Mozilla/5.0"}
-                    )
+                    resp = ibge_wfs_get(params)
 
                     if resp.status_code != 200 or not resp.text.strip().startswith("{"):
                         continue
