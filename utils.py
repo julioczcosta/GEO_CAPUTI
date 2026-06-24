@@ -41,6 +41,23 @@ def ibge_wfs_get(params, timeout=30, retries=3):
         break
     return resp
 
+def ibge_api_json(url, timeout=15, retries=3, session=None):
+    """GET JSON nas APIs REST do IBGE (SIDRA, malhas) com retry/backoff.
+    Retorna o JSON decodificado ou None em caso de falha."""
+    getter = session.get if session is not None else requests.get
+    for attempt in range(retries):
+        try:
+            resp = getter(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code in (429, 502, 503, 504):
+                time.sleep(2 ** attempt)
+                continue
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+        except requests.RequestException:
+            time.sleep(2 ** attempt)
+    return None
+
 # ==========================================
 # 1. INICIALIZAÇÃO E STATE
 # ==========================================
@@ -414,12 +431,12 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
         
         populacao, area_km2 = None, None
         try:
-            r_pop = session.get(f"https://apisidra.ibge.gov.br/values/t/4714/n6/{cod_ibge}/v/93/p/last%201", timeout=5).json()
-            if len(r_pop) > 1: populacao = float(r_pop[1].get("V"))
+            r_pop = ibge_api_json(f"https://apisidra.ibge.gov.br/values/t/4714/n6/{cod_ibge}/v/93/p/last%201", session=session)
+            if r_pop and len(r_pop) > 1: populacao = float(r_pop[1].get("V"))
         except: pass
-        
+
         try:
-            r_area = session.get(f"https://servicodados.ibge.gov.br/api/v3/malhas/municipios/{cod_ibge}/metadados", timeout=5).json()
+            r_area = ibge_api_json(f"https://servicodados.ibge.gov.br/api/v3/malhas/municipios/{cod_ibge}/metadados", session=session)
             if r_area and len(r_area) > 0: area_km2 = float(r_area[0].get("area", {}).get("dimensao"))
         except: pass
 
