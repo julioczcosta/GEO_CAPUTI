@@ -246,6 +246,7 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
         ]
 
         gdf_muns = gpd.GeoDataFrame()
+        diag = []
         for layer in camadas_mun:
             try:
                 params = {
@@ -259,16 +260,20 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
                     params=params, timeout=15,
                     headers={"User-Agent": "Mozilla/5.0"}
                 )
-                print(f">>> {layer}: status={resp.status_code}, tam={len(resp.text)}")
                 if resp.status_code == 200 and resp.text.strip().startswith("{"):
                     data = resp.json()
-                    print(f"    features: {len(data.get('features', []))}")
+                    diag.append(f"{layer}={len(data.get('features', []))}")
                     if data.get("features"):
                         gdf_muns = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
                         break
+                else:
+                    diag.append(f"{layer}=HTTP{resp.status_code}")
             except:
-                print(f">>> {layer} FALHOU: {e}")
+                diag.append(f"{layer}=ERR")
                 continue
+
+        if gdf_muns.empty:
+            return [{"erro": "Camadas IBGE: " + " | ".join(diag)}]
 
         if gdf_muns.empty:
             return [{"erro": "Nenhuma camada de municípios do IBGE retornou dados"}]
