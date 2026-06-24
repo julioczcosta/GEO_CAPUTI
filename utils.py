@@ -241,23 +241,35 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
         m = 0.05
         bbox = f"{b[0]-m},{b[1]-m},{b[2]+m},{b[3]+m}"
 
+        # Camadas verificadas via GetCapabilities em 2025-06 (CGMAT workspace, série qg_YYYY_030_munic)
         camadas_mun = [
-            "CCAR:BC250_2025_lml_municipio_a",
-            "BC250:lim_municipio_a",
-            "PNADC:municipio_poligono",
-            "CGEO:APL_Malha_Municipio_2010",
+            "CGMAT:qg_2025_030_munic",
+            "CGMAT:qg_2024_030_munic",
+            "CGMAT:qg_2023_030_munic",
         ]
         gdf_muns = gpd.GeoDataFrame()
         diag = []
+
+        def _wfs_request(layer, bbox_str, retries=3):
+            import time
+            params = {
+                "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                "typeName": layer, "outputFormat": "application/json",
+                "srsName": "EPSG:4674", "BBOX": f"{bbox_str},EPSG:4674",
+            }
+            for attempt in range(retries):
+                resp = requests.get("https://geoservicos.ibge.gov.br/geoserver/ows",
+                                    params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code in (502, 503, 504):
+                    # servidor instável — espera e tenta novamente
+                    time.sleep(2 ** attempt)
+                    continue
+                return resp
+            return resp  # retorna o último erro após os retries
+
         for layer in camadas_mun:
             try:
-                params = {
-                    "service": "WFS", "version": "2.0.0", "request": "GetFeature",
-                    "typeName": layer, "outputFormat": "application/json",
-                    "srsName": "EPSG:4674", "BBOX": f"{bbox},EPSG:4674"
-                }
-                resp = requests.get("https://geoservicos.ibge.gov.br/geoserver/ows",
-                                    params=params, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                resp = _wfs_request(layer, bbox)
                 if resp.status_code == 200 and resp.text.strip().startswith("{"):
                     data = resp.json()
                     diag.append(f"{layer}={len(data.get('features',[]))}")
@@ -286,10 +298,11 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
         geom_imovel_utm = gdf_imovel_utm.geometry.iloc[0]
 
         def montar(props, area_ha):
-            nome = (props.get('nm_municipio') or props.get('NM_MUN') or props.get('nome')
-                    or props.get('nm_mun') or props.get('nome_municipio') or 'Desconhecido')
-            cod = (props.get('cd_municipio') or props.get('CD_MUN') or props.get('cd_geocodi')
-                   or props.get('geocodigo') or props.get('cd_mun') or props.get('codigo_ibge') or '')
+            # ordem prioriza campos de CGMAT:qg_YYYY_030_munic (nm_mun, cd_mun, sigla_uf)
+            nome = (props.get('nm_mun') or props.get('nm_municipio') or props.get('NM_MUN')
+                    or props.get('nome') or props.get('nome_municipio') or 'Desconhecido')
+            cod = (props.get('cd_mun') or props.get('cd_municipio') or props.get('CD_MUN')
+                   or props.get('cd_geocodi') or props.get('geocodigo') or props.get('codigo_ibge') or '')
             uf = (props.get('sigla_uf') or props.get('SIGLA_UF') or props.get('uf')
                   or props.get('sigla') or props.get('nm_uf') or '')
             if not uf and cod:
