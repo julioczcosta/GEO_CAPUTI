@@ -1,13 +1,14 @@
-# Estrategia de pin: piso (floor) na versao boa conhecida + teto de MAJOR
-# version. Garante reprodutibilidade e impede que um rebuild puxe uma major
-# nova (ex.: geopandas 2.x) e quebre o app, mas ainda aceita patches/minors.
-# geemap e python-box ficam em versao exata (sensiveis, ja eram pinados).
-# Floors derivados do ambiente em uso; pacotes nao instalados localmente
-# (streamlit, streamlit-folium, duckdb, streamlit-option-menu) usam faixa ampla.
+# Estrategia de pin: teto de MAJOR version para impedir que um rebuild puxe
+# uma major nova e quebre o app. Tetos calibrados para INCLUIR as versoes que
+# o Streamlit Cloud (Python 3.10) realmente resolve hoje. geemap e python-box
+# ficam em versao exata (sensiveis, ja eram pinados).
+#
+# IMPORTANTE: o Streamlit Cloud roda Python 3.10 -> pandas fica em 2.x
+# (pandas 3.x exige Python >=3.11). Nao subir o piso de pandas para >=3.
 
 streamlit>=1.30,<2
 geopandas>=1.0,<2
-pandas>=3.0,<4
+pandas>=2.2,<3
 requests>=2.32,<3
 folium>=0.17,<1
 streamlit-folium>=0.20,<1
@@ -17,12 +18,12 @@ python-box==7.3.2
 xyzservices>=2024.4.0
 shapely>=2.1,<3
 duckdb>=1.0,<2
-plotly>=5.20,<6
+plotly>=5.20,<7
 beautifulsoup4>=4.12,<5
 urllib3>=2.0,<3
 fiona>=1.10,<2
-pyarrow>=16,<23
+pyarrow>=16,<25
 rtree>=1.0,<2
-lxml>=5.0,<6
+lxml>=5.0,<7
 xlsxwriter>=3.2,<4
 streamlit-option-menu>=0.3,<1
