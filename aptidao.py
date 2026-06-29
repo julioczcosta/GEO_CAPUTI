@@ -9,6 +9,9 @@ import pandas as pd
 import tempfile
 import zipfile
 import os
+import io
+import time
+import requests
 import bs4
 
 
@@ -29,6 +32,32 @@ COLOR_MAP_LEGENDA = {
     "Área urbana": "#FF0000",
     "Sem Inf.": "#DDDDDD",
 }
+
+# Significado de cada grupo de aptidão (sistema Embrapa / Ramalho Filho & Beek).
+# 1-3 = lavouras; 4 = pastagem plantada; 5 = silvicultura/pastagem natural;
+# 6 = preservação (sem aptidão para uso agrícola).
+NIVEL_APTIDAO = {
+    "1": "Boa — lavouras",
+    "2": "Regular — lavouras",
+    "3": "Restrita — lavouras",
+    "4": "Pastagem plantada",
+    "5": "Silvicultura / pastagem natural",
+    "6": "Preservação (sem aptidão agrícola)",
+}
+
+CLASSES_AGRICULTAVEIS = {"1", "2", "3"}          # terras de lavoura
+CLASSES_APTIDAO = {"1", "2", "3", "4", "5", "6"}  # classes do sistema Embrapa
+CLASSES_RESTRICAO = {
+    "Terra indígena",
+    "Unidade de conservação",
+    "Corpos d'água",
+    "Área urbana",
+}
+
+
+def nivel_aptidao(classe_norm):
+    """Texto explicativo do grupo de aptidão a partir da classe normalizada."""
+    return NIVEL_APTIDAO.get(str(classe_norm).strip(), str(classe_norm).strip())
 
 
 # ============================================================
@@ -219,6 +248,35 @@ def opacidade_por_feature(feature):
         return 0.55
 
     return 0.48
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def consultar_aptidao_embrapa(bbox_str):
+    """Consulta o WFS de aptidão agrícola da Embrapa com retry/timeout.
+
+    O geoserver da Embrapa é instável; aplica backoff em 429/502/503/504 e
+    cacheia por bbox (TTL 24h) para não refazer a chamada a cada reprocessamento.
+    Retorna um GeoDataFrame (possivelmente vazio) ou None em caso de falha.
+    """
+    url = "https://geoinfo.dados.embrapa.br/geoserver/ows"
+    params = {
+        "service": "WFS", "version": "1.0.0", "request": "GetFeature",
+        "typeName": "geonode:aptagr_bra", "outputFormat": "application/json",
+        "bbox": f"{bbox_str},EPSG:4326",
+    }
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=40,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code in (429, 502, 503, 504):
+                time.sleep(2 ** attempt)
+                continue
+            if r.status_code == 200:
+                return gpd.read_file(io.BytesIO(r.content))
+            return None
+        except Exception:
+            time.sleep(2 ** attempt)
+    return None
 
 
 # ============================================================
@@ -424,6 +482,13 @@ def render_tab():
         name="Satélite"
     ).add_to(m)
 
+    # Enquadra o mapa na extensão real do imóvel (em vez de zoom fixo).
+    try:
+        minx, miny, maxx, maxy = gdf_raw.total_bounds
+        m.fit_bounds([[miny, minx], [maxy, maxx]])
+    except Exception:
+        pass
+
     # ============================================================
     # PRIMEIRO: CAMADA DE APTIDÃO COMO FUNDO
     # ============================================================
@@ -478,33 +543,45 @@ def render_tab():
                 tooltip=tooltip_apt
             ).add_to(m)
 
+            # Legenda só com as classes que de fato aparecem no recorte.
+            if "classe_norm" in gdf_visual.columns:
+                classes_presentes = set(
+                    gdf_visual["classe_norm"].astype(str).str.strip()
+                )
+            else:
+                classes_presentes = set()
+
             legenda_html = """
             <div style='
                 position: fixed;
                 bottom: 30px;
                 left: 30px;
-                width: 190px;
+                width: 210px;
                 z-index: 9999;
                 background-color: white;
                 border: 2px solid gray;
                 padding: 10px;
-                font-size: 12px;
+                font-size: 11px;
                 box-shadow: 2px 2px 6px rgba(0,0,0,0.3);
                 border-radius: 5px;
-                opacity: 0.9;'>
+                opacity: 0.92;'>
                 <b>Legenda - Aptidão</b><br>
             """
 
             for nome, cor in COLOR_MAP_LEGENDA.items():
+                if classes_presentes and nome not in classes_presentes:
+                    continue
+                descricao = NIVEL_APTIDAO.get(nome, nome)
                 legenda_html += f"""
-                <div style='margin-bottom:3px;'>
+                <div style='margin-bottom:3px; line-height:1.25;'>
                     <i style='
                         background:{cor};
                         width:12px;
                         height:12px;
                         display:inline-block;
                         margin-right:6px;
-                        border:1px solid #ccc;'></i>{nome}
+                        border:1px solid #ccc;
+                        vertical-align:middle;'></i>{descricao}
                 </div>
                 """
 
@@ -635,21 +712,23 @@ def render_tab():
                             f"{bounds[3] + margem}"
                         )
 
-                        wfs_url = (
-                            "https://geoinfo.dados.embrapa.br/geoserver/ows?"
-                            "service=WFS&version=1.0.0&request=GetFeature"
-                            "&typeName=geonode:aptagr_bra"
-                            f"&bbox={bbox_str},EPSG:4326"
-                            "&outputFormat=application/json"
-                        )
+                        gdf_embrapa = consultar_aptidao_embrapa(bbox_str)
 
-                        gdf_embrapa = gpd.read_file(wfs_url)
+                        if gdf_embrapa is None:
+                            st.error(
+                                "Não foi possível consultar o WFS de aptidão da "
+                                "Embrapa (servidor instável). Tente novamente em instantes."
+                            )
+                            st.stop()
+
+                        area_uniao_ha = float(geom_uniao.area / 10000)
 
                         if gdf_embrapa.empty:
                             st.warning("Sem dados de aptidão agrícola para a área informada.")
                             st.session_state["aptidao_data"] = {
                                 "visual": None,
-                                "stats": None
+                                "stats_full": None,
+                                "area_uniao_ha": area_uniao_ha,
                             }
                             st.session_state["aptidao_concluida"] = True
                             st.rerun()
@@ -660,16 +739,10 @@ def render_tab():
                                 allow_override=True
                             )
 
-                        # ------------------------------------------------
-                        # VISUAL:
-                        # mantém o entorno completo retornado pela Embrapa.
-                        # ------------------------------------------------
+                        # VISUAL: mantém o entorno completo retornado pela Embrapa.
                         gdf_visual = preparar_visual_embrapa(gdf_embrapa)
 
-                        # ------------------------------------------------
-                        # ESTATÍSTICA:
-                        # somente interseção com elementos/buffers.
-                        # ------------------------------------------------
+                        # ESTATÍSTICA: interseção com os elementos/buffers.
                         gdf_embrapa_utm = gdf_embrapa.to_crs(epsg=epsg_metro)
 
                         gdf_intersect = gpd.overlay(
@@ -679,7 +752,7 @@ def render_tab():
                             keep_geom_type=False
                         )
 
-                        stats = None
+                        stats_full = None
 
                         if not gdf_intersect.empty:
                             gdf_intersect["area_ha"] = gdf_intersect.geometry.area / 10000
@@ -714,38 +787,29 @@ def render_tab():
                                 axis=1
                             )
 
-                            stats = (
+                            # Mantém TODAS as classes (inclusive restrições e
+                            # 'Sem Inf.'); a separação acontece na exibição, para
+                            # que o denominador de % seja a área do imóvel.
+                            stats_full = (
                                 gdf_intersect
                                 .groupby(["legenda_ap", "classe_norm", "simb_apt"])["area_ha"]
                                 .sum()
                                 .reset_index()
                             )
+                            stats_full = stats_full[stats_full["area_ha"] > 0.001].copy()
+                            stats_full = stats_full.sort_values(
+                                "area_ha", ascending=False
+                            ).reset_index(drop=True)
 
-                            mask_validos = ~stats["classe_norm"].astype(str).str.lower().isin(
-                                ["none", "nan", "", "sem inf.", "sem inf", "null", "<na>"]
-                            )
-
-                            stats = stats[mask_validos].copy()
-                            stats = stats[stats["area_ha"] > 0.001].copy()
-
-                            if not stats.empty:
-                                stats["%"] = (
-                                    stats["area_ha"] / stats["area_ha"].sum()
-                                ) * 100
-
-                                stats = stats.sort_values(
-                                    "area_ha",
-                                    ascending=False
-                                ).reset_index(drop=True)
-                            else:
-                                stats = None
-
+                            if stats_full.empty:
+                                stats_full = None
                         else:
                             st.warning("A área não apresentou interseção com a base de aptidão agrícola.")
 
                         st.session_state["aptidao_data"] = {
                             "visual": gdf_visual,
-                            "stats": stats
+                            "stats_full": stats_full,
+                            "area_uniao_ha": area_uniao_ha,
                         }
 
                         st.session_state["aptidao_concluida"] = True
@@ -771,76 +835,177 @@ def render_tab():
     # Resultados
     # ------------------------------------------------------------
     if st.session_state.get("aptidao_concluida") and st.session_state.get("aptidao_data"):
-        stats = st.session_state["aptidao_data"].get("stats")
+        data = st.session_state["aptidao_data"]
+        stats_full = data.get("stats_full")
+        area_uniao_ha = data.get("area_uniao_ha") or 0.0
 
-        if stats is not None and not stats.empty:
-            if "classe_norm" not in stats.columns:
-                if "legenda_ap" in stats.columns:
-                    stats["classe_norm"] = stats["legenda_ap"].apply(
-                        normalizar_classe_embrapa
+        def _pct(valor):
+            return (valor / area_uniao_ha * 100) if area_uniao_ha > 0 else 0.0
+
+        if stats_full is not None and not stats_full.empty:
+            sf = stats_full.copy()
+            sf["classe_norm"] = sf["classe_norm"].astype(str).str.strip()
+
+            # Separa em: classes de aptidão (1-6) e restrições/sobreposições.
+            # O que sobra da área do imóvel é tratado como "sem informação".
+            agri = sf[sf["classe_norm"].isin(CLASSES_APTIDAO)].copy()
+            restr = sf[sf["classe_norm"].isin(CLASSES_RESTRICAO)].copy()
+
+            area_classificada = float(sf["area_ha"].sum())
+            area_sem_info = max(area_uniao_ha - area_classificada, 0.0)
+            area_agricultavel = float(
+                agri[agri["classe_norm"].isin(CLASSES_AGRICULTAVEIS)]["area_ha"].sum()
+            )
+
+            if not agri.empty:
+                agri = agri.sort_values("area_ha", ascending=False).reset_index(drop=True)
+                agri["nivel"] = agri["classe_norm"].apply(nivel_aptidao)
+                agri["%"] = agri["area_ha"].apply(_pct)
+
+            st.markdown("#### 📊 Resultados da Análise")
+
+            # ---------------- KPIs ----------------
+            nivel_pred = nivel_aptidao(agri.iloc[0]["classe_norm"]) if not agri.empty else "—"
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Área analisada", f"{area_uniao_ha:,.1f} ha".replace(",", "."))
+            k2.metric(
+                "Terras agricultáveis", f"{_pct(area_agricultavel):.0f}%",
+                help="Classes 1, 2 e 3 — terras aptas a lavouras."
+            )
+            k3.metric("Aptidão predominante", nivel_pred)
+            k4.metric(
+                "Sem informação", f"{_pct(area_sem_info):.0f}%",
+                help="Parte da área do imóvel sem cobertura na base de aptidão da Embrapa."
+            )
+
+            # ---------------- Restrições / sobreposições ----------------
+            if not restr.empty:
+                linhas = [
+                    f"**{r['classe_norm']}** — {r['area_ha']:.2f} ha ({_pct(r['area_ha']):.1f}%)"
+                    for _, r in restr.iterrows()
+                ]
+                st.warning("⚠️ **Sobreposições detectadas na área:**  \n" + "  \n".join(linhas))
+
+            # ---------------- Gráfico + tabela (classes de aptidão) ----------------
+            if not agri.empty:
+                c_chart, c_table = st.columns([0.42, 0.58], gap="medium")
+
+                with c_chart:
+                    agri_plot = agri.sort_values("area_ha", ascending=True)
+                    fig = px.bar(
+                        agri_plot,
+                        x="area_ha", y="nivel", orientation="h",
+                        color="classe_norm",
+                        color_discrete_map=COLOR_MAP_LEGENDA,
                     )
-                else:
-                    col_0 = stats.columns[0]
-                    stats["classe_norm"] = stats[col_0].apply(
-                        normalizar_classe_embrapa
+                    fig.update_traces(
+                        text=[f"{v:.0f}%" for v in agri_plot["%"]],
+                        textposition="outside",
+                        cliponaxis=False,
                     )
-                    stats["legenda_ap"] = stats[col_0]
+                    fig.update_layout(
+                        showlegend=False,
+                        height=max(220, 58 * len(agri_plot)),
+                        margin=dict(t=10, b=10, l=10, r=40),
+                        xaxis_title="Área (ha)", yaxis_title=None,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
-            st.markdown("#### 📊 Resultados da Interseção")
+                with c_table:
+                    df_disp = agri[["nivel", "simb_apt", "area_ha", "%", "classe_norm"]].rename(
+                        columns={"nivel": "Aptidão", "simb_apt": "Sigla", "area_ha": "Área (ha)"}
+                    )
+                    total = pd.DataFrame([{
+                        "Aptidão": "TOTAL (classes de aptidão)", "Sigla": "",
+                        "Área (ha)": float(agri["area_ha"].sum()),
+                        "%": float(agri["%"].sum()),
+                        "classe_norm": "_total",
+                    }])
+                    df_disp = pd.concat([df_disp, total], ignore_index=True)
 
-            c_chart, c_table = st.columns([0.4, 0.6], gap="medium")
+                    def _estilo(row):
+                        if str(row["classe_norm"]) == "_total":
+                            return ["font-weight:700; background-color:#f0f0f0;"] * len(row)
+                        estilos = [""] * len(row)
+                        cor = COLOR_MAP_LEGENDA.get(str(row["classe_norm"]))
+                        if cor:
+                            i = list(row.index).index("Sigla")
+                            estilos[i] = (
+                                f"background-color:{cor}; color:#000; "
+                                "font-weight:600; text-align:center;"
+                            )
+                        return estilos
 
-            with c_chart:
-                fig = px.pie(
-                    stats,
-                    values="area_ha",
-                    names="simb_apt",
-                    color="classe_norm",
-                    color_discrete_map=COLOR_MAP_LEGENDA,
-                    hole=0.4
+                    try:
+                        sty = (
+                            df_disp.style
+                            .apply(_estilo, axis=1)
+                            .format({"Área (ha)": "{:.2f}", "%": "{:.1f}%"})
+                            .hide(axis="index")
+                            .hide(axis="columns", subset=["classe_norm"])
+                        )
+                        st.dataframe(sty, use_container_width=True)
+                    except Exception:
+                        st.dataframe(
+                            df_disp.drop(columns=["classe_norm"]),
+                            hide_index=True, use_container_width=True,
+                            column_config={
+                                "Área (ha)": st.column_config.NumberColumn(format="%.2f"),
+                                "%": st.column_config.NumberColumn(format="%.1f%%"),
+                            },
+                        )
+
+            # ---------------- Redação para laudo ----------------
+            partes = []
+            if not agri.empty:
+                cp = agri.iloc[0]
+                partes.append(
+                    f"A área analisada ({area_uniao_ha:.1f} ha) apresenta predominância de terras "
+                    f"com aptidão \"{nivel_aptidao(cp['classe_norm']).lower()}\" "
+                    f"({cp['%']:.0f}% da área)."
                 )
-
-                fig.update_traces(
-                    textposition="outside",
-                    textinfo="label+percent",
-                    pull=[0.05] * len(stats)
+                partes.append(
+                    f"As terras agricultáveis (classes 1 a 3) somam {_pct(area_agricultavel):.0f}% da área."
                 )
-
-                fig.update_layout(
-                    showlegend=False,
-                    margin=dict(t=20, b=20, l=20, r=20),
-                    height=300
+            if not restr.empty:
+                nomes_r = ", ".join(sorted(set(restr["classe_norm"])))
+                partes.append(f"Foram identificadas sobreposições com: {nomes_r}.")
+            if _pct(area_sem_info) >= 1:
+                partes.append(
+                    f"Cerca de {_pct(area_sem_info):.0f}% da área não possui cobertura "
+                    "na base de aptidão (sem informação)."
                 )
+            if partes:
+                with st.expander("📝 Redação para laudo"):
+                    st.write(" ".join(partes))
 
-                st.plotly_chart(fig, use_container_width=True)
-
-            with c_table:
-                df_show = stats.rename(
+            # ---------------- Downloads ----------------
+            if not agri.empty:
+                export = agri[["classe_norm", "nivel", "simb_apt", "legenda_ap", "area_ha", "%"]].rename(
                     columns={
-                        "legenda_ap": "Classe",
-                        "simb_apt": "Sigla",
-                        "area_ha": "Área Intersectada (ha)"
+                        "classe_norm": "Classe", "nivel": "Aptidão", "simb_apt": "Sigla",
+                        "legenda_ap": "Descrição", "area_ha": "Área (ha)",
                     }
                 )
-
-                cols_to_show = ["Classe", "Sigla", "Área Intersectada (ha)", "%"]
-                cols_final = [c for c in cols_to_show if c in df_show.columns]
-                df_show = df_show[cols_final]
-
-                st.dataframe(
-                    df_show,
-                    column_config={
-                        "Classe": st.column_config.TextColumn("Classe", width="medium"),
-                        "Sigla": st.column_config.TextColumn("Sigla", width="small"),
-                        "Área Intersectada (ha)": st.column_config.NumberColumn(
-                            "Área Intersectada (ha)",
-                            format="%.4f"
-                        ),
-                        "%": st.column_config.NumberColumn("%", format="%.2f%%")
-                    },
-                    use_container_width=True,
-                    hide_index=True
-                )
+                cdl1, cdl2 = st.columns(2)
+                with cdl1:
+                    st.download_button(
+                        "📥 Tabela (CSV)",
+                        export.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="aptidao_agricola.csv", mime="text/csv",
+                        use_container_width=True,
+                    )
+                with cdl2:
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="xlsxwriter") as wr:
+                        export.to_excel(wr, index=False, sheet_name="Aptidao")
+                    st.download_button(
+                        "📥 Tabela (Excel)",
+                        buf.getvalue(), file_name="aptidao_agricola.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
 
         else:
             st.info("Nenhuma classe de aptidão agrícola significativa foi identificada dentro dos elementos analisados.")
