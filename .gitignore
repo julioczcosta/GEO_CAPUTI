@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Segredos do Streamlit (NUNCA versionar)
+.streamlit/secrets.toml
+secrets.toml
+
+# Credenciais do Earth Engine
+.config/earthengine/
+*.credentials
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editores / IDE
+.vscode/
+.idea/
+
+# Arquivos temporários do projeto
+tmp.geojson
+*.tmp
