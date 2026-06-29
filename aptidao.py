@@ -233,28 +233,31 @@ def carregar_kmz_kml_bs4(uploaded_file):
             tmp.write(uploaded_file.getbuffer())
             tmp_path = tmp.name
 
-        kml_content = ""
-
-        if zipfile.is_zipfile(tmp_path):
-            with zipfile.ZipFile(tmp_path, "r") as kmz:
-                kmls = [f for f in kmz.namelist() if f.lower().endswith(".kml")]
-
-                if not kmls:
-                    raise ValueError("Nenhum .kml encontrado no KMZ/ZIP.")
-
-                target = "doc.kml" if "doc.kml" in kmz.namelist() else kmls[0]
-
-                with kmz.open(target) as f:
-                    kml_content = f.read().decode("utf-8", errors="ignore")
-
-        else:
-            with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
-                kml_content = f.read()
-
+        # finally garante a remoção do temporário mesmo se a leitura falhar
+        # (ex.: KMZ sem .kml dentro dispara ValueError abaixo).
         try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+            kml_content = ""
+
+            if zipfile.is_zipfile(tmp_path):
+                with zipfile.ZipFile(tmp_path, "r") as kmz:
+                    kmls = [f for f in kmz.namelist() if f.lower().endswith(".kml")]
+
+                    if not kmls:
+                        raise ValueError("Nenhum .kml encontrado no KMZ/ZIP.")
+
+                    target = "doc.kml" if "doc.kml" in kmz.namelist() else kmls[0]
+
+                    with kmz.open(target) as f:
+                        kml_content = f.read().decode("utf-8", errors="ignore")
+
+            else:
+                with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                    kml_content = f.read()
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
         soup = bs4.BeautifulSoup(kml_content, "xml")
         records = []

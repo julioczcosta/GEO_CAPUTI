@@ -84,7 +84,7 @@ def render_tab():
     else:
         geom_alvo = geometry
         try: area_alvo_ha = geom_alvo.area().divide(10000).getInfo()
-        except: area_alvo_ha = 100
+        except Exception: area_alvo_ha = 100
 
     # ==========================================
     # 🛡️ TRAVA DE ESCALA E SEGURANÇA
@@ -141,7 +141,7 @@ def render_tab():
         m.add_basemap("HYBRID")
         
         try: m.centerObject(geom_alvo, 13)
-        except: pass
+        except Exception: pass
 
         # ==========================================
         # 🚀 O MOTOR MULTI-SATÉLITE
@@ -314,12 +314,12 @@ def render_tab():
             try:
                 outline_full = empty.paint(geometry, 1, 1)
                 m.add_layer(outline_full, {'palette': 'gray'}, "Todas as Áreas", False)
-            except: pass
+            except Exception: pass
             
         try:
             outline_alvo = empty.paint(ee.FeatureCollection(geom_alvo), 1, 3)
             m.add_layer(outline_alvo, {'palette': 'FF0000'}, "📍 Bloco Selecionado")
-        except: pass
+        except Exception: pass
         
         m.add_layer_control()
 

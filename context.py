@@ -29,7 +29,7 @@ def consultar_camadas_extras(lat, lon):
                 if data.get("features"):
                     resultados["bioma"] = data["features"][0]["properties"].get("bioma", "Não identificado")
                     break
-        except: continue
+        except Exception: continue
 
     # 2. AMAZÔNIA LEGAL
     try:
@@ -43,7 +43,7 @@ def consultar_camadas_extras(lat, lon):
             data_amz = resp_amz.json()
             if data_amz.get("features"):
                 resultados["amazonia_legal"] = True
-    except:
+    except Exception:
         pass
 
     return resultados
@@ -135,7 +135,7 @@ def render_tab():
                     try:
                         val = float(num)
                         return f"{val:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                    except: return str(num)
+                    except Exception: return str(num)
 
                 pop = fmt(dados_ibge['populacao'], 0)
                 area = fmt(dados_ibge['area_km2'], 0)

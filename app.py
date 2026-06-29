@@ -42,16 +42,19 @@ def check_login():
                     return False
                 
                 known_users = st.secrets["users"]
-                
-                if email in known_users:
-                    if hmac.compare_digest(password, known_users[email]):
-                        st.session_state["logged_in"] = True
-                        st.session_state["user_email"] = email
-                        st.rerun()
-                    else:
-                        st.error("❌ Senha incorreta.")
+
+                # Compara sempre (mesmo com e-mail inexistente) usando um valor
+                # placeholder, para não vazar quais e-mails existem — nem pelo
+                # texto da mensagem nem pelo tempo de resposta.
+                senha_esperada = known_users.get(email, "")
+                senha_valida = bool(senha_esperada) and hmac.compare_digest(password, senha_esperada)
+
+                if senha_valida:
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_email"] = email
+                    st.rerun()
                 else:
-                    st.error("❌ E-mail não cadastrado.")
+                    st.error("❌ E-mail ou senha incorretos.")
     return False
 
 # --- TRAVA DE SEGURANÇA ---

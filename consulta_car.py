@@ -40,7 +40,7 @@ def limpar_numero(valor):
     try:
         limpo = str(valor).replace('.', '').replace(',', '.')
         return float(limpo)
-    except:
+    except Exception:
         return None
 
 def buscar_propriedade(props, termos):
@@ -62,7 +62,7 @@ def calcular_area_geometria(gdf):
         gdf_utm = gdf.to_crs(gdf.estimate_utm_crs())
         area_m2 = gdf_utm.geometry.area.sum()
         return area_m2 / 10000 
-    except:
+    except Exception:
         return None
 
 # --- 3. GERADORES DE ARQUIVOS ---

@@ -29,6 +29,15 @@ except ImportError:
 
 IBGE_WFS_URL = "https://geoservicos.ibge.gov.br/geoserver/ows"
 
+# Mapa código IBGE (2 primeiros dígitos) -> sigla da UF. Usado em vários
+# fallbacks de identificação de município.
+UF_POR_CODIGO = {
+    '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
+    '21': 'MA', '22': 'PI', '23': 'CE', '24': 'RN', '25': 'PB', '26': 'PE', '27': 'AL',
+    '28': 'SE', '29': 'BA', '31': 'MG', '32': 'ES', '33': 'RJ', '35': 'SP',
+    '41': 'PR', '42': 'SC', '43': 'RS', '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF'
+}
+
 def ibge_wfs_get(params, timeout=30, retries=3):
     """GET no WFS do IBGE com retry/backoff para 502/503/504 (servidor instável)."""
     resp = None
@@ -88,8 +97,9 @@ def init_gee():
         st.error(f"⚠️ Falha na conexão GEE: {e}")
         st.stop()
 
-# Chama a função
-init_gee()
+# NÃO chamar init_gee() no nível do módulo: gera efeito colateral na importação
+# (st.error/st.stop durante o import) e inicialização dupla. O app.py é o único
+# responsável por chamá-la, uma vez, após o login.
 
 def init_session_state():
     """Inicializa variáveis básicas da sessão."""
@@ -127,6 +137,18 @@ def reset_preview():
 # ==========================================
 
 class LegacySSLAdapter(HTTPAdapter):
+    """Adapter para servidores com TLS legado (ex.: geoserver.car.gov.br).
+
+    ATENÇÃO: a verificação de certificado/hostname fica DESLIGADA aqui porque o
+    geoserver.car.gov.br falha o handshake TLS com a verificação ligada
+    (testado: 'SSLV3_ALERT_HANDSHAKE_FAILURE'). Não é negligência — é a única
+    forma de a Consulta CAR funcionar enquanto o servidor do governo não corrige
+    sua configuração de TLS.
+
+    Mitigação de risco: este adapter é montado SOMENTE em sessões dedicadas a
+    endpoints .gov.br do CAR (ver get_legacy_session / get_car_geometry). Nunca
+    use esta sessão para tráfego sensível ou de terceiros.
+    """
     def init_poolmanager(self, connections, maxsize, block=False):
         ctx = ssl.create_default_context()
         ctx.set_ciphers('DEFAULT@SECLEVEL=1')
@@ -176,7 +198,10 @@ def get_car_geometry(codigo_car):
 # 3. PROCESSAMENTO KML (GEE Direto)
 # ==========================================
 
-@st.cache_data
+# NÃO usar @st.cache_data aqui: a função retorna objetos ee.Geometry, que o
+# cache do Streamlit não serializa de forma confiável (pode gerar resultados
+# inconsistentes/corrompidos). É chamada por clique de botão, então o cache
+# traria pouco ganho e muito risco.
 def processar_kml_conteudo(kml_content):
     try:
         kml_str = kml_content.decode('utf-8', errors='ignore')
@@ -192,7 +217,7 @@ def processar_kml_conteudo(kml_content):
                             coords_list.append([float(parts[0]), float(parts[1])])
                     if len(coords_list) > 2:
                         poligonos_gee.append(ee.Geometry.Polygon([coords_list]))
-                except: continue
+                except Exception: continue
         
         if not poligonos_gee: return None, "Sem coordenadas."
         if len(poligonos_gee) > 1: return ee.Geometry.MultiPolygon(poligonos_gee), None
@@ -228,7 +253,7 @@ def carregar_kml_geopandas(uploaded_file):
 
         gdfs = []
         try: layers = fiona.listlayers(target_file)
-        except: layers = [0] 
+        except Exception: layers = [0] 
 
         for layer in layers:
             try:
@@ -245,7 +270,7 @@ def carregar_kml_geopandas(uploaded_file):
         if not gdfs: return None, "Nenhuma geometria válida encontrada."
         gdf_final = pd.concat(gdfs, ignore_index=True)
         try: shutil.rmtree(temp_dir)
-        except: pass
+        except Exception: pass
 
         return gdf_final, None
     except Exception as e:
@@ -259,10 +284,8 @@ def carregar_kml_geopandas(uploaded_file):
 def obter_municipios_interseccao(_geom_gee, cache_id):
     """Detecta municípios que intersectam o imóvel (bbox expandido + fallback por ponto)."""
     try:
-        from shapely.geometry import shape as shapely_shape
-
         geojson = _geom_gee.getInfo()
-        geom_shapely = shapely_shape(geojson)
+        geom_shapely = shape(geojson)
         gdf_imovel = gpd.GeoDataFrame({'geometry': [geom_shapely]}, crs="EPSG:4674")
         gdf_imovel["geometry"] = gdf_imovel.geometry.buffer(0)
 
@@ -282,7 +305,6 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
         diag = []
 
         def _wfs_request(layer, bbox_str, retries=3):
-            import time
             params = {
                 "service": "WFS", "version": "2.0.0", "request": "GetFeature",
                 "typeName": layer, "outputFormat": "application/json",
@@ -315,13 +337,6 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
 
         if gdf_muns.empty:
             return [{"erro": "Camadas IBGE: " + " | ".join(diag)}]
-
-        UF_POR_CODIGO = {
-            '11':'RO','12':'AC','13':'AM','14':'RR','15':'PA','16':'AP','17':'TO',
-            '21':'MA','22':'PI','23':'CE','24':'RN','25':'PB','26':'PE','27':'AL',
-            '28':'SE','29':'BA','31':'MG','32':'ES','33':'RJ','35':'SP',
-            '41':'PR','42':'SC','43':'RS','50':'MS','51':'MT','52':'GO','53':'DF'
-        }
 
         utm_crs = gdf_imovel.estimate_utm_crs()
         gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
@@ -358,7 +373,6 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
 
         # FALLBACK: se a interseção por área falhou, usa o ponto do centroide
         if not resultados:
-            from shapely.geometry import Point
             ponto = gpd.GeoDataFrame(geometry=[Point(cx, cy)], crs="EPSG:4674").to_crs(utm_crs).geometry.iloc[0]
             for _, mun in gdf_muns_utm.iterrows():
                 try:
@@ -388,7 +402,7 @@ def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
                 ee.Filter.eq('CD_MUN', int(cod_ibge))
             )).first()
             geom_alvo = municipio.geometry()
-        except:
+        except Exception:
             geom_alvo = ee.Geometry.Point([lon_fallback, lat_fallback]).buffer(15000)
 
         stats = srtm.reduceRegion(
@@ -433,12 +447,12 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
         try:
             r_pop = ibge_api_json(f"https://apisidra.ibge.gov.br/values/t/4714/n6/{cod_ibge}/v/93/p/last%201", session=session)
             if r_pop and len(r_pop) > 1: populacao = float(r_pop[1].get("V"))
-        except: pass
+        except Exception: pass
 
         try:
             r_area = ibge_api_json(f"https://servicodados.ibge.gov.br/api/v3/malhas/municipios/{cod_ibge}/metadados", session=session)
             if r_area and len(r_area) > 0: area_km2 = float(r_area[0].get("area", {}).get("dimensao"))
-        except: pass
+        except Exception: pass
 
         densidade = (populacao / area_km2) if (populacao and area_km2) else None
 
@@ -453,7 +467,7 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
             p_ime = {"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CGMAT:qg_2025_110_reggeogimed", "outputFormat": "application/json", "bbox": bbox}
             r_ime = ibge_wfs_get(p_ime).json()
             if r_ime.get("features"): reg_ime = r_ime["features"][0]["properties"].get("nm_rgi", "---")
-        except: pass
+        except Exception: pass
 
         return {
             "municipio": nome_oficial, "uf": uf, "area_km2": area_km2, "populacao": populacao, 
@@ -470,13 +484,13 @@ def get_bacia_info(lat, lon):
         try:
             r = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_6", "outputFormat": "application/json", "bbox": bbox}).json()
             props = r["features"][0]["properties"] if r.get("features") else {}
-        except: props = {}
+        except Exception: props = {}
 
         if not props:
             try:
                 r = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_4", "outputFormat": "application/json", "bbox": bbox}).json()
                 props = r["features"][0]["properties"] if r.get("features") else {}
-            except: pass
+            except Exception: pass
 
         if not props: return {"erro": "Bacia não identificada."}
 
@@ -508,11 +522,13 @@ def convert_gee_to_gdf(gee_geometry, properties):
 def gerar_kml_bytes(gdf, nome_arquivo):
     if gpd is None: return None
     try:
-        with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp:
-            gdf.to_file(tmp.name, driver='KML')
-            tmp.seek(0)
-            return tmp.read()
-    except:
+        # TemporaryDirectory remove o arquivo automaticamente ao sair do bloco
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            caminho = os.path.join(tmp_dir, "export.kml")
+            gdf.to_file(caminho, driver='KML')
+            with open(caminho, 'rb') as f:
+                return f.read()
+    except Exception:
         return gdf.to_json().encode('utf-8')
 
 def gerar_shapefile_zip(gdf):
@@ -537,11 +553,14 @@ def gerar_shapefile_zip(gdf):
 def gerar_geopackage_bytes(gdf):
     if gpd is None: return None
     try:
-        with tempfile.NamedTemporaryFile(suffix='.gpkg', delete=False) as tmp:
-            gdf.to_file(tmp.name, driver="GPKG")
-            tmp.seek(0)
-            return tmp.read()
-    except: return None
+        # TemporaryDirectory remove o arquivo automaticamente ao sair do bloco
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            caminho = os.path.join(tmp_dir, "export.gpkg")
+            gdf.to_file(caminho, driver="GPKG")
+            with open(caminho, 'rb') as f:
+                return f.read()
+    except Exception:
+        return None
 
 # ==========================================
 # 7. LOGÍSTICA E ROTAS (OSRM)
@@ -594,7 +613,6 @@ def get_distancia_capital(cod_ibge, uf):
     lat_cap, lon_cap = COORDENADAS_CAPITAIS[uf]
     
     try:
-        import time
         url_wfs = "https://geoservicos.ibge.gov.br/geoserver/ows"
         # Camada de pontos de sede verificada via GetCapabilities (workspace CGMAT, estável)
         params_wfs = {
@@ -621,7 +639,7 @@ def get_distancia_capital(cod_ibge, uf):
         return {"erro": f"Falha ao buscar sede: {e}"}
 
     try:
-        url_osrm = f"http://router.project-osrm.org/route/v1/driving/{lon_sede},{lat_sede};{lon_cap},{lat_cap}?overview=false"
+        url_osrm = f"https://router.project-osrm.org/route/v1/driving/{lon_sede},{lat_sede};{lon_cap},{lat_cap}?overview=false"
         r_osrm = requests.get(url_osrm, timeout=10)
         
         if r_osrm.status_code == 200:
@@ -759,7 +777,7 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
                 if isinstance(numero, str) and numero == "N/A": return "N/A"
                 val = float(numero)
                 return f"{val:,.{decimais}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            except:
+            except Exception:
                 return str(numero)
 
         pop_fmt = formata_br(pop, 0)
@@ -800,13 +818,6 @@ def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
     2) MapBiomas municípios-2020 pelo ponto/centroide;
     3) WFS IBGE por interseção espacial, usando várias camadas conhecidas.
     """
-
-    UF_POR_CODIGO = {
-        '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
-        '21': 'MA', '22': 'PI', '23': 'CE', '24': 'RN', '25': 'PB', '26': 'PE', '27': 'AL',
-        '28': 'SE', '29': 'BA', '31': 'MG', '32': 'ES', '33': 'RJ', '35': 'SP',
-        '41': 'PR', '42': 'SC', '43': 'RS', '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF'
-    }
 
     def _limpar_valor(valor):
         if valor is None:

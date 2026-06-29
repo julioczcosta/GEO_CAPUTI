@@ -227,7 +227,7 @@ def detectar_ufs(gdf):
                                 break
                 if ufs:
                     return list(set(ufs))
-        except:
+        except Exception:
             continue
 
     # Fallback robusto via Nominatim
@@ -255,7 +255,7 @@ def detectar_ufs(gdf):
             }
             if estado_nome in mapa_uf:
                 return [mapa_uf[estado_nome]]
-    except:
+    except Exception:
         pass
 
     return []
@@ -288,7 +288,7 @@ def buscar_cars_por_bbox(gdf_imovel, ufs):
                     gdf_uf = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
                     gdf_uf["_uf_fonte"] = uf.upper()
                     gdfs.append(gdf_uf)
-        except:
+        except Exception:
             continue
 
     if not gdfs:
@@ -341,7 +341,7 @@ def calcular_area_sobreposicao_ha(geom_car, geom_imovel, utm_crs):
         gdf_inter = gpd.GeoDataFrame({'geometry': [inter]}, crs="EPSG:4674")
         gdf_proj = gdf_inter.to_crs(utm_crs)
         return round(gdf_proj.geometry.area.iloc[0] / 10000, 4)
-    except:
+    except Exception:
         return 0.0
 
 
@@ -373,7 +373,7 @@ def extrair_area(row):
         if val and str(val).strip() not in ['nan', 'None', '']:
             try:
                 return round(float(str(val).replace(',', '.')), 2)
-            except:
+            except Exception:
                 continue
     return None
 
@@ -778,7 +778,7 @@ def render_tab():
                         icon_anchor=(15, 15)
                     )
                 ).add_to(fg_item)
-            except:
+            except Exception:
                 continue
 
             fg_item.add_to(m)
@@ -996,5 +996,5 @@ def render_tab():
 
                     st_folium(m2, height=380, use_container_width=True,
                               key=f"mapa_detalhe_{num_sel}")
-                except:
+                except Exception:
                     st.caption("Não foi possível renderizar o mapa.")

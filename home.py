@@ -161,7 +161,7 @@ def render_tab():
                                   if 'area' in k and isinstance(v, (int, float)):
                                       area_raw = v; break
                         try: area_fmt = f"{float(area_raw):.2f} ha"
-                        except: area_fmt = str(area_raw)
+                        except Exception: area_fmt = str(area_raw)
 
                         st.markdown(f"""
                         <div style="font-size: 0.9rem; line-height: 1.6;">

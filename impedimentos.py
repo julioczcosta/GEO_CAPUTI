@@ -104,7 +104,7 @@ def calcular_epsg_utm(geometria_centroide):
         lon, lat = geometria_centroide.x, geometria_centroide.y
         zone = math.floor((lon + 180) / 6) + 1
         return f"EPSG:{31950 + zone}" if lat >= 0 else f"EPSG:{31960 + zone}"
-    except:
+    except Exception:
         return "EPSG:31983"
 
 @st.cache_data(ttl=3600)
@@ -113,7 +113,7 @@ def baixar_wfs(url, params):
     try:
         try:
             r = requests.get(url, params=params, headers=headers, timeout=15)
-        except:
+        except Exception:
             r = requests.get(url, params=params, headers=headers, verify=False, timeout=15)
         r.raise_for_status()
         return gpd.read_file(BytesIO(r.content))
@@ -137,7 +137,7 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
         gdf_inter['geometry'] = gdf_inter.geometry.intersection(aoi_geom)
         gdf_proj = gdf_inter.to_crs(aoi_crs_proj)
         gdf_inter['area_ha_sobreposta'] = gdf_proj.geometry.area / 10000
-    except:
+    except Exception:
         gdf_inter['area_ha_sobreposta'] = 0
 
     cols_existentes = [c for c in colunas if c in gdf_inter.columns]

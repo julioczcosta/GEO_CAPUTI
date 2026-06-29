@@ -42,7 +42,7 @@ def calcular_area_hectares(gdf):
         gdf_utm = gdf.to_crs(utm_crs)
         area_m2 = gdf_utm.geometry.area.sum()
         return round(area_m2 / 10000, 4)
-    except:
+    except Exception:
         return 0.0
 
 # --- 3. GERADORES DE ARQUIVOS (TEXTO PURO & COORDENADAS SEGURAS) ---
@@ -159,7 +159,7 @@ def buscar_imovel_especifico(filtros_sql, url_parquet, eh_sigef=True):
         
         def converter_geometria(blob):
             try: return wkb.loads(bytes(blob))
-            except: return None
+            except Exception: return None
 
         if 'geometry' in df.columns:
             geometrias = df['geometry'].apply(converter_geometria)
@@ -262,7 +262,7 @@ def render_tab():
             with st.container(border=True):
                 try:
                     area_val = f"{float(row.get('area_display', 0)):.4f} ha"
-                except:
+                except Exception:
                     area_val = "---"
 
                 if tipo == "SIGEF":
