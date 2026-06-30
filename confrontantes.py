@@ -3,8 +3,10 @@ import geopandas as gpd
 import pandas as pd
 import requests
 import folium
+import time
+import xml.etree.ElementTree as ET
 from streamlit_folium import st_folium
-from shapely.geometry import shape
+from shapely.geometry import shape, Polygon
 import ssl
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -297,6 +299,177 @@ def buscar_cars_por_bbox(gdf_imovel, ufs):
     return pd.concat(gdfs, ignore_index=True)
 
 
+# ==========================================
+# 3b. FONTES INCRA (SIGEF / SNCI) — WFS por UF
+# ==========================================
+
+INCRA_WFS = "https://acervofundiario.incra.gov.br/i3geo/ogc.php"
+TEMA_INCRA = {
+    "SIGEF": "certificada_sigef_particular_{uf}",
+    "SNCI": "imoveiscertificados_privado_{uf}",
+}
+NS_GML = "{http://www.opengis.net/gml}"
+NS_MS = "http://www.omsug.ca/osgis2004"
+
+# Prioridade de certificação: menor = mais certificado (vence na consolidação).
+PRIORIDADE_FONTE = {"SIGEF": 1, "SNCI": 2, "CAR": 3}
+
+# Limiar de "mesmo imóvel" na consolidação: sobreposição >= X% da área do menor.
+LIMIAR_DUPLICATA = 0.70
+
+
+def _bbox_buffer_str(gdf_wgs, metros=500):
+    """Bounds do imóvel com buffer de segurança, em EPSG:4674 (lon,lat)."""
+    gdf_proj = gdf_wgs.to_crs(gdf_wgs.estimate_utm_crs())
+    gdf_buffer = gdf_proj.buffer(metros).to_crs("EPSG:4674")
+    b = gdf_buffer.total_bounds
+    return f"{b[0]},{b[1]},{b[2]},{b[3]}"
+
+
+def _incra_gml_para_gdf(conteudo):
+    """Parseia o GML2 do MapServer (INCRA) direto, sem o driver GML do GDAL."""
+    try:
+        root = ET.fromstring(conteudo)
+    except Exception:
+        return gpd.GeoDataFrame()
+
+    regs = []
+    for fm in root.iter(f"{NS_GML}featureMember"):
+        filhos = list(fm)
+        if not filhos:
+            continue
+        feat = filhos[0]
+        props, polys = {}, []
+        for el in feat.iter():
+            tag = el.tag.split('}')[-1]
+            if tag == "coordinates" and el.text:
+                pts = []
+                for par in el.text.split():
+                    xy = par.split(',')
+                    if len(xy) >= 2:
+                        try:
+                            pts.append((float(xy[0]), float(xy[1])))
+                        except ValueError:
+                            continue
+                if len(pts) >= 3:
+                    polys.append(Polygon(pts))
+            elif el.tag.startswith("{" + NS_MS) and el.text and el.text.strip():
+                props[tag] = el.text.strip()
+        if polys:
+            props["geometry"] = polys[0] if len(polys) == 1 else max(polys, key=lambda p: p.area)
+            regs.append(props)
+
+    if not regs:
+        return gpd.GeoDataFrame()
+    return gpd.GeoDataFrame(regs, geometry="geometry", crs="EPSG:4326")
+
+
+def buscar_incra_por_bbox(bbox_str, ufs, fonte):
+    """Consulta SIGEF ou SNCI no WFS do INCRA por bbox, por UF, com retry."""
+    tema_fmt = TEMA_INCRA[fonte]
+    gdfs = []
+    for uf in ufs:
+        tema = tema_fmt.format(uf=uf.lower())
+        params = {
+            "tema": tema, "service": "WFS", "version": "1.0.0",
+            "request": "GetFeature", "typename": tema, "bbox": bbox_str,
+        }
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(INCRA_WFS, params=params, timeout=45,
+                                    headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code in (500, 502, 503, 504):
+                    time.sleep(2 ** attempt)  # INCRA instável — espera e tenta de novo
+                    continue
+                break
+            except requests.RequestException:
+                time.sleep(2 ** attempt)
+                resp = None
+        if resp is None or resp.status_code != 200:
+            continue
+        gdf_uf = _incra_gml_para_gdf(resp.content)
+        if not gdf_uf.empty:
+            gdf_uf["_uf_fonte"] = uf.upper()
+            gdfs.append(gdf_uf)
+
+    if not gdfs:
+        return gpd.GeoDataFrame()
+    out = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs="EPSG:4326")
+    return out.to_crs("EPSG:4674")
+
+
+def buscar_fonte(gdf_wgs, ufs, fonte):
+    """Busca uma fonte (CAR/SIGEF/SNCI) e devolve o gdf com a coluna _fonte
+    e a área declarada normalizada (_area_declarada_ha)."""
+    if fonte == "CAR":
+        gdf = buscar_cars_por_bbox(gdf_wgs, ufs)
+    else:
+        gdf = buscar_incra_por_bbox(_bbox_buffer_str(gdf_wgs), ufs, fonte)
+
+    if gdf is None or gdf.empty:
+        return gpd.GeoDataFrame()
+
+    gdf = gdf.copy()
+    gdf["_fonte"] = fonte
+
+    # SIGEF não traz área declarada -> calcula da geometria (UTM).
+    if fonte == "SIGEF":
+        try:
+            utm = gdf.estimate_utm_crs()
+            gdf["_area_declarada_ha"] = (gdf.to_crs(utm).geometry.area / 10000).round(2)
+        except Exception:
+            gdf["_area_declarada_ha"] = None
+    return gdf
+
+
+def consolidar_fontes(gdf_all):
+    """Deduplica vizinhos entre fontes, mantendo o de maior prioridade de
+    certificação (SIGEF > SNCI > CAR). Dois registros são o 'mesmo imóvel' se a
+    sobreposição for >= LIMIAR_DUPLICATA da área do menor. Marca '_tambem_em'
+    com as fontes equivalentes descartadas."""
+    if gdf_all.empty:
+        gdf_all = gdf_all.copy()
+        gdf_all["_tambem_em"] = []
+        return gdf_all
+
+    utm = gdf_all.estimate_utm_crs()
+    geoms = gdf_all.to_crs(utm).geometry.tolist()
+    areas = [g.area if (g is not None and not g.is_empty) else 0.0 for g in geoms]
+    fontes = gdf_all["_fonte"].tolist()
+    n = len(gdf_all)
+
+    ordem = sorted(range(n), key=lambda i: PRIORIDADE_FONTE.get(fontes[i], 9))
+    usados, manter, tambem = set(), [], {}
+
+    for i in ordem:
+        if i in usados:
+            continue
+        usados.add(i)
+        equivalentes = set()
+        gi = geoms[i]
+        for j in ordem:
+            if j in usados or j == i:
+                continue
+            gj = geoms[j]
+            if gi is None or gj is None or gi.is_empty or gj.is_empty:
+                continue
+            try:
+                inter = gi.intersection(gj).area
+            except Exception:
+                continue
+            menor = min(areas[i], areas[j]) or 1.0
+            if inter / menor >= LIMIAR_DUPLICATA:
+                usados.add(j)
+                equivalentes.add(fontes[j])
+        manter.append(i)
+        tambem[i] = sorted(equivalentes)
+
+    gdf_out = gdf_all.iloc[manter].copy()
+    gdf_out["_tambem_em"] = [", ".join(tambem[i]) for i in manter]
+    return gdf_out.reset_index(drop=True)
+
+
 def classificar_imoveis(gdf_cars, gdf_imovel):
     """Sobreposição = intersecta interior. Confrontante = toca borda."""
     if gdf_cars.empty:
@@ -345,36 +518,70 @@ def calcular_area_sobreposicao_ha(geom_car, geom_imovel, utm_crs):
         return 0.0
 
 
-# --- Extratores robustos ---
-def extrair_codigo_car(row):
-    for col in ['cod_imovel', 'codigo_imovel', 'cod_car', 'codimovel', 'COD_IMOVEL']:
+# --- Extratores robustos (cientes da fonte: CAR / SIGEF / SNCI) ---
+_COLS_CODIGO = {
+    "CAR": ['cod_imovel', 'codigo_imovel', 'cod_car', 'codimovel', 'COD_IMOVEL'],
+    "SIGEF": ['codigo_imovel', 'parcela_codigo'],
+    "SNCI": ['cod_imovel_rural', 'num_certificacao'],
+}
+_COLS_MUNICIPIO = {
+    "CAR": ['nom_municipio', 'municipio', 'cidade', 'nome_municipio', 'NOM_MUNICIPIO'],
+    "SIGEF": ['codigo_municipio'],
+    "SNCI": [],
+}
+_COLS_STATUS = {
+    "CAR": ['ind_status_imovel', 'situacao', 'status', 'des_condicao_aguardando_analise'],
+    "SIGEF": ['status', 'situacao_informada'],
+    "SNCI": ['data_certificacao'],
+}
+_COLS_AREA = {
+    "CAR": ['num_area_imovel', 'val_area_imovel', 'area_imovel', 'area_ha', 'nu_area_imovel'],
+    "SIGEF": [],
+    "SNCI": ['qtd_area_peca_tecnica'],
+}
+
+
+def _primeiro_valido(row, cols):
+    for col in cols:
         val = row.get(col)
         if val and str(val).strip() not in ['nan', 'None', '']:
             return str(val).strip()
-    return "—"
+    return None
+
+
+def extrair_codigo_car(row):
+    fonte = row.get("_fonte", "CAR")
+    return _primeiro_valido(row, _COLS_CODIGO.get(fonte, _COLS_CODIGO["CAR"])) or "—"
+
 
 def extrair_municipio(row):
-    for col in ['nom_municipio', 'municipio', 'cidade', 'nome_municipio', 'NOM_MUNICIPIO']:
-        val = row.get(col)
-        if val and str(val).strip() not in ['nan', 'None', '']:
-            return str(val).strip()
-    return "—"
+    fonte = row.get("_fonte", "CAR")
+    val = _primeiro_valido(row, _COLS_MUNICIPIO.get(fonte, _COLS_MUNICIPIO["CAR"]))
+    if val and fonte == "SIGEF":
+        return f"Cód. {val}"  # SIGEF traz só o código IBGE do município
+    return val or "—"
+
 
 def extrair_status(row):
-    for col in ['ind_status_imovel', 'situacao', 'status', 'des_condicao_aguardando_analise']:
-        val = row.get(col)
-        if val and str(val).strip() not in ['nan', 'None', '']:
-            return str(val).strip()
-    return "—"
+    fonte = row.get("_fonte", "CAR")
+    return _primeiro_valido(row, _COLS_STATUS.get(fonte, _COLS_STATUS["CAR"])) or "—"
+
 
 def extrair_area(row):
-    for col in ['num_area_imovel', 'val_area_imovel', 'area_imovel', 'area_ha', 'nu_area_imovel']:
-        val = row.get(col)
-        if val and str(val).strip() not in ['nan', 'None', '']:
-            try:
-                return round(float(str(val).replace(',', '.')), 2)
-            except Exception:
-                continue
+    # Área já normalizada (ex.: SIGEF calculado da geometria) tem prioridade.
+    v = row.get("_area_declarada_ha")
+    if v is not None and str(v).strip() not in ['nan', 'None', '']:
+        try:
+            return round(float(v), 2)
+        except Exception:
+            pass
+    fonte = row.get("_fonte", "CAR")
+    val = _primeiro_valido(row, _COLS_AREA.get(fonte, _COLS_AREA["CAR"]))
+    if val:
+        try:
+            return round(float(val.replace(',', '.')), 2)
+        except Exception:
+            return None
     return None
 
 # ==========================================
@@ -465,10 +672,13 @@ def gerar_kml_completo(gdf_imovel, gdf_res, codigo_imovel):
         status = extrair_status(row)
         area = extrair_area(row)
         area_sob = row.get("_area_sobreposicao_ha", 0)
+        fonte = row.get("_fonte", "CAR")
+        tambem = row.get("_tambem_em", "")
 
         desc = (
             f"Tipo: {classificacao}\n"
-            f"Código CAR: {cod}\n"
+            f"Fonte: {fonte}" + (f" (também em {tambem})" if tambem else "") + "\n"
+            f"Código: {cod}\n"
             f"Município: {mun}\n"
             f"Área Declarada: {area if area else '—'} ha\n"
             f"Status: {status}"
@@ -477,7 +687,7 @@ def gerar_kml_completo(gdf_imovel, gdf_res, codigo_imovel):
             desc += f"\nÁrea Sobreposta: {area_sob:.4f} ha"
 
         style = "sobreposicao" if classificacao == "Sobreposição" else "confrontante"
-        nome = f"{classificacao} - {cod}"
+        nome = f"{fonte} · {classificacao} - {cod}"
 
         placemarks.append(_placemark(num, nome, desc, style, row.geometry))
 
@@ -501,10 +711,13 @@ def gerar_kml_individual(row, num):
     status = extrair_status(row)
     area = extrair_area(row)
     area_sob = row.get("_area_sobreposicao_ha", 0)
+    fonte = row.get("_fonte", "CAR")
+    tambem = row.get("_tambem_em", "")
 
     desc = (
         f"Tipo: {classificacao}\n"
-        f"Código CAR: {cod}\n"
+        f"Fonte: {fonte}" + (f" (também em {tambem})" if tambem else "") + "\n"
+        f"Código: {cod}\n"
         f"Município: {mun}\n"
         f"Área Declarada: {area if area else '—'} ha\n"
         f"Status: {status}"
@@ -513,7 +726,7 @@ def gerar_kml_individual(row, num):
         desc += f"\nÁrea Sobreposta: {area_sob:.4f} ha"
 
     style = "sobreposicao" if classificacao == "Sobreposição" else "confrontante"
-    nome = f"{classificacao} - {cod}"
+    nome = f"{fonte} · {classificacao} - {cod}"
 
     kml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -538,7 +751,7 @@ def render_tab():
     st.markdown("""
         <div class="confront-header">
             <h2>🗺️ Confrontantes e Sobreposições</h2>
-            <p>Identifica imóveis cadastrados no SICAR que tocam ou se sobrepõem ao perímetro do imóvel analisado.</p>
+            <p>Identifica imóveis (CAR, SIGEF e SNCI) que tocam ou se sobrepõem ao perímetro do imóvel analisado.</p>
         </div>
     """, unsafe_allow_html=True)
 
@@ -549,6 +762,16 @@ def render_tab():
         return
 
     codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
+
+    # --- Seletor de fonte ---
+    fonte_sel = st.radio(
+        "Fonte de dados",
+        ["CAR", "SIGEF", "SNCI", "Consolidado"],
+        index=3, horizontal=True, key="confront_fonte",
+        help=("CAR = ambiental (autodeclarado). SIGEF/SNCI = georreferenciados "
+              "certificados. Consolidado cruza as três fontes e mantém, para cada "
+              "vizinho, a mais certificada (SIGEF > SNCI > CAR).")
+    )
 
     # --- Painel de ação ---
     col_info, col_btn = st.columns([2.2, 1], vertical_alignment="center")
@@ -580,15 +803,30 @@ def render_tab():
 
         st.caption(f"UFs detectadas: **{', '.join([u.upper() for u in ufs])}**")
 
-        with st.spinner(f"Consultando SICAR ({', '.join([u.upper() for u in ufs])})..."):
-            gdf_cars = buscar_cars_por_bbox(gdf_wgs, ufs)
+        fontes_alvo = ["CAR", "SIGEF", "SNCI"] if fonte_sel == "Consolidado" else [fonte_sel]
+        partes, diag = [], []
+        with st.spinner(f"Consultando {fonte_sel} ({', '.join(u.upper() for u in ufs)})..."):
+            for f in fontes_alvo:
+                gdf_f = buscar_fonte(gdf_wgs, ufs, f)
+                if gdf_f.empty:
+                    diag.append(f"{f}: 0")
+                    continue
+                gdf_f = classificar_imoveis(gdf_f, gdf_wgs)
+                diag.append(f"{f}: {len(gdf_f)}")
+                if not gdf_f.empty:
+                    partes.append(gdf_f)
 
-        if gdf_cars.empty:
-            st.warning("Nenhum imóvel CAR encontrado na área. O SICAR pode estar indisponível ou a área não possui registros.")
+        st.caption("Vizinhos por fonte → " + " · ".join(diag))
+
+        if not partes:
+            st.warning("Nenhum confrontante/sobreposição encontrado (ou as bases estão indisponíveis no momento).")
             return
 
-        with st.spinner(f"Classificando {len(gdf_cars)} imóveis encontrados..."):
-            gdf_resultado = classificar_imoveis(gdf_cars, gdf_wgs)
+        gdf_resultado = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs=gdf_wgs.crs)
+        if fonte_sel == "Consolidado":
+            gdf_resultado = consolidar_fontes(gdf_resultado)
+        else:
+            gdf_resultado["_tambem_em"] = ""
 
         if gdf_resultado.empty:
             st.success("Nenhum confrontante ou sobreposição encontrado na área consultada.")
@@ -615,6 +853,7 @@ def render_tab():
 
         st.session_state['confrontantes_resultado'] = gdf_resultado
         st.session_state['confrontantes_imovel_wgs'] = gdf_wgs
+        st.session_state['confrontantes_fonte'] = fonte_sel
         st.session_state['confrontantes_done'] = True
         st.rerun()
 
@@ -635,6 +874,17 @@ def render_tab():
         gdf_res["_num"] = range(2, len(gdf_res) + 2)
         gdf_res = gdf_res.drop(columns=["_ordem"])
         st.session_state['confrontantes_resultado'] = gdf_res
+
+    # Compatibilidade com sessões anteriores (só tinham CAR)
+    if "_fonte" not in gdf_res.columns or "_tambem_em" not in gdf_res.columns:
+        gdf_res = gdf_res.copy()
+        if "_fonte" not in gdf_res.columns:
+            gdf_res["_fonte"] = "CAR"
+        if "_tambem_em" not in gdf_res.columns:
+            gdf_res["_tambem_em"] = ""
+        st.session_state['confrontantes_resultado'] = gdf_res
+
+    fonte_ativa = st.session_state.get('confrontantes_fonte', 'CAR')
 
     n_sob = len(gdf_res[gdf_res["_classificacao"] == "Sobreposição"])
     n_conf = len(gdf_res[gdf_res["_classificacao"] == "Confrontante"])
@@ -674,6 +924,12 @@ def render_tab():
             </div>
         """, unsafe_allow_html=True)
 
+    # --- Quebra por fonte ---
+    vc = gdf_res["_fonte"].value_counts()
+    chips = " · ".join(f"**{k}** {int(v)}" for k, v in vc.items())
+    modo = "Consolidado (SIGEF › SNCI › CAR)" if fonte_ativa == "Consolidado" else fonte_ativa
+    st.caption(f"Modo: **{modo}**  |  Por fonte → {chips}")
+
     st.write("")
 
     # --- Legenda ---
@@ -693,6 +949,7 @@ def render_tab():
             </div>
         </div>
     """, unsafe_allow_html=True)
+    st.caption("Borda do polígono indica a fonte → SIGEF: sólida · SNCI: pontilhada · CAR: tracejada.")
 
     # --- Layout: Mapa + Tabela ---
     col_mapa, col_tabela = st.columns([1.7, 1], gap="medium")
@@ -732,8 +989,13 @@ def render_tab():
             area_sob = row.get("_area_sobreposicao_ha", 0)
             sob_str = f"<br><b>Área Sobreposta:</b> {area_sob:.4f} ha" if classificacao == "Sobreposição" else ""
 
+            fonte = row.get("_fonte", "CAR")
+            tambem = row.get("_tambem_em", "")
+            dash = {"SNCI": "2, 6", "CAR": "8, 6"}.get(fonte)  # SIGEF = sólido
+            fonte_str = f"<br><b>Fonte:</b> {fonte}" + (f" <i>(também em {tambem})</i>" if tambem else "")
+
             cod_short = cod[:25] + "..." if len(cod) > 25 else cod
-            fg_nome = f"{emoji} #{num} - {classificacao} ({cod_short})"
+            fg_nome = f"{emoji} #{num} · {fonte} · {classificacao} ({cod_short})"
             fg_item = folium.FeatureGroup(name=fg_nome, show=True)
 
             tooltip_html = f"""
@@ -745,6 +1007,7 @@ def render_tab():
                     <b>Município:</b> {mun}<br>
                     <b>Área:</b> {area_str}<br>
                     <b>Status:</b> {status}
+                    {fonte_str}
                     {sob_str}
                 </div>
             """
@@ -753,9 +1016,10 @@ def render_tab():
                 # Polígono
                 folium.GeoJson(
                     row.geometry.__geo_interface__,
-                    style_function=lambda x, c=cor, p=peso, fo=fill_opacity: {
+                    style_function=lambda x, c=cor, p=peso, fo=fill_opacity, d=dash: {
                         'color': c, 'weight': p,
-                        'fillColor': c, 'fillOpacity': fo
+                        'fillColor': c, 'fillOpacity': fo,
+                        'dashArray': d
                     },
                     tooltip=folium.Tooltip(tooltip_html)
                 ).add_to(fg_item)
@@ -841,6 +1105,7 @@ def render_tab():
 
         st.write("")
 
+        mostrar_tambem = fonte_ativa == "Consolidado"
         linhas = []
         for _, row in gdf_res.iterrows():
             num = int(row["_num"])
@@ -849,17 +1114,23 @@ def render_tab():
             area = extrair_area(row)
             classificacao = row["_classificacao"]
             area_sob = row.get("_area_sobreposicao_ha", 0)
+            fonte = row.get("_fonte", "CAR")
+            tambem = row.get("_tambem_em", "")
 
             icone = "🔴" if classificacao == "Sobreposição" else "🟡"
 
-            linhas.append({
+            registro = {
                 "#": num,
                 "Tipo": f"{icone} {classificacao}",
-                "Código CAR": cod[:30] + "..." if len(cod) > 30 else cod,
+                "Fonte": fonte,
+                "Código": cod[:30] + "..." if len(cod) > 30 else cod,
                 "Município": mun,
                 "Área (ha)": area if area else "—",
-                "Sob. (ha)": round(area_sob, 4) if classificacao == "Sobreposição" else "—"
-            })
+                "Sob. (ha)": round(area_sob, 4) if classificacao == "Sobreposição" else "—",
+            }
+            if mostrar_tambem:
+                registro["Também em"] = tambem or "—"
+            linhas.append(registro)
 
         df_display = pd.DataFrame(linhas)
 
@@ -905,6 +1176,14 @@ def render_tab():
                     sob_html = f'<div class="detalhe-linha"><span class="detalhe-chave">Área Sobreposta</span><span class="detalhe-valor" style="color:#c0392b;">{area_sob:.4f} ha</span></div>'
 
                 uf_fonte = row_sel.get('_uf_fonte', '—')
+                fonte_det = row_sel.get('_fonte', 'CAR')
+                tambem_det = row_sel.get('_tambem_em', '')
+                tambem_html = ""
+                if tambem_det:
+                    tambem_html = (
+                        '<div class="detalhe-linha"><span class="detalhe-chave">Também consta em</span>'
+                        f'<span class="detalhe-valor">{tambem_det}</span></div>'
+                    )
 
                 st.markdown(f"""
                     <div class="detalhe-card">
@@ -914,6 +1193,7 @@ def render_tab():
                                          align-items:center;justify-content:center;
                                          font-weight:700;font-size:14px;">#{num_sel}</span>
                             <span class="badge {badge_class}">{classificacao}</span>
+                            <span class="badge" style="background:#eef2f7;color:#2C3E50;border:1px solid #d6dee8;">{fonte_det}</span>
                         </div>
                         <div class="detalhe-titulo" style="margin-top:12px;">{mun}</div>
                         <div style="margin:8px 0 14px 0;">
@@ -931,6 +1211,7 @@ def render_tab():
                             <span class="detalhe-chave">Status</span>
                             <span class="detalhe-valor">{status}</span>
                         </div>
+                        {tambem_html}
                         {sob_html}
                     </div>
                 """, unsafe_allow_html=True)
@@ -956,7 +1237,8 @@ def render_tab():
                     attrs = {
                         k: v for k, v in row_sel.items()
                         if k not in ['geometry', '_classificacao', '_area_sobreposicao_ha',
-                                     '_uf_fonte', '_ordem', '_num']
+                                     '_uf_fonte', '_ordem', '_num', '_fonte', '_tambem_em',
+                                     '_area_declarada_ha']
                         and str(v).strip() not in ['nan', 'None', 'NaT', '']
                     }
                     if attrs:
