@@ -316,7 +316,7 @@ PRIORIDADE_FONTE = {"SIGEF": 1, "SNCI": 2, "CAR": 3}
 
 # Cores por fonte (distintas entre si e do imóvel principal).
 COR_FONTE = {
-    "SIGEF": "#1b9e4b",  # verde — mais certificado
+    "SIGEF": "#b31417",  # vermelho — mais certificado
     "SNCI": "#e8820c",   # laranja
     "CAR": "#7b3fb5",    # roxo
 }
@@ -1046,7 +1046,7 @@ def render_tab():
                 <span><b>Imóvel Analisado</b></span>
             </div>
             <div class="legenda-item">
-                <div class="legenda-cor" style="background:#1b9e4b66;border-color:#1b9e4b;"></div>
+                <div class="legenda-cor" style="background:#b3141766;border-color:#b31417;"></div>
                 <span><b>SIGEF</b></span>
             </div>
             <div class="legenda-item">
