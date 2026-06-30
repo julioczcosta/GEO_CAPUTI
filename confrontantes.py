@@ -526,11 +526,12 @@ def classificar_imoveis(gdf_cars, gdf_imovel):
     gdf_proj = gdf_imovel.to_crs(gdf_imovel.estimate_utm_crs())
     buffer_toque = gdf_proj.buffer(1).to_crs(gdf_imovel.crs).unary_union
 
-    classificacoes = []
+    classificacoes, ious = [], []
     for _, row in gdf_cars.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
             classificacoes.append("Outro")
+            ious.append(0.0)
             continue
 
         if geom.intersects(perimetro_real):
@@ -539,18 +540,20 @@ def classificar_imoveis(gdf_cars, gdf_imovel):
                 # IoU alto -> é o próprio imóvel cadastrado nesta base, não vizinho.
                 uniao = geom.union(perimetro_real).area
                 iou = (inter.area / uniao) if uniao > 0 else 0.0
-                if iou >= LIMIAR_PROPRIO:
-                    classificacoes.append("Próprio")
-                else:
-                    classificacoes.append("Sobreposição")
+                ious.append(iou)
+                classificacoes.append("Próprio" if iou >= LIMIAR_PROPRIO else "Sobreposição")
             else:
                 classificacoes.append("Confrontante")
+                ious.append(0.0)
         elif geom.intersects(buffer_toque):
             classificacoes.append("Confrontante")
+            ious.append(0.0)
         else:
             classificacoes.append("Outro")
+            ious.append(0.0)
 
     gdf_cars["_classificacao"] = classificacoes
+    gdf_cars["_iou"] = ious
     gdf_resultado = gdf_cars[
         gdf_cars["_classificacao"].isin(["Próprio", "Sobreposição", "Confrontante"])
     ].copy()
@@ -799,6 +802,13 @@ def gerar_kml_individual(row, num):
 # ==========================================
 # 5. RENDERIZAÇÃO
 # ==========================================
+
+def _det_linha(chave, valor, cor=None):
+    """Uma linha chave/valor do card de detalhe (HTML em linha única)."""
+    estilo = f' style="color:{cor};"' if cor else ''
+    return (f'<div class="detalhe-linha"><span class="detalhe-chave">{chave}</span>'
+            f'<span class="detalhe-valor"{estilo}>{valor}</span></div>')
+
 
 def render_tab():
     st.markdown(CSS_CONFRONTANTES, unsafe_allow_html=True)
@@ -1268,20 +1278,15 @@ def render_tab():
                 fonte_det = row_sel.get('_fonte', 'CAR')
                 tambem_det = row_sel.get('_tambem_em', '')
 
-                def _linha(chave, valor, cor=None):
-                    estilo = f' style="color:{cor};"' if cor else ''
-                    return (f'<div class="detalhe-linha"><span class="detalhe-chave">{chave}</span>'
-                            f'<span class="detalhe-valor"{estilo}>{valor}</span></div>')
-
                 linhas_html = [
-                    _linha("UF", uf_fonte),
-                    _linha("Área Declarada", area_fmt),
-                    _linha("Status", status),
+                    _det_linha("UF", uf_fonte),
+                    _det_linha("Área Declarada", area_fmt),
+                    _det_linha("Status", status),
                 ]
                 if tambem_det:
-                    linhas_html.append(_linha("Também consta em", tambem_det))
+                    linhas_html.append(_det_linha("Também consta em", tambem_det))
                 if classificacao == "Sobreposição":
-                    linhas_html.append(_linha("Área Sobreposta", f"{area_sob:.4f} ha", "#c0392b"))
+                    linhas_html.append(_det_linha("Área Sobreposta", f"{area_sob:.4f} ha", "#c0392b"))
 
                 # HTML em string única (sem linhas indentadas/vazias que o
                 # Markdown interpretaria como bloco de código).
@@ -1324,7 +1329,7 @@ def render_tab():
                         k: v for k, v in row_sel.items()
                         if k not in ['geometry', '_classificacao', '_area_sobreposicao_ha',
                                      '_uf_fonte', '_ordem', '_num', '_fonte', '_tambem_em',
-                                     '_area_declarada_ha', '_municipio_nome']
+                                     '_area_declarada_ha', '_municipio_nome', '_iou']
                         and str(v).strip() not in ['nan', 'None', 'NaT', '']
                     }
                     if attrs:
@@ -1373,3 +1378,100 @@ def render_tab():
                               key=f"mapa_detalhe_{num_sel}")
                 except Exception:
                     st.caption("Não foi possível renderizar o mapa.")
+
+    # ==========================================
+    # 6. REGISTROS DO PRÓPRIO IMÓVEL (visualização)
+    # ==========================================
+    gdf_proprio = st.session_state.get('confrontantes_proprio')
+    if gdf_proprio is not None and not gdf_proprio.empty:
+        st.markdown("---")
+        st.markdown("#### 📌 Registros do Próprio Imóvel")
+        st.caption(
+            "Imóveis das bases que coincidem com o perímetro analisado "
+            "(o próprio imóvel cadastrado). Útil para confirmar/validar o registro."
+        )
+
+        # 1 registro por fonte (o de maior compatibilidade, se houver repetição)
+        gp = gdf_proprio.copy()
+        if "_iou" not in gp.columns:
+            gp["_iou"] = 0.0
+        gp = (gp.sort_values("_iou", ascending=False)
+                .drop_duplicates(subset=["_fonte"], keep="first")
+                .reset_index(drop=True))
+
+        opcoes = list(gp["_fonte"])
+        if len(opcoes) > 1:
+            escolha_p = st.radio("Base:", opcoes, horizontal=True, key="proprio_base_sel")
+        else:
+            escolha_p = opcoes[0]
+        row_p = gp[gp["_fonte"] == escolha_p].iloc[0]
+
+        cod_p = extrair_codigo_car(row_p)
+        mun_p = extrair_municipio(row_p)
+        area_p = extrair_area(row_p)
+        status_p = extrair_status(row_p)
+        iou_p = float(row_p.get("_iou", 0.0)) * 100
+        cor_p = COR_FONTE.get(escolha_p, "#666666")
+
+        col_pi, col_pm = st.columns([1, 1.3], gap="medium")
+
+        with col_pi:
+            linhas_p = [
+                _det_linha("Fonte", escolha_p),
+                _det_linha("Código", cod_p),
+                _det_linha("Município", mun_p),
+                _det_linha("Área", f"{area_p:.2f} ha" if area_p else "—"),
+                _det_linha("Situação", status_p),
+                _det_linha("Compatibilidade", f"{iou_p:.1f}% com o perímetro", cor_p),
+            ]
+            st.markdown(
+                '<div class="detalhe-card">' + ''.join(linhas_p) + '</div>',
+                unsafe_allow_html=True
+            )
+            st.write("")
+            try:
+                kml_p = gerar_kml_individual(row_p, 1)
+                st.download_button(
+                    f"📥 Baixar KML ({escolha_p})",
+                    data=kml_p,
+                    file_name=f"proprio_{escolha_p}_{str(cod_p).replace('/', '_')[:30]}.kml",
+                    mime="application/vnd.google-earth.kml+xml",
+                    use_container_width=True,
+                    key=f"dl_proprio_{escolha_p}"
+                )
+            except Exception:
+                pass
+
+        with col_pm:
+            try:
+                cen_p = [row_p.geometry.centroid.y, row_p.geometry.centroid.x]
+                mp = folium.Map(location=cen_p, zoom_start=15, tiles="Esri World Imagery")
+                # registro da base (contorno na cor da fonte)
+                folium.GeoJson(
+                    row_p.geometry.__geo_interface__,
+                    style_function=lambda x, c=cor_p: {
+                        'color': c, 'weight': 3,
+                        'fillColor': c, 'fillOpacity': 0.18
+                    },
+                    tooltip=folium.Tooltip(f"<b>{escolha_p}:</b> {cod_p}")
+                ).add_to(mp)
+                # perímetro analisado por cima (halo + ciano)
+                folium.GeoJson(
+                    gdf_wgs,
+                    style_function=lambda x: {
+                        'color': '#003844', 'weight': 7, 'fill': False, 'opacity': 0.5
+                    }
+                ).add_to(mp)
+                folium.GeoJson(
+                    gdf_wgs,
+                    style_function=lambda x: {
+                        'color': COR_IMOVEL, 'weight': 4,
+                        'fillColor': COR_IMOVEL, 'fillOpacity': 0.04,
+                        'dashArray': '10, 6'
+                    },
+                    tooltip=folium.Tooltip("<b>Perímetro analisado</b>")
+                ).add_to(mp)
+                st_folium(mp, height=360, use_container_width=True,
+                          key=f"mapa_proprio_{escolha_p}")
+            except Exception:
+                st.caption("Não foi possível renderizar o mapa de comparação.")
