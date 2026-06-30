@@ -382,7 +382,7 @@ def render_tab():
             metodo = "interseção do perímetro (MapBiomas municípios-2020)"
 
         cod_sel = mun_sel.get("cod_ibge")
-        geojson_mun = utils.get_geometria_municipio(cod_sel) if cod_sel else None
+        geojson_mun = mun_sel.get("geojson")
         if geojson_mun is not None:
             target_geometry = ee.Geometry(geojson_mun)
             area_label = mun_sel["municipio"]

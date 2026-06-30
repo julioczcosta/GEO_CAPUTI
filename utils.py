@@ -356,8 +356,17 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
             return {'municipio': f"{nome} - {uf}".strip(" -"), 'nome_puro': nome,
                     'uf': uf, 'area_ha': area_ha, 'cod_ibge': str(cod)}
 
+        def _geojson_municipio(idx):
+            # Geometria 4674 (original) do município, pronta para ee.Geometry.
+            # Permite usar o município escolhido sem nova consulta nem casamento
+            # de código (ver climatology.render_tab).
+            try:
+                return json.loads(json.dumps(mapping(gdf_muns.loc[idx].geometry)))
+            except Exception:
+                return None
+
         resultados, area_total = [], 0
-        for _, mun in gdf_muns_utm.iterrows():
+        for idx, mun in gdf_muns_utm.iterrows():
             try:
                 if not mun.geometry.intersects(geom_imovel_utm):
                     continue
@@ -366,7 +375,9 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
                     continue
                 area_ha = inter.area / 10000
                 if area_ha > 0.001:
-                    resultados.append(montar(mun.to_dict(), area_ha))
+                    registro = montar(mun.to_dict(), area_ha)
+                    registro['geojson'] = _geojson_municipio(idx)
+                    resultados.append(registro)
                     area_total += area_ha
             except Exception:
                 continue
@@ -374,10 +385,12 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
         # FALLBACK: se a interseção por área falhou, usa o ponto do centroide
         if not resultados:
             ponto = gpd.GeoDataFrame(geometry=[Point(cx, cy)], crs="EPSG:4674").to_crs(utm_crs).geometry.iloc[0]
-            for _, mun in gdf_muns_utm.iterrows():
+            for idx, mun in gdf_muns_utm.iterrows():
                 try:
                     if mun.geometry.contains(ponto) or mun.geometry.intersects(ponto):
-                        resultados.append(montar(mun.to_dict(), 0.0))
+                        registro = montar(mun.to_dict(), 0.0)
+                        registro['geojson'] = _geojson_municipio(idx)
+                        resultados.append(registro)
                         break
                 except Exception:
                     continue
@@ -419,26 +432,6 @@ def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
         return {"media": altitude_media}
     except Exception as e:
         return {"erro": str(e)}
-
-@st.cache_data(show_spinner=False, ttl=86400)
-def get_geometria_municipio(cod_ibge):
-    """Retorna o geojson do limite municipal (MapBiomas municípios-2020) por
-    código IBGE. Usado quando o usuário escolhe manualmente um município entre
-    vários que cruzam o imóvel (ex.: na climatologia). Retorna None se falhar."""
-    try:
-        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
-        filtros = [ee.Filter.eq('CD_MUN', str(cod_ibge))]
-        try:
-            filtros.append(ee.Filter.eq('CD_MUN', int(cod_ibge)))
-        except (TypeError, ValueError):
-            pass
-        municipio = mun_col.filter(ee.Filter.or_(*filtros)).first()
-        feat = ee.Feature(municipio).getInfo()
-        if not feat:
-            return None
-        return feat.get("geometry")
-    except Exception:
-        return None
 
 @st.cache_data
 def get_koppen_class(lat, lon):
