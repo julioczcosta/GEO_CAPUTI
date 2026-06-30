@@ -325,6 +325,10 @@ COR_IMOVEL = "#00E5FF"   # ciano — perímetro analisado (sempre em destaque)
 # Limiar de "mesmo imóvel" na consolidação: sobreposição >= X% da área do menor.
 LIMIAR_DUPLICATA = 0.70
 
+# Limiar para considerar uma feição como o PRÓPRIO imóvel (não um vizinho):
+# IoU (interseção/união) com o perímetro analisado >= X.
+LIMIAR_PROPRIO = 0.90
+
 
 def _bbox_buffer_str(gdf_wgs, metros=500):
     """Bounds do imóvel com buffer de segurança, em EPSG:4674 (lon,lat)."""
@@ -407,6 +411,31 @@ def buscar_incra_por_bbox(bbox_str, ufs, fonte):
     return out.to_crs("EPSG:4674")
 
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def _nome_municipio(cod_ibge):
+    """Resolve o código IBGE do município para 'Nome - UF' (API de localidades)."""
+    cod = "".join(c for c in str(cod_ibge) if c.isdigit())
+    if not cod:
+        return None
+    try:
+        r = requests.get(
+            f"https://servicodados.ibge.gov.br/api/v1/localidades/municipios/{cod}",
+            timeout=10, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        if r.status_code == 200:
+            data = r.json()
+            nome = data.get("nome")
+            try:
+                uf = data["microrregiao"]["mesorregiao"]["UF"]["sigla"]
+            except Exception:
+                uf = None
+            if nome:
+                return f"{nome} - {uf}" if uf else nome
+    except Exception:
+        pass
+    return None
+
+
 def buscar_fonte(gdf_wgs, ufs, fonte):
     """Busca uma fonte (CAR/SIGEF/SNCI) e devolve o gdf com a coluna _fonte
     e a área declarada normalizada (_area_declarada_ha)."""
@@ -428,6 +457,10 @@ def buscar_fonte(gdf_wgs, ufs, fonte):
             gdf["_area_declarada_ha"] = (gdf.to_crs(utm).geometry.area / 10000).round(2)
         except Exception:
             gdf["_area_declarada_ha"] = None
+        # Resolve nome do município (SIGEF só traz o código IBGE), 1x por código.
+        if "codigo_municipio" in gdf.columns:
+            mapa = {c: _nome_municipio(c) for c in gdf["codigo_municipio"].dropna().unique()}
+            gdf["_municipio_nome"] = gdf["codigo_municipio"].map(mapa)
     return gdf
 
 
@@ -479,7 +512,10 @@ def consolidar_fontes(gdf_all):
 
 
 def classificar_imoveis(gdf_cars, gdf_imovel):
-    """Sobreposição = intersecta interior. Confrontante = toca borda."""
+    """Classifica cada feição:
+    - 'Próprio'      = é o próprio imóvel (IoU >= LIMIAR_PROPRIO com o perímetro);
+    - 'Sobreposição' = invade o interior do perímetro;
+    - 'Confrontante' = toca a borda."""
     if gdf_cars.empty:
         return gdf_cars
 
@@ -500,7 +536,13 @@ def classificar_imoveis(gdf_cars, gdf_imovel):
         if geom.intersects(perimetro_real):
             inter = geom.intersection(perimetro_real)
             if not inter.is_empty and inter.area > 1e-10:
-                classificacoes.append("Sobreposição")
+                # IoU alto -> é o próprio imóvel cadastrado nesta base, não vizinho.
+                uniao = geom.union(perimetro_real).area
+                iou = (inter.area / uniao) if uniao > 0 else 0.0
+                if iou >= LIMIAR_PROPRIO:
+                    classificacoes.append("Próprio")
+                else:
+                    classificacoes.append("Sobreposição")
             else:
                 classificacoes.append("Confrontante")
         elif geom.intersects(buffer_toque):
@@ -509,7 +551,9 @@ def classificar_imoveis(gdf_cars, gdf_imovel):
             classificacoes.append("Outro")
 
     gdf_cars["_classificacao"] = classificacoes
-    gdf_resultado = gdf_cars[gdf_cars["_classificacao"].isin(["Sobreposição", "Confrontante"])].copy()
+    gdf_resultado = gdf_cars[
+        gdf_cars["_classificacao"].isin(["Próprio", "Sobreposição", "Confrontante"])
+    ].copy()
     return gdf_resultado.reset_index(drop=True)
 
 
@@ -564,9 +608,13 @@ def extrair_codigo_car(row):
 
 def extrair_municipio(row):
     fonte = row.get("_fonte", "CAR")
+    if fonte == "SIGEF":
+        nome = row.get("_municipio_nome")
+        if nome and str(nome).strip() not in ['nan', 'None', '']:
+            return str(nome).strip()
+        cod = _primeiro_valido(row, _COLS_MUNICIPIO["SIGEF"])
+        return f"Cód. {cod}" if cod else "—"  # fallback se a API falhar
     val = _primeiro_valido(row, _COLS_MUNICIPIO.get(fonte, _COLS_MUNICIPIO["CAR"]))
-    if val and fonte == "SIGEF":
-        return f"Cód. {val}"  # SIGEF traz só o código IBGE do município
     return val or "—"
 
 
@@ -799,6 +847,7 @@ def render_tab():
 
     if rodar:
         st.session_state['confrontantes_resultado'] = None
+        st.session_state['confrontantes_proprio'] = None
         st.session_state['confrontantes_done'] = False
 
         with st.spinner("Detectando UFs do imóvel..."):
@@ -830,36 +879,47 @@ def render_tab():
             st.warning("Nenhum confrontante/sobreposição encontrado (ou as bases estão indisponíveis no momento).")
             return
 
-        gdf_resultado = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs=gdf_wgs.crs)
+        gdf_all = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs=gdf_wgs.crs)
+
+        # Separa o PRÓPRIO imóvel (registro do imóvel na base, IoU >= 90%) ANTES de
+        # consolidar — guarda um por fonte para o bloco "consta nas bases".
+        eh_proprio = gdf_all["_classificacao"] == "Próprio"
+        gdf_proprio = gdf_all[eh_proprio].copy()
+        gdf_vizinhos = gdf_all[~eh_proprio].copy()
+        if "_tambem_em" not in gdf_proprio.columns:
+            gdf_proprio["_tambem_em"] = ""
+
         if fonte_sel == "Consolidado":
-            gdf_resultado = consolidar_fontes(gdf_resultado)
+            gdf_resultado = consolidar_fontes(gdf_vizinhos)
         else:
+            gdf_resultado = gdf_vizinhos.copy()
             gdf_resultado["_tambem_em"] = ""
 
-        if gdf_resultado.empty:
+        if gdf_resultado.empty and gdf_proprio.empty:
             st.success("Nenhum confrontante ou sobreposição encontrado na área consultada.")
             return
 
-        # Calcula área de sobreposição
+        # Calcula área de sobreposição (só vizinhos)
         perimetro_real = gdf_wgs.unary_union
         utm_crs = gdf_wgs.estimate_utm_crs()
-        areas_sob = []
-        for _, row in gdf_resultado.iterrows():
-            if row["_classificacao"] == "Sobreposição":
-                areas_sob.append(calcular_area_sobreposicao_ha(row.geometry, perimetro_real, utm_crs))
-            else:
-                areas_sob.append(0.0)
+        areas_sob = [
+            calcular_area_sobreposicao_ha(row.geometry, perimetro_real, utm_crs)
+            if row["_classificacao"] == "Sobreposição" else 0.0
+            for _, row in gdf_resultado.iterrows()
+        ]
         gdf_resultado["_area_sobreposicao_ha"] = areas_sob
 
         # Ordena (sobreposição primeiro) e numera a partir de 2 (#1 = imóvel)
-        gdf_resultado["_ordem"] = gdf_resultado["_classificacao"].apply(
-            lambda x: 0 if x == "Sobreposição" else 1
-        )
-        gdf_resultado = gdf_resultado.sort_values("_ordem").reset_index(drop=True)
-        gdf_resultado["_num"] = range(2, len(gdf_resultado) + 2)
-        gdf_resultado = gdf_resultado.drop(columns=["_ordem"])
+        if not gdf_resultado.empty:
+            gdf_resultado["_ordem"] = gdf_resultado["_classificacao"].apply(
+                lambda x: 0 if x == "Sobreposição" else 1
+            )
+            gdf_resultado = gdf_resultado.sort_values("_ordem").reset_index(drop=True)
+            gdf_resultado["_num"] = range(2, len(gdf_resultado) + 2)
+            gdf_resultado = gdf_resultado.drop(columns=["_ordem"])
 
         st.session_state['confrontantes_resultado'] = gdf_resultado
+        st.session_state['confrontantes_proprio'] = gdf_proprio
         st.session_state['confrontantes_imovel_wgs'] = gdf_wgs
         st.session_state['confrontantes_fonte'] = fonte_sel
         st.session_state['confrontantes_done'] = True
@@ -899,6 +959,22 @@ def render_tab():
     area_total_sob = gdf_res["_area_sobreposicao_ha"].sum()
 
     st.markdown("---")
+
+    # --- Bloco: o próprio imóvel já consta nestas bases ---
+    gdf_proprio = st.session_state.get('confrontantes_proprio')
+    if gdf_proprio is not None and not gdf_proprio.empty:
+        itens, vistos = [], set()
+        for _, r in gdf_proprio.iterrows():
+            f = r.get("_fonte", "CAR")
+            if f in vistos:
+                continue
+            vistos.add(f)
+            itens.append(f"**{f}**: `{extrair_codigo_car(r)}`")
+        st.success(
+            "📌 O imóvel analisado **já consta** nestas bases (identificado pela "
+            "própria geometria — não contabilizado como sobreposição):  \n"
+            + "  ·  ".join(itens)
+        )
 
     # --- Cards de métricas ---
     c1, c2, c3, c4 = st.columns(4)
@@ -1188,52 +1264,43 @@ def render_tab():
 
             with col_det_info:
                 area_fmt = f"{area:.2f} ha" if area else "—"
-                sob_html = ""
-                if classificacao == "Sobreposição":
-                    sob_html = ""
-                if classificacao == "Sobreposição":
-                    sob_html = f'<div class="detalhe-linha"><span class="detalhe-chave">Área Sobreposta</span><span class="detalhe-valor" style="color:#c0392b;">{area_sob:.4f} ha</span></div>'
-
                 uf_fonte = row_sel.get('_uf_fonte', '—')
                 fonte_det = row_sel.get('_fonte', 'CAR')
                 tambem_det = row_sel.get('_tambem_em', '')
-                tambem_html = ""
-                if tambem_det:
-                    tambem_html = (
-                        '<div class="detalhe-linha"><span class="detalhe-chave">Também consta em</span>'
-                        f'<span class="detalhe-valor">{tambem_det}</span></div>'
-                    )
 
-                st.markdown(f"""
-                    <div class="detalhe-card">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <span style="background:#2C3E50;color:white;border-radius:50%;
-                                         width:32px;height:32px;display:inline-flex;
-                                         align-items:center;justify-content:center;
-                                         font-weight:700;font-size:14px;">#{num_sel}</span>
-                            <span class="badge {badge_class}">{classificacao}</span>
-                            <span class="badge" style="background:#eef2f7;color:#2C3E50;border:1px solid #d6dee8;">{fonte_det}</span>
-                        </div>
-                        <div class="detalhe-titulo" style="margin-top:12px;">{mun}</div>
-                        <div style="margin:8px 0 14px 0;">
-                            <span class="detalhe-codigo">{cod}</span>
-                        </div>
-                        <div class="detalhe-linha">
-                            <span class="detalhe-chave">UF</span>
-                            <span class="detalhe-valor">{uf_fonte}</span>
-                        </div>
-                        <div class="detalhe-linha">
-                            <span class="detalhe-chave">Área Declarada</span>
-                            <span class="detalhe-valor">{area_fmt}</span>
-                        </div>
-                        <div class="detalhe-linha">
-                            <span class="detalhe-chave">Status</span>
-                            <span class="detalhe-valor">{status}</span>
-                        </div>
-                        {tambem_html}
-                        {sob_html}
-                    </div>
-                """, unsafe_allow_html=True)
+                def _linha(chave, valor, cor=None):
+                    estilo = f' style="color:{cor};"' if cor else ''
+                    return (f'<div class="detalhe-linha"><span class="detalhe-chave">{chave}</span>'
+                            f'<span class="detalhe-valor"{estilo}>{valor}</span></div>')
+
+                linhas_html = [
+                    _linha("UF", uf_fonte),
+                    _linha("Área Declarada", area_fmt),
+                    _linha("Status", status),
+                ]
+                if tambem_det:
+                    linhas_html.append(_linha("Também consta em", tambem_det))
+                if classificacao == "Sobreposição":
+                    linhas_html.append(_linha("Área Sobreposta", f"{area_sob:.4f} ha", "#c0392b"))
+
+                # HTML em string única (sem linhas indentadas/vazias que o
+                # Markdown interpretaria como bloco de código).
+                card_html = (
+                    '<div class="detalhe-card">'
+                    '<div style="display:flex;align-items:center;gap:10px;">'
+                    '<span style="background:#2C3E50;color:white;border-radius:50%;width:32px;'
+                    'height:32px;display:inline-flex;align-items:center;justify-content:center;'
+                    f'font-weight:700;font-size:14px;">#{num_sel}</span>'
+                    f'<span class="badge {badge_class}">{classificacao}</span>'
+                    '<span class="badge" style="background:#eef2f7;color:#2C3E50;'
+                    f'border:1px solid #d6dee8;">{fonte_det}</span>'
+                    '</div>'
+                    f'<div class="detalhe-titulo" style="margin-top:12px;">{mun}</div>'
+                    f'<div style="margin:8px 0 14px 0;"><span class="detalhe-codigo">{cod}</span></div>'
+                    + ''.join(linhas_html) +
+                    '</div>'
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
 
                 st.write("")
 
@@ -1257,7 +1324,7 @@ def render_tab():
                         k: v for k, v in row_sel.items()
                         if k not in ['geometry', '_classificacao', '_area_sobreposicao_ha',
                                      '_uf_fonte', '_ordem', '_num', '_fonte', '_tambem_em',
-                                     '_area_declarada_ha']
+                                     '_area_declarada_ha', '_municipio_nome']
                         and str(v).strip() not in ['nan', 'None', 'NaT', '']
                     }
                     if attrs:
