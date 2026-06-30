@@ -919,14 +919,26 @@ def render_tab():
         ]
         gdf_resultado["_area_sobreposicao_ha"] = areas_sob
 
-        # Ordena (sobreposição primeiro) e numera a partir de 2 (#1 = imóvel)
+        # Numera a partir de 2 (#1 = imóvel).
+        # Consolidado: ordem por prioridade de fonte (SIGEF > SNCI > CAR), e
+        # dentro de cada fonte sobreposição antes de confrontante.
+        # Fonte única: sobreposição primeiro.
         if not gdf_resultado.empty:
-            gdf_resultado["_ordem"] = gdf_resultado["_classificacao"].apply(
+            gdf_resultado["_ordem_classe"] = gdf_resultado["_classificacao"].apply(
                 lambda x: 0 if x == "Sobreposição" else 1
             )
-            gdf_resultado = gdf_resultado.sort_values("_ordem").reset_index(drop=True)
+            if fonte_sel == "Consolidado":
+                gdf_resultado["_ordem_fonte"] = (
+                    gdf_resultado["_fonte"].map(PRIORIDADE_FONTE).fillna(9)
+                )
+                gdf_resultado = gdf_resultado.sort_values(
+                    ["_ordem_fonte", "_ordem_classe"]
+                ).reset_index(drop=True)
+                gdf_resultado = gdf_resultado.drop(columns=["_ordem_fonte"])
+            else:
+                gdf_resultado = gdf_resultado.sort_values("_ordem_classe").reset_index(drop=True)
             gdf_resultado["_num"] = range(2, len(gdf_resultado) + 2)
-            gdf_resultado = gdf_resultado.drop(columns=["_ordem"])
+            gdf_resultado = gdf_resultado.drop(columns=["_ordem_classe"])
 
         st.session_state['confrontantes_resultado'] = gdf_resultado
         st.session_state['confrontantes_proprio'] = gdf_proprio
