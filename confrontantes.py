@@ -314,6 +314,14 @@ NS_MS = "http://www.omsug.ca/osgis2004"
 # Prioridade de certificação: menor = mais certificado (vence na consolidação).
 PRIORIDADE_FONTE = {"SIGEF": 1, "SNCI": 2, "CAR": 3}
 
+# Cores por fonte (distintas entre si e do imóvel principal).
+COR_FONTE = {
+    "SIGEF": "#1b9e4b",  # verde — mais certificado
+    "SNCI": "#e8820c",   # laranja
+    "CAR": "#7b3fb5",    # roxo
+}
+COR_IMOVEL = "#00E5FF"   # ciano — perímetro analisado (sempre em destaque)
+
 # Limiar de "mesmo imóvel" na consolidação: sobreposição >= X% da área do menor.
 LIMIAR_DUPLICATA = 0.70
 
@@ -521,7 +529,7 @@ def calcular_area_sobreposicao_ha(geom_car, geom_imovel, utm_crs):
 # --- Extratores robustos (cientes da fonte: CAR / SIGEF / SNCI) ---
 _COLS_CODIGO = {
     "CAR": ['cod_imovel', 'codigo_imovel', 'cod_car', 'codimovel', 'COD_IMOVEL'],
-    "SIGEF": ['codigo_imovel', 'parcela_codigo'],
+    "SIGEF": ['parcela_codigo', 'codigo_imovel'],
     "SNCI": ['cod_imovel_rural', 'num_certificacao'],
 }
 _COLS_MUNICIPIO = {
@@ -932,24 +940,28 @@ def render_tab():
 
     st.write("")
 
-    # --- Legenda ---
+    # --- Legenda (cor = fonte) ---
     st.markdown("""
         <div class="legenda-mapa">
             <div class="legenda-item">
-                <div class="legenda-cor" style="background:#00FFFF33;border-color:#00FFFF;"></div>
-                <span><b>Imóvel Analisado</b> (KML)</span>
+                <div class="legenda-cor" style="background:#00E5FF22;border-color:#00E5FF;"></div>
+                <span><b>Imóvel Analisado</b></span>
             </div>
             <div class="legenda-item">
-                <div class="legenda-cor" style="background:#c0392b66;border-color:#c0392b;"></div>
-                <span><b>Sobreposição</b> — invade o perímetro</span>
+                <div class="legenda-cor" style="background:#1b9e4b66;border-color:#1b9e4b;"></div>
+                <span><b>SIGEF</b></span>
             </div>
             <div class="legenda-item">
-                <div class="legenda-cor" style="background:#d4a01766;border-color:#d4a017;"></div>
-                <span><b>Confrontante</b> — toca a borda</span>
+                <div class="legenda-cor" style="background:#e8820c66;border-color:#e8820c;"></div>
+                <span><b>SNCI</b></span>
+            </div>
+            <div class="legenda-item">
+                <div class="legenda-cor" style="background:#7b3fb566;border-color:#7b3fb5;"></div>
+                <span><b>CAR</b></span>
             </div>
         </div>
     """, unsafe_allow_html=True)
-    st.caption("Borda do polígono indica a fonte → SIGEF: sólida · SNCI: pontilhada · CAR: tracejada.")
+    st.caption("Cor indica a fonte. Preenchimento mais forte = **sobreposição** (invade o perímetro); mais leve = **confrontante** (toca a borda).")
 
     # --- Layout: Mapa + Tabela ---
     col_mapa, col_tabela = st.columns([1.7, 1], gap="medium")
@@ -970,16 +982,16 @@ def render_tab():
             classificacao = row["_classificacao"]
             num = int(row["_num"])
 
+            fonte = row.get("_fonte", "CAR")
+            cor = COR_FONTE.get(fonte, "#666666")
             if classificacao == "Sobreposição":
-                cor = "#c0392b"
                 emoji = "🔴"
-                peso = 2.5
-                fill_opacity = 0.4
+                peso = 3
+                fill_opacity = 0.45
             else:
-                cor = "#d4a017"
                 emoji = "🟡"
                 peso = 2
-                fill_opacity = 0.2
+                fill_opacity = 0.15
 
             cod = extrair_codigo_car(row)
             mun = extrair_municipio(row)
@@ -989,9 +1001,7 @@ def render_tab():
             area_sob = row.get("_area_sobreposicao_ha", 0)
             sob_str = f"<br><b>Área Sobreposta:</b> {area_sob:.4f} ha" if classificacao == "Sobreposição" else ""
 
-            fonte = row.get("_fonte", "CAR")
             tambem = row.get("_tambem_em", "")
-            dash = {"SNCI": "2, 6", "CAR": "8, 6"}.get(fonte)  # SIGEF = sólido
             fonte_str = f"<br><b>Fonte:</b> {fonte}" + (f" <i>(também em {tambem})</i>" if tambem else "")
 
             cod_short = cod[:25] + "..." if len(cod) > 25 else cod
@@ -1016,10 +1026,9 @@ def render_tab():
                 # Polígono
                 folium.GeoJson(
                     row.geometry.__geo_interface__,
-                    style_function=lambda x, c=cor, p=peso, fo=fill_opacity, d=dash: {
+                    style_function=lambda x, c=cor, p=peso, fo=fill_opacity: {
                         'color': c, 'weight': p,
-                        'fillColor': c, 'fillOpacity': fo,
-                        'dashArray': d
+                        'fillColor': c, 'fillOpacity': fo
                     },
                     tooltip=folium.Tooltip(tooltip_html)
                 ).add_to(fg_item)
@@ -1047,36 +1056,46 @@ def render_tab():
 
             fg_item.add_to(m)
 
-        # ---- 2º: Imóvel principal POR ÚLTIMO (sempre no topo) ----
+        # ---- 2º: Imóvel principal POR ÚLTIMO (sempre no topo, máximo destaque) ----
         fg_imovel = folium.FeatureGroup(name="🔷 #1 - Imóvel Analisado", show=True)
 
+        # Halo escuro por baixo: realça o perímetro sobre qualquer cor de fonte.
         folium.GeoJson(
             gdf_wgs,
             style_function=lambda x: {
-                'color': '#00E5FF',
-                'weight': 4,
-                'fillColor': '#00E5FF',
-                'fillOpacity': 0.05,
-                'dashArray': '8, 4'
+                'color': '#003844', 'weight': 9,
+                'fill': False, 'opacity': 0.55
+            }
+        ).add_to(fg_imovel)
+
+        # Linha principal ciano (grossa, tracejada) por cima.
+        folium.GeoJson(
+            gdf_wgs,
+            style_function=lambda x: {
+                'color': COR_IMOVEL,
+                'weight': 5,
+                'fillColor': COR_IMOVEL,
+                'fillOpacity': 0.06,
+                'dashArray': '10, 6'
             },
             tooltip=folium.Tooltip(f"<b>#1 · Imóvel Analisado:</b> {codigo_display}")
         ).add_to(fg_imovel)
 
-        # Marcador #1 no centroide do imóvel
+        # Marcador #1 no centroide do imóvel (maior que os demais)
         cent_imovel = gdf_wgs.unary_union.centroid
         folium.Marker(
             location=[cent_imovel.y, cent_imovel.x],
             icon=folium.DivIcon(
                 html=(
-                    '<div style="background:#00E5FF;color:#003844;'
-                    'border-radius:50%;width:34px;height:34px;'
+                    f'<div style="background:{COR_IMOVEL};color:#003844;'
+                    'border-radius:50%;width:40px;height:40px;'
                     'display:flex;align-items:center;justify-content:center;'
-                    'font-weight:800;font-size:15px;font-family:sans-serif;'
+                    'font-weight:800;font-size:17px;font-family:sans-serif;'
                     'border:3px solid white;'
-                    'box-shadow:0 2px 8px rgba(0,0,0,0.45);">1</div>'
+                    'box-shadow:0 2px 10px rgba(0,0,0,0.5);">1</div>'
                 ),
-                icon_size=(34, 34),
-                icon_anchor=(17, 17)
+                icon_size=(40, 40),
+                icon_anchor=(20, 20)
             )
         ).add_to(fg_imovel)
 
@@ -1254,25 +1273,32 @@ def render_tab():
                     centro_sel = [row_sel.geometry.centroid.y, row_sel.geometry.centroid.x]
                     m2 = folium.Map(location=centro_sel, zoom_start=15, tiles="Esri World Imagery")
 
-                    cor_sel = "#c0392b" if classificacao == "Sobreposição" else "#d4a017"
+                    cor_sel = COR_FONTE.get(fonte_det, "#666666")
+                    fo_sel = 0.45 if classificacao == "Sobreposição" else 0.15
 
-                    # CAR primeiro
+                    # Vizinho selecionado (cor da fonte)
                     folium.GeoJson(
                         row_sel.geometry.__geo_interface__,
-                        style_function=lambda x, c=cor_sel: {
+                        style_function=lambda x, c=cor_sel, fo=fo_sel: {
                             'color': c, 'weight': 3,
-                            'fillColor': c, 'fillOpacity': 0.45
+                            'fillColor': c, 'fillOpacity': fo
                         },
-                        tooltip=folium.Tooltip(f"<b>#{num_sel} · {cod}</b>")
+                        tooltip=folium.Tooltip(f"<b>#{num_sel} · {fonte_det} · {cod}</b>")
                     ).add_to(m2)
 
-                    # Imóvel por cima (tracejado)
+                    # Imóvel por cima (halo + ciano, sempre em destaque)
                     folium.GeoJson(
                         gdf_wgs,
                         style_function=lambda x: {
-                            'color': '#00E5FF', 'weight': 3,
-                            'fillColor': '#00E5FF', 'fillOpacity': 0.05,
-                            'dashArray': '8, 4'
+                            'color': '#003844', 'weight': 7, 'fill': False, 'opacity': 0.5
+                        }
+                    ).add_to(m2)
+                    folium.GeoJson(
+                        gdf_wgs,
+                        style_function=lambda x: {
+                            'color': COR_IMOVEL, 'weight': 4,
+                            'fillColor': COR_IMOVEL, 'fillOpacity': 0.06,
+                            'dashArray': '10, 6'
                         }
                     ).add_to(m2)
 
