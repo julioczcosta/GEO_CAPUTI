@@ -420,6 +420,26 @@ def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
     except Exception as e:
         return {"erro": str(e)}
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def get_geometria_municipio(cod_ibge):
+    """Retorna o geojson do limite municipal (MapBiomas municípios-2020) por
+    código IBGE. Usado quando o usuário escolhe manualmente um município entre
+    vários que cruzam o imóvel (ex.: na climatologia). Retorna None se falhar."""
+    try:
+        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
+        filtros = [ee.Filter.eq('CD_MUN', str(cod_ibge))]
+        try:
+            filtros.append(ee.Filter.eq('CD_MUN', int(cod_ibge)))
+        except (TypeError, ValueError):
+            pass
+        municipio = mun_col.filter(ee.Filter.or_(*filtros)).first()
+        feat = ee.Feature(municipio).getInfo()
+        if not feat:
+            return None
+        return feat.get("geometry")
+    except Exception:
+        return None
+
 @st.cache_data
 def get_koppen_class(lat, lon):
     caminho_arquivo = os.path.join("dados", "koppen_brasil.geojson")

@@ -349,9 +349,51 @@ def render_tab():
         )
 
     # ----------------------------------------------------------
-    # Área de análise: sempre município
+    # Área de análise: município (com seleção quando há vários)
     # ----------------------------------------------------------
     with st.spinner("Mapeando limites climáticos do município..."):
+        dados_muns = utils.obter_municipios_interseccao(geometry, identificador_imovel)
+
+    mun_validos = [m for m in dados_muns if "erro" not in m] if dados_muns else []
+
+    target_geometry = None
+    area_label = None
+    cod_sel = None
+    metodo = None
+
+    if mun_validos:
+        if len(mun_validos) >= 2:
+            # Imóvel cruza mais de um município: deixa o usuário escolher a base
+            # (mesma lógica da aba Contexto). Default = maior interseção.
+            st.warning(
+                f"O imóvel intercepta **{len(mun_validos)} municípios**. "
+                "Selecione a base climatológica:"
+            )
+            nomes = [m["municipio"] for m in mun_validos]
+            escolha = st.selectbox(
+                "Município base para a climatologia:",
+                nomes,
+                key="clima_mun_escolha"
+            )
+            mun_sel = next(m for m in mun_validos if m["municipio"] == escolha)
+            metodo = "seleção do usuário (MapBiomas municípios-2020)"
+        else:
+            mun_sel = mun_validos[0]
+            metodo = "interseção do perímetro (MapBiomas municípios-2020)"
+
+        cod_sel = mun_sel.get("cod_ibge")
+        geojson_mun = utils.get_geometria_municipio(cod_sel) if cod_sel else None
+        if geojson_mun is not None:
+            target_geometry = ee.Geometry(geojson_mun)
+            area_label = mun_sel["municipio"]
+        elif len(mun_validos) >= 2:
+            st.info(
+                f"Não foi possível carregar o limite de **{mun_sel['municipio']}**; "
+                "usando o município de maior interseção como base."
+            )
+
+    # Fallback robusto: lista indisponível ou geometria do município não carregou.
+    if target_geometry is None:
         mun_dados = utils.get_limites_municipio_clima(
             lon_dec,
             lat_dec,
@@ -359,21 +401,28 @@ def render_tab():
             cache_id=identificador_imovel
         )
 
-    if not mun_dados:
-        st.error(
-            "Não foi possível localizar o município para a análise climatológica. "
-            "A tentativa foi feita por interseção do perímetro, centroide e WFS do IBGE. "
-            "Verifique se o perímetro do imóvel foi carregado corretamente."
-        )
-        return
+        if not mun_dados:
+            st.error(
+                "Não foi possível localizar o município para a análise climatológica. "
+                "A tentativa foi feita por interseção do perímetro, centroide e WFS do IBGE. "
+                "Verifique se o perímetro do imóvel foi carregado corretamente."
+            )
+            return
 
-    target_geometry = ee.Geometry(mun_dados["geojson"])
-    area_label = f"{mun_dados['nome']} - {mun_dados['uf']}".strip(" -")
-    escopo_id = "mun"
+        target_geometry = ee.Geometry(mun_dados["geojson"])
+        area_label = f"{mun_dados['nome']} - {mun_dados['uf']}".strip(" -")
+        cod_sel = mun_dados.get("cod_ibge") or "default"
+        metodo = mun_dados.get("metodo")
+
+    # A climatologia é guardada por município, para que trocar a seleção mostre
+    # o dado correto (ou peça para gerar) em vez de um cache de outro município.
+    escopo_id = f"mun_{cod_sel}"
+    key_temp = f"clim_temp_{escopo_id}"
+    key_rain = f"clim_rain_{escopo_id}"
 
     st.info(f"Área de análise climatológica: **{area_label}**")
-    if mun_dados.get("metodo"):
-        st.caption(f"Município localizado por: {mun_dados['metodo']}")
+    if metodo:
+        st.caption(f"Município localizado por: {metodo}")
 
     # ----------------------------------------------------------
     # Botão único de processamento
@@ -393,8 +442,8 @@ def render_tab():
         )
 
     if gerar:
-        st.session_state.pop("clim_temp_mun", None)
-        st.session_state.pop("clim_rain_mun", None)
+        st.session_state.pop(key_temp, None)
+        st.session_state.pop(key_rain, None)
         st.session_state.pop("erro_clima_temp", None)
         st.session_state.pop("erro_clima_rain", None)
 
@@ -403,24 +452,24 @@ def render_tab():
             df_rain = get_chirps_data(target_geometry)
 
             if not df_temp.empty:
-                st.session_state["clim_temp_mun"] = df_temp
+                st.session_state[key_temp] = df_temp
             else:
                 msg = st.session_state.get("erro_clima_temp", "Erro desconhecido.")
                 st.error(f"Erro ao processar temperatura: {msg}")
 
             if not df_rain.empty:
-                st.session_state["clim_rain_mun"] = df_rain
+                st.session_state[key_rain] = df_rain
             else:
                 msg = st.session_state.get("erro_clima_rain", "Erro desconhecido.")
                 st.error(f"Erro ao processar precipitação: {msg}")
 
-        if "clim_temp_mun" in st.session_state or "clim_rain_mun" in st.session_state:
+        if key_temp in st.session_state or key_rain in st.session_state:
             st.rerun()
 
     st.write("")
 
-    df_temp_resumo = st.session_state.get("clim_temp_mun")
-    df_rain_resumo = st.session_state.get("clim_rain_mun")
+    df_temp_resumo = st.session_state.get(key_temp)
+    df_rain_resumo = st.session_state.get(key_rain)
 
     col_temp, col_rain = st.columns(2, gap="medium")
 
