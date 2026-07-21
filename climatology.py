@@ -401,11 +401,13 @@ def render_tab():
             cache_id=identificador_imovel
         )
 
-        if not mun_dados:
+        if not mun_dados or "erro" in mun_dados:
+            erro_real = mun_dados.get("erro", "sem retorno") if mun_dados else "sem retorno"
             st.error(
                 "Não foi possível localizar o município para a análise climatológica. "
                 "A tentativa foi feita por interseção do perímetro, centroide e WFS do IBGE. "
-                "Verifique se o perímetro do imóvel foi carregado corretamente."
+                "Verifique se o perímetro do imóvel foi carregado corretamente.\n\n"
+                f"**Detalhe técnico:** `{erro_real}`"
             )
             return
 

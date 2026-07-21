@@ -280,143 +280,151 @@ def carregar_kml_geopandas(uploaded_file):
 # 5. DADOS DE CONTEXTO E ALTIMETRIA
 # ==========================================
 
-@st.cache_data(show_spinner=False)
 def obter_municipios_interseccao(_geom_gee, cache_id):
-    """Detecta municípios que intersectam o imóvel (bbox expandido + fallback por ponto)."""
+    """Detecta municípios que intersectam o imóvel (bbox expandido + fallback por ponto).
+
+    Wrapper fino e não-cacheado em torno de `_obter_municipios_interseccao_cached`:
+    assim, falhas transitórias (WFS fora do ar, timeout) não ficam presas no cache
+    do Streamlit — só resultados válidos são cacheados, já que a função interna
+    sinaliza falha via exceção (e o `st.cache_data` não cacheia exceções).
+    """
     try:
-        geojson = _geom_gee.getInfo()
-        geom_shapely = shape(geojson)
-        gdf_imovel = gpd.GeoDataFrame({'geometry': [geom_shapely]}, crs="EPSG:4674")
-        gdf_imovel["geometry"] = gdf_imovel.geometry.buffer(0)
-
-        b = gdf_imovel.total_bounds
-        cx, cy = (b[0]+b[2])/2, (b[1]+b[3])/2
-        # Expande o bbox em ~0.05 grau (~5km) para imóveis pequenos
-        m = 0.05
-        bbox = f"{b[0]-m},{b[1]-m},{b[2]+m},{b[3]+m}"
-
-        # Camadas verificadas via GetCapabilities em 2025-06 (CGMAT workspace, série qg_YYYY_030_munic)
-        camadas_mun = [
-            "CGMAT:qg_2025_030_munic",
-            "CGMAT:qg_2024_030_munic",
-            "CGMAT:qg_2023_030_munic",
-        ]
-        gdf_muns = gpd.GeoDataFrame()
-        diag = []
-
-        def _wfs_request(layer, bbox_str, retries=3):
-            params = {
-                "service": "WFS", "version": "2.0.0", "request": "GetFeature",
-                "typeName": layer, "outputFormat": "application/json",
-                "srsName": "EPSG:4674", "BBOX": f"{bbox_str},EPSG:4674",
-            }
-            for attempt in range(retries):
-                resp = requests.get("https://geoservicos.ibge.gov.br/geoserver/ows",
-                                    params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-                if resp.status_code in (502, 503, 504):
-                    # servidor instável — espera e tenta novamente
-                    time.sleep(2 ** attempt)
-                    continue
-                return resp
-            return resp  # retorna o último erro após os retries
-
-        for layer in camadas_mun:
-            try:
-                resp = _wfs_request(layer, bbox)
-                if resp.status_code == 200 and resp.text.strip().startswith("{"):
-                    data = resp.json()
-                    diag.append(f"{layer}={len(data.get('features',[]))}")
-                    if data.get("features"):
-                        gdf_muns = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
-                        break
-                else:
-                    diag.append(f"{layer}=HTTP{resp.status_code}")
-            except Exception:
-                diag.append(f"{layer}=ERR")
-                continue
-
-        if gdf_muns.empty:
-            return [{"erro": "Camadas IBGE: " + " | ".join(diag)}]
-
-        utm_crs = gdf_imovel.estimate_utm_crs()
-        gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
-        gdf_muns_utm = gdf_muns.to_crs(utm_crs)
-        geom_imovel_utm = gdf_imovel_utm.geometry.iloc[0]
-
-        def montar(props, area_ha):
-            # ordem prioriza campos de CGMAT:qg_YYYY_030_munic (nm_mun, cd_mun, sigla_uf)
-            nome = (props.get('nm_mun') or props.get('nm_municipio') or props.get('NM_MUN')
-                    or props.get('nome') or props.get('nome_municipio') or 'Desconhecido')
-            cod = (props.get('cd_mun') or props.get('cd_municipio') or props.get('CD_MUN')
-                   or props.get('cd_geocodi') or props.get('geocodigo') or props.get('codigo_ibge') or '')
-            uf = (props.get('sigla_uf') or props.get('SIGLA_UF') or props.get('uf')
-                  or props.get('sigla') or props.get('nm_uf') or '')
-            if not uf and cod:
-                uf = UF_POR_CODIGO.get(str(cod)[:2], '')
-            return {'municipio': f"{nome} - {uf}".strip(" -"), 'nome_puro': nome,
-                    'uf': uf, 'area_ha': area_ha, 'cod_ibge': str(cod)}
-
-        def _geojson_municipio(idx):
-            # Geometria 4674 (original) do município, pronta para ee.Geometry.
-            # Permite usar o município escolhido sem nova consulta nem casamento
-            # de código (ver climatology.render_tab).
-            try:
-                return json.loads(json.dumps(mapping(gdf_muns.loc[idx].geometry)))
-            except Exception:
-                return None
-
-        resultados, area_total = [], 0
-        for idx, mun in gdf_muns_utm.iterrows():
-            try:
-                if not mun.geometry.intersects(geom_imovel_utm):
-                    continue
-                inter = mun.geometry.intersection(geom_imovel_utm)
-                if inter.is_empty:
-                    continue
-                area_ha = inter.area / 10000
-                if area_ha > 0.001:
-                    registro = montar(mun.to_dict(), area_ha)
-                    registro['geojson'] = _geojson_municipio(idx)
-                    resultados.append(registro)
-                    area_total += area_ha
-            except Exception:
-                continue
-
-        # FALLBACK: se a interseção por área falhou, usa o ponto do centroide
-        if not resultados:
-            ponto = gpd.GeoDataFrame(geometry=[Point(cx, cy)], crs="EPSG:4674").to_crs(utm_crs).geometry.iloc[0]
-            for idx, mun in gdf_muns_utm.iterrows():
-                try:
-                    if mun.geometry.contains(ponto) or mun.geometry.intersects(ponto):
-                        registro = montar(mun.to_dict(), 0.0)
-                        registro['geojson'] = _geojson_municipio(idx)
-                        resultados.append(registro)
-                        break
-                except Exception:
-                    continue
-
-        for r in resultados:
-            r['porcentagem'] = (r['area_ha'] / area_total) * 100 if area_total > 0 else 100.0
-        resultados = sorted(resultados, key=lambda x: x['area_ha'], reverse=True)
-        return resultados if resultados else [{"erro": "Camadas IBGE: " + " | ".join(diag) + " | sem cruzamento"}]
-
+        return _obter_municipios_interseccao_cached(_geom_gee, cache_id)
     except Exception as e:
         return [{"erro": str(e)}]
+
+
+@st.cache_data(show_spinner=False)
+def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
+    geojson = _geom_gee.getInfo()
+    geom_shapely = shape(geojson)
+    gdf_imovel = gpd.GeoDataFrame({'geometry': [geom_shapely]}, crs="EPSG:4674")
+    gdf_imovel["geometry"] = gdf_imovel.geometry.buffer(0)
+
+    b = gdf_imovel.total_bounds
+    cx, cy = (b[0]+b[2])/2, (b[1]+b[3])/2
+    # Expande o bbox em ~0.05 grau (~5km) para imóveis pequenos
+    m = 0.05
+    bbox = f"{b[0]-m},{b[1]-m},{b[2]+m},{b[3]+m}"
+
+    # Camadas verificadas via GetCapabilities em 2025-06 (CGMAT workspace, série qg_YYYY_030_munic)
+    camadas_mun = [
+        "CGMAT:qg_2025_030_munic",
+        "CGMAT:qg_2024_030_munic",
+        "CGMAT:qg_2023_030_munic",
+    ]
+    gdf_muns = gpd.GeoDataFrame()
+    diag = []
+
+    def _wfs_request(layer, bbox_str, retries=3):
+        params = {
+            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+            "typeName": layer, "outputFormat": "application/json",
+            "srsName": "EPSG:4674", "BBOX": f"{bbox_str},EPSG:4674",
+        }
+        for attempt in range(retries):
+            resp = requests.get("https://geoservicos.ibge.gov.br/geoserver/ows",
+                                params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code in (502, 503, 504):
+                # servidor instável — espera e tenta novamente
+                time.sleep(2 ** attempt)
+                continue
+            return resp
+        return resp  # retorna o último erro após os retries
+
+    for layer in camadas_mun:
+        try:
+            resp = _wfs_request(layer, bbox)
+            if resp.status_code == 200 and resp.text.strip().startswith("{"):
+                data = resp.json()
+                diag.append(f"{layer}={len(data.get('features',[]))}")
+                if data.get("features"):
+                    gdf_muns = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
+                    break
+            else:
+                diag.append(f"{layer}=HTTP{resp.status_code}")
+        except Exception:
+            diag.append(f"{layer}=ERR")
+            continue
+
+    if gdf_muns.empty:
+        raise RuntimeError("Camadas IBGE: " + " | ".join(diag))
+
+    utm_crs = gdf_imovel.estimate_utm_crs()
+    gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
+    gdf_muns_utm = gdf_muns.to_crs(utm_crs)
+    geom_imovel_utm = gdf_imovel_utm.geometry.iloc[0]
+
+    def montar(props, area_ha):
+        # ordem prioriza campos de CGMAT:qg_YYYY_030_munic (nm_mun, cd_mun, sigla_uf)
+        nome = (props.get('nm_mun') or props.get('nm_municipio') or props.get('NM_MUN')
+                or props.get('nome') or props.get('nome_municipio') or 'Desconhecido')
+        cod = (props.get('cd_mun') or props.get('cd_municipio') or props.get('CD_MUN')
+               or props.get('cd_geocodi') or props.get('geocodigo') or props.get('codigo_ibge') or '')
+        uf = (props.get('sigla_uf') or props.get('SIGLA_UF') or props.get('uf')
+              or props.get('sigla') or props.get('nm_uf') or '')
+        if not uf and cod:
+            uf = UF_POR_CODIGO.get(str(cod)[:2], '')
+        return {'municipio': f"{nome} - {uf}".strip(" -"), 'nome_puro': nome,
+                'uf': uf, 'area_ha': area_ha, 'cod_ibge': str(cod)}
+
+    def _geojson_municipio(idx):
+        # Geometria 4674 (original) do município, pronta para ee.Geometry.
+        # Permite usar o município escolhido sem nova consulta nem casamento
+        # de código (ver climatology.render_tab).
+        try:
+            return json.loads(json.dumps(mapping(gdf_muns.loc[idx].geometry)))
+        except Exception:
+            return None
+
+    resultados, area_total = [], 0
+    for idx, mun in gdf_muns_utm.iterrows():
+        try:
+            if not mun.geometry.intersects(geom_imovel_utm):
+                continue
+            inter = mun.geometry.intersection(geom_imovel_utm)
+            if inter.is_empty:
+                continue
+            area_ha = inter.area / 10000
+            if area_ha > 0.001:
+                registro = montar(mun.to_dict(), area_ha)
+                registro['geojson'] = _geojson_municipio(idx)
+                resultados.append(registro)
+                area_total += area_ha
+        except Exception:
+            continue
+
+    # FALLBACK: se a interseção por área falhou, usa o ponto do centroide
+    if not resultados:
+        ponto = gpd.GeoDataFrame(geometry=[Point(cx, cy)], crs="EPSG:4674").to_crs(utm_crs).geometry.iloc[0]
+        for idx, mun in gdf_muns_utm.iterrows():
+            try:
+                if mun.geometry.contains(ponto) or mun.geometry.intersects(ponto):
+                    registro = montar(mun.to_dict(), 0.0)
+                    registro['geojson'] = _geojson_municipio(idx)
+                    resultados.append(registro)
+                    break
+            except Exception:
+                continue
+
+    if not resultados:
+        raise RuntimeError("Camadas IBGE: " + " | ".join(diag) + " | sem cruzamento")
+
+    for r in resultados:
+        r['porcentagem'] = (r['area_ha'] / area_total) * 100 if area_total > 0 else 100.0
+    resultados = sorted(resultados, key=lambda x: x['area_ha'], reverse=True)
+    return resultados
 
 @st.cache_data(show_spinner=False)
 def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
     try:
         srtm = ee.Image('USGS/SRTMGL1_003')
-        
-        try:
-            mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
-            municipio = mun_col.filter(ee.Filter.or_(
-                ee.Filter.eq('CD_MUN', str(cod_ibge)),
-                ee.Filter.eq('CD_MUN', int(cod_ibge))
-            )).first()
-            geom_alvo = municipio.geometry()
-        except Exception:
-            geom_alvo = ee.Geometry.Point([lon_fallback, lat_fallback]).buffer(15000)
+        # Estima a altimetria por um buffer de 15km ao redor do ponto do imóvel.
+        # (usava antes o asset MapBiomas AUXILIAR/municipios-2020 para pegar o
+        # polígono exato do município, mas esse asset foi removido/renomeado
+        # no Earth Engine; como a chamada é lazy, o erro só aparecia no
+        # reduceRegion() abaixo, fora do try que deveria capturá-lo.)
+        geom_alvo = ee.Geometry.Point([lon_fallback, lat_fallback]).buffer(15000)
 
         stats = srtm.reduceRegion(
             reducer=ee.Reducer.mean(),
@@ -821,15 +829,30 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
     except Exception as e:
         return f"Erro ao gerar redação: {str(e)}"
 
-@st.cache_data(show_spinner=False, ttl=86400)
 def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
+    """Localiza a geometria municipal para a climatologia.
+
+    Wrapper fino e não-cacheado em torno de `_get_limites_municipio_clima_cached`:
+    falhas transitórias (WFS fora do ar) não ficam presas no cache do Streamlit —
+    só um resultado válido é cacheado, pois a função interna sinaliza falha total
+    via exceção (que o `st.cache_data` não cacheia).
     """
-    Localiza a geometria municipal para a climatologia com múltiplos fallbacks.
+    try:
+        return _get_limites_municipio_clima_cached(lon, lat, _geometry_gee=_geometry_gee, cache_id=cache_id)
+    except Exception as e:
+        return {"erro": str(e)}
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _get_limites_municipio_clima_cached(lon, lat, _geometry_gee=None, cache_id=None):
+    """
+    Localiza a geometria municipal para a climatologia com múltiplos fallbacks,
+    todos via WFS do IBGE (o asset MapBiomas `AUXILIAR/municipios-2020` usado
+    anteriormente foi removido/renomeado no Earth Engine e não existe mais).
 
     Ordem de tentativa:
-    1) MapBiomas municípios-2020 por interseção com o perímetro completo;
-    2) MapBiomas municípios-2020 pelo ponto/centroide;
-    3) WFS IBGE por interseção espacial, usando várias camadas conhecidas.
+    1) WFS IBGE por interseção espacial com o perímetro completo, usando várias camadas conhecidas;
+    2) WFS IBGE pelo ponto/centroide.
     """
 
     def _limpar_valor(valor):
@@ -882,60 +905,7 @@ def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
         except Exception:
             return geom_mapping
 
-    # 1) Preferencial: MapBiomas por interseção com o perímetro completo.
-    try:
-        if _geometry_gee is not None:
-            geo_simple = _geometry_gee.simplify(maxError=100)
-            mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
-            candidatos = mun_col.filterBounds(geo_simple)
-
-            def _add_area_inter(feature):
-                inter = feature.geometry().intersection(geo_simple, ee.ErrorMargin(100))
-                return feature.set("_area_inter_m2", inter.area(100))
-
-            candidatos = (
-                candidatos
-                .map(_add_area_inter)
-                .filter(ee.Filter.gt("_area_inter_m2", 0))
-                .sort("_area_inter_m2", False)
-            )
-
-            if candidatos.size().getInfo() > 0:
-                feat = ee.Feature(candidatos.first()).getInfo()
-                props = feat.get("properties", {})
-                nome, uf, cod = _extrair_nome_uf_cod(props)
-
-                return {
-                    "geojson": feat.get("geometry"),
-                    "nome": nome,
-                    "uf": uf,
-                    "cod_ibge": cod,
-                    "metodo": "MapBiomas municípios-2020 por interseção do perímetro"
-                }
-    except Exception:
-        pass
-
-    # 2) Fallback atual: MapBiomas pelo ponto do centroide.
-    try:
-        mun_col = ee.FeatureCollection("projects/mapbiomas-workspace/AUXILIAR/municipios-2020")
-        ponto = ee.Geometry.Point([float(lon), float(lat)])
-        mun_info = mun_col.filterBounds(ponto).limit(1).getInfo().get("features", [])
-
-        if mun_info:
-            props = mun_info[0].get("properties", {})
-            nome, uf, cod = _extrair_nome_uf_cod(props)
-
-            return {
-                "geojson": mun_info[0].get("geometry"),
-                "nome": nome,
-                "uf": uf,
-                "cod_ibge": cod,
-                "metodo": "MapBiomas municípios-2020 pelo centroide"
-            }
-    except Exception:
-        pass
-
-    # 3) Fallback IBGE WFS: várias camadas + maior interseção com o imóvel.
+    # 1) WFS IBGE: várias camadas + maior interseção com o imóvel.
     try:
         if gpd is not None and _geometry_gee is not None:
             geojson = _geometry_gee.getInfo()
@@ -1018,7 +988,7 @@ def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
     except Exception:
         pass
 
-    # 4) Fallback robusto: consulta WFS pelo PONTO (lon/lat), só com shapely.
+    # 2) Fallback robusto: consulta WFS pelo PONTO (lon/lat), só com shapely.
     #    Não depende de Earth Engine nem de geopandas — última linha de defesa.
     try:
         ponto = Point(float(lon), float(lat))
@@ -1062,5 +1032,5 @@ def get_limites_municipio_clima(lon, lat, _geometry_gee=None, cache_id=None):
     except Exception:
         pass
 
-    return None
+    raise RuntimeError("WFS IBGE indisponível ou sem cobertura para o local informado.")
 
