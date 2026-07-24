@@ -11,6 +11,7 @@ import aptidao
 import confrontantes
 import hmac
 import base64
+import streamlit.components.v1 as components
 from streamlit_option_menu import option_menu
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
@@ -246,11 +247,11 @@ except FileNotFoundError:
 
 styles_menu = {
     "container": {"padding": "0!important", "background-color": "#f8f9fa"},
-    "icon": {"color": "#555", "font-size": "16px"}, 
+    "icon": {"color": "#555", "font-size": "14px"},
     "nav-link": {
-        "font-size": "16px", 
-        "text-align": "center", 
-        "margin": "0px", 
+        "font-size": "14px",
+        "text-align": "center",
+        "margin": "0px",
         "padding-top": "12px",
         "padding-bottom": "12px",
         "--hover-color": "#eee"
@@ -258,10 +259,63 @@ styles_menu = {
     "nav-link-selected": {"background-color": "#009e60", "font-weight": "600"},
 }
 
+# O componente streamlit-option-menu roda em um iframe e, quando o menu
+# nasce durante a transição de abertura/fechamento da sidebar, mede a si
+# mesmo com a largura ainda "encolhida" e nunca refaz essa medição depois
+# — os itens ficam espremidos, quebram em várias linhas de alturas
+# diferentes e o iframe fica travado numa altura que não bate com o
+# conteúdo real (o "buraco" sobrando embaixo do menu). Esse script força a
+# largura para 100% do espaço disponível e recalcula a altura pelo
+# conteúdo real do menu. Usa ResizeObserver no container do menu (não só
+# o evento "resize" da janela) porque abrir/fechar a sidebar muda o
+# layout sem redimensionar a janela do navegador.
+components.html(
+    """
+    <script>
+    (function() {
+        var win = window.parent;
+        var doc = win.document;
+
+        function fixOne(iframe) {
+            try {
+                iframe.style.width = '100%';
+                var innerDoc = iframe.contentDocument;
+                var ul = innerDoc ? innerDoc.querySelector('ul.nav') : null;
+                var h = ul ? ul.getBoundingClientRect().height : 0;
+                if (h > 0) { iframe.style.height = h + 'px'; }
+            } catch (e) {}
+        }
+
+        function fixAll() {
+            doc.querySelectorAll('iframe[title="streamlit_option_menu.option_menu"]').forEach(fixOne);
+        }
+
+        var observados = new Set();
+        function observarContainers() {
+            doc.querySelectorAll('iframe[title="streamlit_option_menu.option_menu"]').forEach(function(iframe) {
+                var container = iframe.closest('.element-container') || iframe.parentElement;
+                if (container && !observados.has(container) && win.ResizeObserver) {
+                    observados.add(container);
+                    new win.ResizeObserver(function() { fixOne(iframe); }).observe(container);
+                }
+            });
+        }
+
+        [100, 300, 600, 1000, 1800].forEach(function(t) {
+            setTimeout(fixAll, t);
+            setTimeout(observarContainers, t);
+        });
+        win.addEventListener('resize', fixAll);
+    })();
+    </script>
+    """,
+    height=0,
+)
+
 if modo_operacao == "Diagnóstico do Imóvel":
     selected = option_menu(
         menu_title=None, 
-        options=["Início", "Contexto", "Imagens de Satélite", "Climatologia", "Impedimentos", "Confrontantes"],
+        options=["Início", "Contexto", "Satélite", "Climatologia", "Impedimentos", "Confrontantes"],
         icons=["house", "geo-alt", "layers", "cloud-rain", "exclamation-triangle", "people-fill"], 
         menu_icon="cast", 
         default_index=0, 
@@ -273,7 +327,7 @@ if modo_operacao == "Diagnóstico do Imóvel":
         home.render_tab()
     elif selected == "Contexto":
         context.render_tab()
-    elif selected == "Imagens de Satélite":
+    elif selected == "Satélite":
         sentinel.render_tab()
     elif selected == "Climatologia":
         climatology.render_tab()
