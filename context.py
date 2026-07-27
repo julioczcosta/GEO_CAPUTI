@@ -115,7 +115,7 @@ def render_tab():
                 mun_selecionado['cod_ibge'], mun_selecionado['nome_puro'], mun_selecionado['uf'], lat_dec, lon_dec
             )
             dados_altimetria = utils.get_altimetria_municipio(mun_selecionado['cod_ibge'], lat_dec, lon_dec)
-            dados_rota = utils.get_distancia_capital(mun_selecionado['cod_ibge'], mun_selecionado['uf'])
+            dados_rota = utils.get_distancia_capital(mun_selecionado['cod_ibge'], mun_selecionado['uf'], lat_dec, lon_dec)
             dados_extras = consultar_camadas_extras(lat_dec, lon_dec)
             dados_bacia = utils.get_bacia_info(lat_dec, lon_dec)
 
@@ -173,7 +173,13 @@ def render_tab():
                     c_rota1, c_rota2 = st.columns(2)
                     c_rota1.metric("Distância (Rodovia)", f"{dist_km} km")
                     c_rota2.metric("Tempo Estimado", dados_rota['tempo_estimado'])
-                    st.caption("Fonte: Coordenadas IBGE / Rotas OSRM")
+                    if dados_rota.get("origem_aprox"):
+                        st.caption(
+                            "Fonte: Rotas OSRM | ⚠️ Sede do IBGE indisponível — "
+                            "origem aproximada pelo centroide do imóvel."
+                        )
+                    else:
+                        st.caption("Fonte: Coordenadas IBGE / Rotas OSRM")
 
 
         # ==========================================

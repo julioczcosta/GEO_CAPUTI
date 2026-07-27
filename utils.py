@@ -627,12 +627,15 @@ LIMITES_ESTADOS = {
 }
 
 @st.cache_data(show_spinner=False)
-def get_distancia_capital(cod_ibge, uf):
+def get_distancia_capital(cod_ibge, uf, lat_fallback=None, lon_fallback=None):
     if uf not in COORDENADAS_CAPITAIS:
         return {"erro": "UF não encontrada."}
-    
+
     lat_cap, lon_cap = COORDENADAS_CAPITAIS[uf]
-    
+
+    lon_sede = lat_sede = None
+    origem_aprox = False  # True se caímos no fallback do centroide do imóvel
+
     try:
         url_wfs = "https://geoservicos.ibge.gov.br/geoserver/ows"
         # Camada de pontos de sede verificada via GetCapabilities (workspace CGMAT, estável)
@@ -641,23 +644,35 @@ def get_distancia_capital(cod_ibge, uf):
             "typeName": "CGMAT:pbqg22_00_Bc250_2021Cidade", "outputFormat": "application/json",
             "cql_filter": f"geocodigo='{cod_ibge}'"
         }
+        # Retry cobrindo tanto 5xx quanto timeout/erro de conexão: o geoserver do
+        # IBGE dá soluços transitórios e uma única falha não pode derrubar a busca.
         r_wfs = None
         for attempt in range(3):
-            r_wfs = requests.get(url_wfs, params=params_wfs, timeout=30,
-                                 headers={"User-Agent": "Mozilla/5.0"})
-            if r_wfs.status_code in (502, 503, 504):
-                time.sleep(2 ** attempt)  # servidor instável — espera e tenta de novo
-                continue
-            break
+            try:
+                r_wfs = requests.get(url_wfs, params=params_wfs, timeout=15,
+                                     headers={"User-Agent": "Mozilla/5.0"})
+                if r_wfs.status_code in (502, 503, 504):
+                    time.sleep(2 ** attempt)  # servidor instável — espera e tenta de novo
+                    continue
+                break
+            except requests.RequestException:
+                time.sleep(2 ** attempt)  # timeout/conexão — tenta de novo
+                r_wfs = None
 
-        if r_wfs.status_code != 200 or not r_wfs.json().get("features"):
-            return {"erro": "Sede municipal não localizada no IBGE."}
+        if r_wfs is not None and r_wfs.status_code == 200 and r_wfs.json().get("features"):
+            coords = r_wfs.json()["features"][0]["geometry"]["coordinates"]
+            lon_sede, lat_sede = coords[0], coords[1]
+    except Exception:
+        lon_sede = lat_sede = None
 
-        coords = r_wfs.json()["features"][0]["geometry"]["coordinates"]
-        lon_sede, lat_sede = coords[0], coords[1]
+    # Fallback: se a sede não veio (IBGE fora do ar), usa o centroide do próprio
+    # imóvel como origem — melhor uma distância aproximada do que nenhuma.
+    if lon_sede is None and lat_fallback is not None and lon_fallback is not None:
+        lon_sede, lat_sede = lon_fallback, lat_fallback
+        origem_aprox = True
 
-    except Exception as e:
-        return {"erro": f"Falha ao buscar sede: {e}"}
+    if lon_sede is None:
+        return {"erro": "Sede municipal não localizada no IBGE."}
 
     try:
         url_osrm = f"https://router.project-osrm.org/route/v1/driving/{lon_sede},{lat_sede};{lon_cap},{lat_cap}?overview=false"
@@ -675,7 +690,8 @@ def get_distancia_capital(cod_ibge, uf):
                 
                 return {
                     "distancia_km": dist_km,
-                    "tempo_estimado": tempo_str
+                    "tempo_estimado": tempo_str,
+                    "origem_aprox": origem_aprox
                 }
         return {"erro": "Rota indisponível no OSRM."}
     except Exception as e:
