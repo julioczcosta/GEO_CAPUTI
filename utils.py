@@ -38,16 +38,27 @@ UF_POR_CODIGO = {
     '41': 'PR', '42': 'SC', '43': 'RS', '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF'
 }
 
-def ibge_wfs_get(params, timeout=30, retries=3):
-    """GET no WFS do IBGE com retry/backoff para 502/503/504 (servidor instável)."""
+def ibge_wfs_get(params, timeout=20, retries=3):
+    """GET no WFS do IBGE (geoserver) com retry/backoff.
+
+    O geoserver do IBGE é o endpoint mais instável do app: além dos 5xx, ele
+    às vezes 'pendura' a conexão (timeout) por alguns segundos. Por isso o
+    retry cobre tanto 502/503/504 quanto timeout/erro de conexão — assim um
+    soluço transitório não derruba a consulta (regionalização, bacia,
+    município). Retorna o Response, ou None se falhar em todas as tentativas.
+    """
     resp = None
     for attempt in range(retries):
-        resp = requests.get(IBGE_WFS_URL, params=params, timeout=timeout,
-                            headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code in (502, 503, 504):
-            time.sleep(2 ** attempt)
-            continue
-        break
+        try:
+            resp = requests.get(IBGE_WFS_URL, params=params, timeout=timeout,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code in (502, 503, 504):
+                time.sleep(2 ** attempt)  # servidor instável — espera e tenta de novo
+                continue
+            return resp
+        except requests.RequestException:
+            time.sleep(2 ** attempt)  # timeout/conexão — tenta de novo
+            resp = None
     return resp
 
 def ibge_api_json(url, timeout=15, retries=3, session=None):
@@ -482,11 +493,13 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
             bbox = f"{lon-0.001},{lat-0.001},{lon+0.001},{lat+0.001}"
             # Regiões geográficas (Divisão Regional 2017) — camadas CGMAT verificadas via GetCapabilities
             p_int = {"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CGMAT:qg_2025_120_reggeoginterm", "outputFormat": "application/json", "bbox": bbox}
-            r_int = ibge_wfs_get(p_int).json()
+            resp_int = ibge_wfs_get(p_int)
+            r_int = resp_int.json() if resp_int is not None else {}
             if r_int.get("features"): reg_int = r_int["features"][0]["properties"].get("nm_rgint", "---")
 
             p_ime = {"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CGMAT:qg_2025_110_reggeogimed", "outputFormat": "application/json", "bbox": bbox}
-            r_ime = ibge_wfs_get(p_ime).json()
+            resp_ime = ibge_wfs_get(p_ime)
+            r_ime = resp_ime.json() if resp_ime is not None else {}
             if r_ime.get("features"): reg_ime = r_ime["features"][0]["properties"].get("nm_rgi", "---")
         except Exception: pass
 
@@ -503,13 +516,15 @@ def get_bacia_info(lat, lon):
         bbox = f"{lon-0.01},{lat-0.01},{lon+0.01},{lat+0.01}"
 
         try:
-            r = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_6", "outputFormat": "application/json", "bbox": bbox}).json()
+            resp6 = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_6", "outputFormat": "application/json", "bbox": bbox})
+            r = resp6.json() if resp6 is not None else {}
             props = r["features"][0]["properties"] if r.get("features") else {}
         except Exception: props = {}
 
         if not props:
             try:
-                r = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_4", "outputFormat": "application/json", "bbox": bbox}).json()
+                resp4 = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_4", "outputFormat": "application/json", "bbox": bbox})
+                r = resp4.json() if resp4 is not None else {}
                 props = r["features"][0]["properties"] if r.get("features") else {}
             except Exception: pass
 
@@ -949,7 +964,7 @@ def _get_limites_municipio_clima_cached(lon, lat, _geometry_gee=None, cache_id=N
                     }
                     resp = ibge_wfs_get(params)
 
-                    if resp.status_code != 200 or not resp.text.strip().startswith("{"):
+                    if resp is None or resp.status_code != 200 or not resp.text.strip().startswith("{"):
                         continue
 
                     data = resp.json()
@@ -1017,7 +1032,7 @@ def _get_limites_municipio_clima_cached(lon, lat, _geometry_gee=None, cache_id=N
                     "typeName": layer, "outputFormat": "application/json",
                     "srsName": "EPSG:4674", "BBOX": f"{bbox},EPSG:4674"
                 })
-                if resp.status_code != 200 or not resp.text.strip().startswith("{"):
+                if resp is None or resp.status_code != 200 or not resp.text.strip().startswith("{"):
                     continue
                 feats = resp.json().get("features", [])
                 if not feats:
