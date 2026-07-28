@@ -35,6 +35,18 @@ def get_session():
     session.mount('https://', adapter)
     return session
 
+
+@st.cache_resource(show_spinner=False)
+def _incra_session():
+    """Sessão HTTP persistente (pool de conexão) para o WFS do INCRA.
+
+    Reaproveita a conexão TLS entre as consultas (por UF e entre SIGEF/SNCI),
+    evitando um handshake novo a cada requisição — o que pesa bastante quando
+    o app roda longe do servidor (ex.: Streamlit Cloud no exterior -> INCRA BR).
+    Vive entre reruns via cache_resource.
+    """
+    return get_session()
+
 # ==========================================
 # 2. CSS LOCAL DA ABA
 # ==========================================
@@ -380,6 +392,7 @@ def _incra_gml_para_gdf(conteudo):
 def buscar_incra_por_bbox(bbox_str, ufs, fonte):
     """Consulta SIGEF ou SNCI no WFS do INCRA por bbox, por UF, com retry."""
     tema_fmt = TEMA_INCRA[fonte]
+    sessao = _incra_session()  # conexão reaproveitada entre UFs e entre SIGEF/SNCI
     gdfs = []
     for uf in ufs:
         tema = tema_fmt.format(uf=uf.lower())
@@ -393,8 +406,8 @@ def buscar_incra_por_bbox(bbox_str, ufs, fonte):
         resp = None
         for attempt in range(3):
             try:
-                resp = requests.get(INCRA_WFS, params=params, timeout=30,
-                                    headers={"User-Agent": "Mozilla/5.0"})
+                resp = sessao.get(INCRA_WFS, params=params, timeout=30,
+                                  headers={"User-Agent": "Mozilla/5.0"})
                 if resp.status_code in (500, 502, 503, 504):
                     time.sleep(2 ** attempt)  # INCRA instável — espera e tenta de novo
                     continue
@@ -878,12 +891,17 @@ def render_tab():
         partes, diag = [], []
         with st.spinner(f"Consultando {fonte_sel} ({', '.join(u.upper() for u in ufs)})..."):
             for f in fontes_alvo:
+                # Cronometra cada fonte: como o INCRA é lento a partir de servidor
+                # no exterior (Streamlit Cloud), o tempo por fonte no diagnóstico
+                # ajuda a ver onde o gargalo realmente está.
+                t0 = time.time()
                 gdf_f = buscar_fonte(gdf_wgs, ufs, f)
+                dt = time.time() - t0
                 if gdf_f.empty:
-                    diag.append(f"{f}: 0")
+                    diag.append(f"{f}: 0 ({dt:.0f}s)")
                     continue
                 gdf_f = classificar_imoveis(gdf_f, gdf_wgs)
-                diag.append(f"{f}: {len(gdf_f)}")
+                diag.append(f"{f}: {len(gdf_f)} ({dt:.0f}s)")
                 if not gdf_f.empty:
                     partes.append(gdf_f)
 
