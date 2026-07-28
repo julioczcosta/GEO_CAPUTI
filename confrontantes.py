@@ -1240,7 +1240,7 @@ def render_tab():
                 "#": num,
                 "Tipo": f"{icone} {classificacao}",
                 "Fonte": fonte,
-                "Código": cod[:30] + "..." if len(cod) > 30 else cod,
+                "Código": cod,
                 "Município": mun,
                 "Área (ha)": area if area else "—",
                 "Sob. (ha)": round(area_sob, 4) if classificacao == "Sobreposição" else "—",
@@ -1258,6 +1258,9 @@ def render_tab():
             on_select="rerun",
             height=440,
             hide_index=True,
+            # Coluna larga por padrão: os códigos (UUID do SIGEF ~36 chars,
+            # CAR longo) cabem inteiros; o usuário ainda pode redimensionar.
+            column_config={"Código": st.column_config.TextColumn("Código", width="large")},
             key="tabela_confrontantes"
         )
 
