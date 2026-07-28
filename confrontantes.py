@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import folium
 import time
+import io
 import xml.etree.ElementTree as ET
 from streamlit_folium import st_folium
 from shapely.geometry import shape, Polygon
@@ -1262,6 +1263,26 @@ def render_tab():
             # CAR longo) cabem inteiros; o usuário ainda pode redimensionar.
             column_config={"Código": st.column_config.TextColumn("Código", width="large")},
             key="tabela_confrontantes"
+        )
+
+        # Download explícito em Excel: o botão nativo do st.dataframe gera um CSV
+        # separado por vírgula que o Excel pt-BR abre tudo numa coluna só. O .xlsx
+        # já vem em colunas de verdade e com os códigos completos (sem reticências).
+        buffer_xlsx = io.BytesIO()
+        with pd.ExcelWriter(buffer_xlsx, engine="xlsxwriter") as writer:
+            df_display.to_excel(writer, index=False, sheet_name="Confrontantes")
+            ws = writer.sheets["Confrontantes"]
+            # Largura de coluna proporcional ao maior conteúdo (código cabe inteiro).
+            for i, col in enumerate(df_display.columns):
+                largura = max(len(str(col)), df_display[col].astype(str).map(len).max())
+                ws.set_column(i, i, min(largura + 2, 60))
+
+        st.download_button(
+            "📥 Baixar planilha (Excel)",
+            data=buffer_xlsx.getvalue(),
+            file_name=f"confrontantes_{fonte_ativa.lower()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_planilha_confrontantes"
         )
 
     # --- Detalhe do registro selecionado ---
