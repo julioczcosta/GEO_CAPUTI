@@ -5,6 +5,7 @@ import requests
 import folium
 import time
 import io
+import utils
 import xml.etree.ElementTree as ET
 from streamlit_folium import st_folium
 from shapely.geometry import shape, Polygon
@@ -209,6 +210,10 @@ def detectar_ufs(gdf):
     ]
     campos_sigla = ['SIGLA_UF', 'sigla_uf', 'sigla', 'SIGLA', 'uf', 'UF', 'sigla_estado']
 
+    # timeout 15s: quando o geoserver do IBGE está com o pool de conexões
+    # esgotado ele pendura ~21s por request e devolve erro; 15s aborta antes e
+    # cai logo nos fallbacks (o Nominatim e o bbox local). Sem retry aqui: o
+    # erro de pool não é 5xx e não melhora repetindo.
     for layer in camadas_uf:
         try:
             params = {
@@ -217,35 +222,36 @@ def detectar_ufs(gdf):
                 "srsName": "EPSG:4674",
                 "BBOX": f"{bbox},EPSG:4674"
             }
-            resp = None
-            for attempt in range(3):
-                resp = requests.get(
-                    "https://geoservicos.ibge.gov.br/geoserver/ows",
-                    params=params, timeout=30,
-                    headers={"User-Agent": "Mozilla/5.0"}
-                )
-                if resp.status_code in (502, 503, 504):
-                    import time
-                    time.sleep(2 ** attempt)  # servidor instável — espera e tenta de novo
-                    continue
-                break
-            if resp.status_code == 200 and resp.text.strip().startswith("{"):
-                data = resp.json()
-                ufs = []
-                for f in data.get("features", []):
-                    props = f.get("properties", {})
-                    for campo in campos_sigla:
-                        if campo in props and props[campo]:
-                            val = str(props[campo]).strip().lower()
-                            if len(val) == 2:
-                                ufs.append(val)
-                                break
-                if ufs:
-                    return list(set(ufs))
+            resp = requests.get(
+                "https://geoservicos.ibge.gov.br/geoserver/ows",
+                params=params, timeout=15,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
         except Exception:
-            continue
+            # timeout/rede: o geoserver está fora — as outras camadas vão falhar
+            # igual, não adianta insistir. Vai direto pros fallbacks.
+            break
 
-    # Fallback robusto via Nominatim
+        if resp.status_code != 200 or not resp.text.strip().startswith("{"):
+            # erro de servidor (400/500/pool esgotado) afeta todas as camadas
+            # do mesmo geoserver; não gasta 15s por camada tentando as outras.
+            break
+
+        data = resp.json()
+        ufs = []
+        for f in data.get("features", []):
+            props = f.get("properties", {})
+            for campo in campos_sigla:
+                if campo in props and props[campo]:
+                    val = str(props[campo]).strip().lower()
+                    if len(val) == 2:
+                        ufs.append(val)
+                        break
+        if ufs:
+            return list(set(ufs))
+        # 200 mas sem UF útil (camada daquele ano vazia/ausente): tenta a próxima.
+
+    # Fallback 1: Nominatim (preciso, mas pode ser bloqueado a partir de IPs de nuvem).
     try:
         centroid = gdf.to_crs("EPSG:4326").unary_union.centroid
         url = f"https://nominatim.openstreetmap.org/reverse?lat={centroid.y}&lon={centroid.x}&format=json&addressdetails=1"
@@ -270,6 +276,23 @@ def detectar_ufs(gdf):
             }
             if estado_nome in mapa_uf:
                 return [mapa_uf[estado_nome]]
+    except Exception:
+        pass
+
+    # Fallback 2 (garantido, sem rede): estados cujo bounding box contém o
+    # centroide do imóvel. É grosseiro (bboxes de estados se sobrepõem, então
+    # pode devolver 2-3 UFs), mas nunca falha — evita o "não foi possível
+    # identificar a UF" quando IBGE e Nominatim estão indisponíveis. As
+    # consultas por fonte filtram espacialmente, então UFs a mais só custam tempo.
+    try:
+        c = gdf.to_crs("EPSG:4326").unary_union.centroid
+        lon, lat = c.x, c.y
+        ufs_bbox = [
+            uf.lower() for uf, (x0, y0, x1, y1) in utils.LIMITES_ESTADOS.items()
+            if x0 <= lon <= x1 and y0 <= lat <= y1
+        ]
+        if ufs_bbox:
+            return ufs_bbox
     except Exception:
         pass
 
