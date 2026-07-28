@@ -387,10 +387,13 @@ def buscar_incra_por_bbox(bbox_str, ufs, fonte):
             "tema": tema, "service": "WFS", "version": "1.0.0",
             "request": "GetFeature", "typename": tema, "bbox": bbox_str,
         }
+        # timeout 30s: mesmo áreas grandes (~66km / 23 MB) respondem em ~5s quando
+        # o INCRA está saudável, então 30s dá folga e ainda falha rápido num
+        # travamento (evita spinner preso por 135s/UF quando o servidor pendura).
         resp = None
         for attempt in range(3):
             try:
-                resp = requests.get(INCRA_WFS, params=params, timeout=45,
+                resp = requests.get(INCRA_WFS, params=params, timeout=30,
                                     headers={"User-Agent": "Mozilla/5.0"})
                 if resp.status_code in (500, 502, 503, 504):
                     time.sleep(2 ** attempt)  # INCRA instável — espera e tenta de novo
@@ -1278,11 +1281,17 @@ def render_tab():
                 ws.set_column(i, i, min(largura + 2, 60))
 
         st.download_button(
-            "📥 Baixar planilha (Excel)",
+            "📥 Baixar planilha (Excel) — códigos completos",
             data=buffer_xlsx.getvalue(),
             file_name=f"confrontantes_{fonte_ativa.lower()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
             key="dl_planilha_confrontantes"
+        )
+        st.caption(
+            "Use este botão para a planilha em colunas com os códigos inteiros. "
+            "O ícone de download no canto da tabela gera um CSV que o Excel pt-BR "
+            "não separa em colunas."
         )
 
     # --- Detalhe do registro selecionado ---
