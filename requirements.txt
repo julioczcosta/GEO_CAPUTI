@@ -27,3 +27,11 @@ rtree>=1.0,<2
 lxml>=5.0,<7
 xlsxwriter>=3.2,<4
 streamlit-option-menu>=0.3,<1
+
+# Aba "Uso do Solo": carrega o modelo v7 (RandomForest hierarquico) salvo em
+# joblib. O pickle foi gerado com scikit-learn 1.5.x / numpy 2.2.x — precisa
+# carregar numa versao compativel, por isso o teto de minor no sklearn.
+scikit-learn>=1.5,<1.6
+joblib>=1.4,<2
+numpy>=2.0,<2.3
+pillow>=10.0,<12

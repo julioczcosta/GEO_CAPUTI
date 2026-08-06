@@ -9,6 +9,7 @@ import consulta_bases
 import impedimentos
 import aptidao
 import confrontantes
+import uso_solo
 import hmac
 import base64
 import streamlit.components.v1 as components
@@ -315,8 +316,8 @@ components.html(
 if modo_operacao == "Diagnóstico do Imóvel":
     selected = option_menu(
         menu_title=None, 
-        options=["Início", "Contexto", "Satélite", "Climatologia", "Impedimentos", "Confrontantes"],
-        icons=["house", "geo-alt", "layers", "cloud-rain", "exclamation-triangle", "people-fill"], 
+        options=["Início", "Contexto", "Satélite", "Climatologia", "Uso do Solo", "Impedimentos", "Confrontantes"],
+        icons=["house", "geo-alt", "layers", "cloud-rain", "map", "exclamation-triangle", "people-fill"],
         menu_icon="cast", 
         default_index=0, 
         orientation="horizontal",
@@ -331,6 +332,8 @@ if modo_operacao == "Diagnóstico do Imóvel":
         sentinel.render_tab()
     elif selected == "Climatologia":
         climatology.render_tab()
+    elif selected == "Uso do Solo":
+        uso_solo.render_tab()
     elif selected == "Impedimentos":
         impedimentos.render_tab()
     elif selected == "Confrontantes":
