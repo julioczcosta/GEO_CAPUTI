@@ -179,12 +179,6 @@ def render_tab():
     with c2:
         rodar = st.button("🛰️ Classificar uso do solo", type="primary", use_container_width=True)
 
-    hoje = date.today()
-    seca_completa = ano < hoje.year or (ano == hoje.year and hoje.month > 9)
-    if not seca_completa:
-        st.warning(f"⚠️ {ano}: a estação seca (mai–set) ainda não terminou — a "
-                   "classificação sai **preliminar** e pode mudar quando o ano se completar.")
-
     nome_imovel = st.session_state.get("last_code", "imóvel")
     chave = f"{nome_imovel}|{ano}"
 
@@ -286,13 +280,15 @@ def render_tab():
         st.markdown(tabela, unsafe_allow_html=True)
         st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
         st.markdown(_legenda_html([c for c, _ in linhas]), unsafe_allow_html=True)
-        if omitidas:
-            txt = ", ".join(f"{NOMES_EXIBE[c]} ({_br(n / n_total * 100, 2)}%)"
-                            for c, n in omitidas)
-            st.caption(f"Classes abaixo de {_br(LIMIAR_PCT, 1)}% (não significativas) "
-                       f"omitidas: {txt}.")
     with col_mapa:
         st.components.v1.html(_mapa_html(gdf_imovel, resultado), height=470)
+
+    # aviso de ano preliminar (estacao seca ainda aberta) — abaixo do mapa/legenda
+    ano_result = resultado.get("ano", guardado["dados"]["ano"])
+    hoje = date.today()
+    if ano_result > hoje.year or (ano_result == hoje.year and hoje.month <= 9):
+        st.warning(f"⚠️ {ano_result}: a estação seca (mai–set) ainda não terminou — "
+                   "classificação **preliminar**, pode mudar quando o ano se completar.")
 
     # --- rodape / ressalvas ---
     margem = pacote.get("margem_area_pp", {})
