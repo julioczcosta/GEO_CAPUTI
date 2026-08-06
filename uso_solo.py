@@ -12,6 +12,7 @@ colorido com a paleta dos manuais.
 
 import io
 import os
+import json
 import base64
 from datetime import date
 
@@ -21,7 +22,7 @@ import streamlit as st
 import geemap.foliumap as geemap
 import folium
 from shapely.ops import unary_union
-from shapely.geometry import mapping
+from shapely.geometry import mapping, shape
 from PIL import Image
 
 import joblib
@@ -49,10 +50,28 @@ NOMES_EXIBE = {
 # depois de 30/set; antes disso a classificacao daquele ano sai PRELIMINAR.
 ANOS = list(range(2019, date.today().year + 1))
 
+# classes com area abaixo deste % do imovel nao aparecem na tabela (ruido, ex.:
+# silvicultura pingando em quase todo imovel) - ficam so numa nota de rodape.
+LIMIAR_PCT = 0.5
+
 
 @st.cache_resource(show_spinner=False)
 def _carregar_modelo():
     return joblib.load(MODELO_PATH)
+
+
+@st.cache_resource(show_spinner=False)
+def _cerrado_geom():
+    """Poligono (simplificado) do bioma Cerrado, para avisar quando o imovel
+    esta fora da area de treino do modelo. None se o arquivo faltar."""
+    p = os.path.join(os.path.dirname(__file__), "dados", "cerrado.geojson")
+    try:
+        with open(p, encoding="utf-8") as f:
+            gj = json.load(f)
+        feats = gj.get("features")
+        return shape(feats[0]["geometry"]) if feats else shape(gj)
+    except Exception:
+        return None
 
 
 def _br(valor, dec):
@@ -121,14 +140,27 @@ def _legenda_html(cods_presentes):
 
 def render_tab():
     st.markdown("### Uso do Solo")
+    st.warning("🧪 **Versão de testes.** Resultados experimentais, apenas para apoio "
+               "— não use em laudo. A técnica ainda está em ajuste.")
     st.caption("Classificação automática de uso do solo do imóvel (Sentinel-2 + "
-               "Random Forest). Ferramenta de **apoio** — não substitui conferência.")
+               "Random Forest), recortada ao perímetro.")
 
     gdf_imovel = st.session_state.get("gdf_imovel")
     if gdf_imovel is None or gdf_imovel.empty:
         st.info("📍 Carregue um imóvel na aba **Início** primeiro. A classificação "
                 "é feita sobre o perímetro selecionado lá.")
         return
+
+    # aviso se o imovel estiver fora do Cerrado (area de treino do modelo)
+    try:
+        centro = unary_union(gdf_imovel.geometry.values).centroid
+        cerr = _cerrado_geom()
+        if cerr is not None and not cerr.contains(centro):
+            st.warning("⚠️ Este imóvel parece estar **fora do bioma Cerrado**. O modelo "
+                       "foi treinado apenas no Cerrado — o resultado pode não ser "
+                       "confiável aqui.")
+    except Exception:
+        pass
 
     try:
         pacote = _carregar_modelo()
@@ -203,6 +235,13 @@ def render_tab():
     if agrupar and 3 in contagem:
         contagem[2] = contagem.get(2, 0) + contagem.pop(3)
 
+    # classes insignificantes (< LIMIAR_PCT) saem da tabela e viram nota
+    todas = sorted(contagem.items(), key=lambda kv: -kv[1])
+    linhas = [(c, n) for c, n in todas if n / n_total * 100 >= LIMIAR_PCT]
+    omitidas = [(c, n) for c, n in todas if n / n_total * 100 < LIMIAR_PCT]
+    if not linhas:  # imovel minusculo, tudo abaixo do limiar — mostra tudo
+        linhas, omitidas = todas, []
+
     # --- metricas de area ---
     m1, m2 = st.columns(2)
     m1.metric("Área calculada (perímetro)", f"{_br(area_ha, 4)} ha")
@@ -210,7 +249,6 @@ def render_tab():
         m2.metric("Área de referência", f"{_br(area_ref, 4)} ha")
 
     # --- tabela ---
-    linhas = sorted(contagem.items(), key=lambda kv: -kv[1])
     usar_ref = bool(area_ref and area_ref > 0)
 
     thead = ("<tr>"
@@ -248,6 +286,11 @@ def render_tab():
         st.markdown(tabela, unsafe_allow_html=True)
         st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
         st.markdown(_legenda_html([c for c, _ in linhas]), unsafe_allow_html=True)
+        if omitidas:
+            txt = ", ".join(f"{NOMES_EXIBE[c]} ({_br(n / n_total * 100, 2)}%)"
+                            for c, n in omitidas)
+            st.caption(f"Classes abaixo de {_br(LIMIAR_PCT, 1)}% (não significativas) "
+                       f"omitidas: {txt}.")
     with col_mapa:
         st.components.v1.html(_mapa_html(gdf_imovel, resultado), height=470)
 
