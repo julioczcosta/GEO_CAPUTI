@@ -13,6 +13,7 @@ colorido com a paleta dos manuais.
 import io
 import os
 import base64
+from datetime import date
 
 import ee
 import numpy as np
@@ -44,7 +45,9 @@ NOMES_EXIBE = {
     0: "Vegetação Nativa", 1: "Lavoura", 2: "Pastagem", 3: "Pastagem degradada",
     4: "Corpo d'água", 5: "Silvicultura", 6: "Área aberta", 7: "Área de várzea",
 }
-ANOS = list(range(2019, 2026))  # 2019..2025 (2026 ainda sem estacao seca completa)
+# 2019..ano corrente. O ano corrente so tem a estacao seca (mai-set) COMPLETA
+# depois de 30/set; antes disso a classificacao daquele ano sai PRELIMINAR.
+ANOS = list(range(2019, date.today().year + 1))
 
 
 @st.cache_resource(show_spinner=False)
@@ -143,6 +146,12 @@ def render_tab():
         ano = st.selectbox("Ano da imagem", ANOS, index=len(ANOS) - 1)
     with c2:
         rodar = st.button("🛰️ Classificar uso do solo", type="primary", use_container_width=True)
+
+    hoje = date.today()
+    seca_completa = ano < hoje.year or (ano == hoje.year and hoje.month > 9)
+    if not seca_completa:
+        st.warning(f"⚠️ {ano}: a estação seca (mai–set) ainda não terminou — a "
+                   "classificação sai **preliminar** e pode mudar quando o ano se completar.")
 
     nome_imovel = st.session_state.get("last_code", "imóvel")
     chave = f"{nome_imovel}|{ano}"
