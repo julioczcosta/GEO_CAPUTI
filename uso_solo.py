@@ -50,9 +50,14 @@ NOMES_EXIBE = {
 # depois de 30/set; antes disso a classificacao daquele ano sai PRELIMINAR.
 ANOS = list(range(2019, date.today().year + 1))
 
-# classes com area abaixo deste % do imovel nao aparecem na tabela (ruido, ex.:
-# silvicultura pingando em quase todo imovel) - ficam so numa nota de rodape.
+# Corte de significancia para a tabela (classe abaixo do corte nao aparece).
+# Duas faixas: classes CONFIAVEIS somem so se forem residuais; classes FRACAS
+# (pasto degradado, varzea, silvicultura, area aberta) precisam de um pedaco
+# GRANDE para aparecer - o modelo as detecta mal e elas pingam como ruido por
+# todo o imovel; num imovel grande 1% ja viram muitos hectares "apontados" a
+# toa. Por isso o corte delas e bem mais alto.
 LIMIAR_PCT = 0.5
+LIMIAR_FRACA_PCT = 5.0
 
 
 @st.cache_resource(show_spinner=False)
@@ -229,12 +234,14 @@ def render_tab():
     if agrupar and 3 in contagem:
         contagem[2] = contagem.get(2, 0) + contagem.pop(3)
 
-    # classes insignificantes (< LIMIAR_PCT) saem da tabela e viram nota
+    # classes insignificantes saem da tabela. Fracas exigem corte bem maior
+    # (o modelo as detecta mal; num imovel grande um % baixo ja vira muitos ha).
+    def _limiar(cod):
+        return LIMIAR_FRACA_PCT if cod in fracas_cods else LIMIAR_PCT
     todas = sorted(contagem.items(), key=lambda kv: -kv[1])
-    linhas = [(c, n) for c, n in todas if n / n_total * 100 >= LIMIAR_PCT]
-    omitidas = [(c, n) for c, n in todas if n / n_total * 100 < LIMIAR_PCT]
-    if not linhas:  # imovel minusculo, tudo abaixo do limiar — mostra tudo
-        linhas, omitidas = todas, []
+    linhas = [(c, n) for c, n in todas if n / n_total * 100 >= _limiar(c)]
+    if not linhas:  # imovel minusculo, tudo abaixo do corte — mostra tudo
+        linhas = todas
 
     # --- metricas de area ---
     m1, m2 = st.columns(2)
