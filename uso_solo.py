@@ -19,6 +19,7 @@ from datetime import date
 import ee
 import numpy as np
 import streamlit as st
+import geopandas as gpd
 import geemap.foliumap as geemap
 import folium
 from shapely.ops import unary_union
@@ -105,7 +106,7 @@ def _png_overlay(classe_2d):
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def _mapa_html(gdf_imovel, resultado):
+def _mapa_html(geom_outline, resultado):
     minx, miny, maxx, maxy = resultado["bounds"]
     m = geemap.Map(
         center=[(miny + maxy) / 2, (minx + maxx) / 2], zoom=13, height=460,
@@ -121,7 +122,7 @@ def _mapa_html(gdf_imovel, resultado):
     ).add_to(m)
 
     folium.GeoJson(
-        gdf_imovel.__geo_interface__, name="Perímetro",
+        mapping(geom_outline), name="Perímetro",
         style_function=lambda _f: {"color": "#FF0000", "weight": 2, "fillOpacity": 0},
     ).add_to(m)
 
@@ -143,6 +144,40 @@ def _legenda_html(cods_presentes):
     return f'<div style="line-height:1.3;">{itens}</div>'
 
 
+def _selecionar_bloco(gdf_imovel):
+    """Se o imovel tem partes geograficamente distantes, mostra um seletor para
+    escolher qual classificar (como no Satelite). Retorna (geometria_shapely,
+    tag). Partes proximas (ate ~200m) sao fundidas num mesmo bloco."""
+    geom = unary_union(gdf_imovel.geometry.values)
+    if geom.geom_type == "MultiPolygon":
+        partes = list(geom.geoms)
+    elif geom.geom_type == "GeometryCollection":
+        partes = [g for g in geom.geoms if g.geom_type in ("Polygon", "MultiPolygon")]
+    else:
+        partes = [geom]
+    if len(partes) <= 1:
+        return geom, "tudo"
+
+    inflado = unary_union([p.buffer(0.002) for p in partes])  # ~200 m
+    infl = list(inflado.geoms) if inflado.geom_type == "MultiPolygon" else [inflado]
+    if len(infl) <= 1:  # tudo proximo — um bloco so
+        return geom, "tudo"
+
+    blocos = [unary_union([p for p in partes if p.intersects(bi)]) for bi in infl]
+    opcoes = ["🟩 Tudo junto"]
+    for i, b in enumerate(blocos):
+        a = float(gpd.GeoSeries([b], crs=gdf_imovel.crs).to_crs(5880).area.iloc[0] / 1e4)
+        opcoes.append(f"📍 Bloco {i + 1} ({_br(a, 1)} ha)")
+
+    st.info("🌍 Foram identificadas áreas geograficamente distantes. Escolha qual "
+            "classificar (blocos separados dão resolução melhor que tudo junto):")
+    sel = st.selectbox("Bloco", opcoes, label_visibility="collapsed")
+    idx = opcoes.index(sel)
+    if idx == 0:
+        return geom, "tudo"
+    return blocos[idx - 1], f"b{idx}"
+
+
 def render_tab():
     st.markdown("### Uso do Solo")
     st.warning("🧪 **Versão de testes.** Resultados experimentais, apenas para apoio "
@@ -156,17 +191,6 @@ def render_tab():
                 "é feita sobre o perímetro selecionado lá.")
         return
 
-    # aviso se o imovel estiver fora do Cerrado (area de treino do modelo)
-    try:
-        centro = unary_union(gdf_imovel.geometry.values).centroid
-        cerr = _cerrado_geom()
-        if cerr is not None and not cerr.contains(centro):
-            st.warning("⚠️ Este imóvel parece estar **fora do bioma Cerrado**. O modelo "
-                       "foi treinado apenas no Cerrado — o resultado pode não ser "
-                       "confiável aqui.")
-    except Exception:
-        pass
-
     try:
         pacote = _carregar_modelo()
     except Exception as e:
@@ -177,6 +201,19 @@ def render_tab():
     fracas_nomes = set(pacote.get("classes_fracas", []))
     fracas_cods = {c for c, n in classes.items() if n in fracas_nomes}
 
+    # partes distantes -> deixa escolher qual bloco classificar (como no Satelite)
+    geom_shp, bloco_tag = _selecionar_bloco(gdf_imovel)
+
+    # aviso se a area escolhida estiver fora do Cerrado (area de treino do modelo)
+    try:
+        cerr = _cerrado_geom()
+        if cerr is not None and not cerr.contains(geom_shp.centroid):
+            st.warning("⚠️ Este imóvel parece estar **fora do bioma Cerrado**. O modelo "
+                       "foi treinado apenas no Cerrado — o resultado pode não ser "
+                       "confiável aqui.")
+    except Exception:
+        pass
+
     # --- controles ---
     c1, c2 = st.columns([0.35, 0.65], vertical_alignment="bottom")
     with c1:
@@ -185,14 +222,14 @@ def render_tab():
         rodar = st.button("🛰️ Classificar uso do solo", type="primary", use_container_width=True)
 
     nome_imovel = st.session_state.get("last_code", "imóvel")
-    chave = f"{nome_imovel}|{ano}"
+    chave = f"{nome_imovel}|{ano}|{bloco_tag}"
 
     if rodar:
         try:
-            geom_shp = unary_union(gdf_imovel.geometry.values)
             geom_ee = ee.Geometry(mapping(geom_shp))
-            area_ha = float(gdf_imovel.to_crs(5880).area.sum() / 10000.0)
-            with st.spinner("Baixando imagens e classificando o imóvel..."):
+            area_ha = float(gpd.GeoSeries([geom_shp], crs=gdf_imovel.crs)
+                            .to_crs(5880).area.iloc[0] / 1e4)
+            with st.spinner("Baixando imagens e classificando a área..."):
                 resultado = infer.classificar_imovel(geom_ee, geom_shp, ano, pacote)
             resultado["area_ha"] = area_ha
             resultado["ano"] = ano
@@ -302,7 +339,7 @@ def render_tab():
         st.markdown(_legenda_html([c for c, _ in linhas]), unsafe_allow_html=True)
     with col_mapa:
         res_map = {**resultado, "classe_2d": classe_limpo}
-        st.components.v1.html(_mapa_html(gdf_imovel, res_map), height=470)
+        st.components.v1.html(_mapa_html(geom_shp, res_map), height=470)
 
     # aviso de ano preliminar (estacao seca ainda aberta) — abaixo do mapa/legenda
     ano_result = resultado.get("ano", guardado["dados"]["ano"])
