@@ -211,7 +211,6 @@ def render_tab():
         return
 
     resultado = guardado["dados"]
-    contagem = dict(resultado["contagem"])
     n_total = resultado["n_total"]
     area_ha = resultado["area_ha"]
 
@@ -231,17 +230,31 @@ def render_tab():
             help="Se preenchida, mostra os hectares proporcionais a essa área.",
         )
 
-    if agrupar and 3 in contagem:
-        contagem[2] = contagem.get(2, 0) + contagem.pop(3)
+    # raster de trabalho (opcional: pasto degradado -> pastagem)
+    classe_2d = resultado["classe_2d"].copy()
+    if agrupar:
+        classe_2d[classe_2d == 3] = 2
 
-    # classes insignificantes saem da tabela. Fracas exigem corte bem maior
-    # (o modelo as detecta mal; num imovel grande um % baixo ja vira muitos ha).
+    # corte de significancia: classes de erro exigem corte bem maior (o modelo
+    # as detecta mal; num imovel grande um % baixo ja vira muitos ha).
     def _limiar(cod):
         return LIMIAR_FRACA_PCT if cod in fracas_cods else LIMIAR_PCT
-    todas = sorted(contagem.items(), key=lambda kv: -kv[1])
-    linhas = [(c, n) for c, n in todas if n / n_total * 100 >= _limiar(c)]
-    if not linhas:  # imovel minusculo, tudo abaixo do corte — mostra tudo
-        linhas = todas
+    cods0, cnts0 = np.unique(classe_2d[classe_2d >= 0], return_counts=True)
+    bruto = {int(c): int(n) for c, n in zip(cods0, cnts0)}
+    total = sum(bruto.values()) or 1
+    keep = {c for c, n in bruto.items() if n / total * 100 >= _limiar(c)}
+    if not keep:  # imovel minusculo — mantem tudo
+        keep = set(bruto)
+
+    # FILTRO DE MAIORIA: pixels de classe fora do corte (erro/ruido, ex.:
+    # silvicultura pingando) viram o vizinho majoritario mantido — somem do
+    # mapa E das contagens, sem deixar buraco. Mapa e tabela ficam coerentes.
+    classe_limpo = infer.limpar_ruido(classe_2d, keep)
+
+    cods1, cnts1 = np.unique(classe_limpo[classe_limpo >= 0], return_counts=True)
+    contagem = {int(c): int(n) for c, n in zip(cods1, cnts1)}
+    n_total = int(cnts1.sum())
+    linhas = sorted(contagem.items(), key=lambda kv: -kv[1])
 
     # --- metricas de area ---
     m1, m2 = st.columns(2)
@@ -288,7 +301,8 @@ def render_tab():
         st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
         st.markdown(_legenda_html([c for c, _ in linhas]), unsafe_allow_html=True)
     with col_mapa:
-        st.components.v1.html(_mapa_html(gdf_imovel, resultado), height=470)
+        res_map = {**resultado, "classe_2d": classe_limpo}
+        st.components.v1.html(_mapa_html(gdf_imovel, res_map), height=470)
 
     # aviso de ano preliminar (estacao seca ainda aberta) — abaixo do mapa/legenda
     ano_result = resultado.get("ano", guardado["dados"]["ano"])

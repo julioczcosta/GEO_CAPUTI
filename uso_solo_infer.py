@@ -82,6 +82,43 @@ def _escala_efetiva(bounds, scale, limite_pixels):
     return min(nova, 100)
 
 
+def limpar_ruido(classe_2d, keep_cods, iteracoes=12):
+    """Filtro de maioria: reatribui os pixels de classes NAO mantidas ao vizinho
+    majoritario entre as classes mantidas, iterativamente. Remove o 'sal e
+    pimenta' das classes de erro (que o corte de significancia ja tirou da
+    tabela) do MAPA e das contagens. Nao cria buraco: todo pixel com dado (>=0)
+    termina numa classe mantida.
+    """
+    keep = np.array(sorted(int(c) for c in keep_cods), dtype=classe_2d.dtype)
+    out = classe_2d.copy()
+    if keep.size == 0:
+        return out
+
+    dado = out >= 0
+    ruido = dado & ~np.isin(out, keep)
+    for _ in range(iteracoes):
+        if not ruido.any():
+            break
+        counts = []
+        for c in keep:
+            m = (out == c).astype(np.int32)
+            p = np.pad(m, 1)
+            s = (p[:-2, :-2] + p[:-2, 1:-1] + p[:-2, 2:]
+                 + p[1:-1, :-2] + p[1:-1, 1:-1] + p[1:-1, 2:]
+                 + p[2:, :-2] + p[2:, 1:-1] + p[2:, 2:])
+            counts.append(s)
+        counts = np.stack(counts)                      # (K, H, W)
+        maioria = keep[counts.argmax(axis=0)]
+        tem_vizinho = counts.max(axis=0) > 0
+        alvo = ruido & tem_vizinho
+        out[alvo] = maioria[alvo]
+        ruido = dado & ~np.isin(out, keep)
+    if ruido.any():  # bloco sem vizinho mantido -> classe mantida mais comum
+        dom = int(keep[np.argmax([(out == c).sum() for c in keep])])
+        out[ruido] = dom
+    return out
+
+
 def classificar_imovel(geom_ee, geom_shapely, ano, pacote,
                        scale=30, limite_pixels=400000):
     """Classifica o uso do solo dentro do imovel.
