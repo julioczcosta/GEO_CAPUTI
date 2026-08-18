@@ -22,8 +22,10 @@ import streamlit as st
 import geopandas as gpd
 import geemap.foliumap as geemap
 import folium
+import plotly.graph_objects as go
+from streamlit_folium import st_folium
 from shapely.ops import unary_union
-from shapely.geometry import mapping, shape
+from shapely.geometry import mapping, shape, Point
 from PIL import Image
 
 import joblib
@@ -50,6 +52,10 @@ NOMES_EXIBE = {
     0: "Vegetação Nativa", 1: "Lavoura", 2: "Pastagem", 3: "Pastagem degradada",
     4: "Corpo d'água", 5: "Silvicultura", 6: "Área aberta", 7: "Área de várzea",
 }
+
+# Cores distintas para os pontos de NDVI coletados (sub-aba NDVI).
+CORES_PONTOS = ["#e6194B", "#4363d8", "#3cb44b", "#f58231",
+                "#911eb4", "#008080", "#f032e6", "#9A6324"]
 # 2019..ano corrente. O ano corrente so tem a estacao seca (mai-set) COMPLETA
 # depois de 30/set; antes disso a classificacao daquele ano sai PRELIMINAR.
 ANOS = list(range(2019, date.today().year + 1))
@@ -191,14 +197,23 @@ def render_tab():
     st.markdown("### Uso do Solo")
     st.warning("🧪 **Versão de testes.** Resultados experimentais, apenas para apoio "
                "— não use em laudo. A técnica ainda está em ajuste.")
-    st.caption("Classificação automática de uso do solo do imóvel (Sentinel-2 + "
-               "Random Forest), recortada ao perímetro.")
 
     gdf_imovel = st.session_state.get("gdf_imovel")
     if gdf_imovel is None or gdf_imovel.empty:
-        st.info("📍 Carregue um imóvel na aba **Início** primeiro. A classificação "
-                "é feita sobre o perímetro selecionado lá.")
+        st.info("📍 Carregue um imóvel na aba **Início** primeiro. As análises são "
+                "feitas sobre o perímetro selecionado lá.")
         return
+
+    tab_classe, tab_ndvi = st.tabs(["📊 Classificação", "🌱 NDVI (vigor)"])
+    with tab_classe:
+        _render_classificacao(gdf_imovel)
+    with tab_ndvi:
+        _render_ndvi(gdf_imovel)
+
+
+def _render_classificacao(gdf_imovel):
+    st.caption("Classificação automática de uso do solo do imóvel (Sentinel-2 + "
+               "Random Forest), recortada ao perímetro.")
 
     modo_silvic = st.checkbox(
         "🌲 Modo silvicultura — ative para imóveis com reflorestamento",
@@ -393,3 +408,283 @@ def render_tab():
     st.caption("⚠️ Estimativa de apoio — as classes marcadas como *baixa confiança* "
                "(pastagem degradada, várzea, silvicultura, área aberta) ainda não são "
                "detectadas de forma confiável e não devem ser reportadas isoladamente.")
+
+
+# ==========================================================================
+#  SUB-ABA: NDVI (vigor da vegetação) — pontos clicados no perímetro
+# ==========================================================================
+
+def _imovel_wgs(gdf_imovel):
+    """Geometria única do imóvel em EPSG:4326 (lon/lat), para o mapa e os cliques."""
+    g = gdf_imovel if gdf_imovel.crs is not None else gdf_imovel.set_crs(4326)
+    return unary_union(g.to_crs(4326).geometry.values)
+
+
+def _zoom_bounds(minx, miny, maxx, maxy):
+    """Zoom inicial do folium adequado à extensão do imóvel (o st_folium ignora
+    fit_bounds; então calculamos o zoom em vez de depender dele)."""
+    import math
+    larg = max(abs(maxx - minx), abs(maxy - miny), 1e-4)
+    return int(max(4, min(16, round(math.log2(360.0 / larg) - 0.5))))
+
+
+def _ndvi_rotulo(v):
+    """Rótulo curto de interpretação para um valor de NDVI."""
+    if v is None:
+        return "sem dado"
+    if v < 0.1:
+        return "água / sombra"
+    if v < 0.2:
+        return "solo exposto"
+    if v < 0.4:
+        return "vegetação rala"
+    if v < 0.6:
+        return "vegetação moderada"
+    if v < 0.8:
+        return "vegetação densa"
+    return "muito densa / pico"
+
+
+def _card_ponto_ndvi(pid, v):
+    cor = CORES_PONTOS[pid % len(CORES_PONTOS)]
+    val = f"{v:.2f}" if v is not None else "—"
+    return (
+        "<div style='border:1px solid #e9ecef;border-radius:10px;padding:10px 12px;"
+        "background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.04);'>"
+        "<div style='display:flex;align-items:center;gap:6px;font-size:0.78rem;color:#6c757d;'>"
+        f"<span style='width:11px;height:11px;border-radius:50%;background:{cor};"
+        "display:inline-block;'></span>"
+        f"Ponto {pid + 1}</div>"
+        f"<div style='font-size:1.6rem;font-weight:700;color:#2C3E50;line-height:1.1;"
+        f"margin-top:2px;'>{val}</div>"
+        f"<div style='font-size:0.76rem;color:#6c757d;'>{_ndvi_rotulo(v)}</div>"
+        "</div>"
+    )
+
+
+# Assinaturas de NDVI HIPOTÉTICAS (ilustrativas) de cada classe ao longo do ano,
+# para o usuário reconhecer o padrão. Valores Jan..Dez; cores da classificação.
+MESES_ABREV = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
+EXEMPLOS_NDVI = [
+    ("Lavoura anual", CORES[1],
+     [0.85, 0.80, 0.55, 0.30, 0.20, 0.18, 0.17, 0.18, 0.28, 0.50, 0.72, 0.85],
+     "Pico forte na safra e queda na colheita — grande variação no ano "
+     "(pode ter um 2º pico menor da safrinha)."),
+    ("Pastagem", CORES[2],
+     [0.62, 0.63, 0.60, 0.52, 0.45, 0.40, 0.35, 0.33, 0.35, 0.45, 0.55, 0.60],
+     "Acompanha a chuva: sobe no verão, cai na seca — mas nunca fica exposta."),
+    ("Vegetação nativa", CORES[0],
+     [0.78, 0.80, 0.78, 0.72, 0.68, 0.64, 0.60, 0.58, 0.60, 0.66, 0.72, 0.76],
+     "Alta e estável o ano todo, com leve queda na seca."),
+    ("Silvicultura", CORES[5],
+     [0.80, 0.81, 0.80, 0.79, 0.80, 0.80, 0.79, 0.80, 0.81, 0.80, 0.80, 0.81],
+     "Alta e quase constante (perene); cai de vez quando é colhida."),
+    ("Solo exposto / área aberta", CORES[6],
+     [0.15, 0.16, 0.15, 0.14, 0.15, 0.15, 0.14, 0.15, 0.16, 0.15, 0.15, 0.16],
+     "Baixa e plana o ano inteiro."),
+    ("Corpo d'água", CORES[4],
+     [-0.05, -0.04, -0.05, -0.05, -0.04, -0.05, -0.05, -0.04, -0.05, -0.05, -0.04, -0.05],
+     "Próxima de zero ou negativa."),
+]
+
+
+def _mini_grafico_exemplo(nome, cor, valores):
+    r, g, b = _hex_rgb(cor)
+    # Eixo X numérico (0..11) — usar as letras direto como categoria embaralha a
+    # linha, porque meses repetem letra (M=Mar/Mai, J=Jun/Jul, A=Abr/Ago) e o
+    # Plotly funde categorias de mesmo nome. As letras entram só como rótulo.
+    x = list(range(len(valores)))
+    fig = go.Figure(go.Scatter(
+        x=x, y=valores, mode="lines",
+        line=dict(color=cor, width=2.5),
+        fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.18)", hoverinfo="skip",
+    ))
+    fig.update_layout(
+        height=120, margin=dict(l=6, r=6, t=6, b=4),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+        yaxis=dict(range=[-0.15, 1.0], showticklabels=False, showgrid=False, zeroline=False),
+        xaxis=dict(showgrid=False, tickmode="array", tickvals=x, ticktext=MESES_ABREV,
+                   tickfont=dict(size=9, color="#999")),
+    )
+    return fig
+
+
+def _guia_ndvi():
+    with st.expander("📖 Guia de interpretação do NDVI"):
+        st.markdown(
+            "**O que é.** O NDVI mede o vigor da vegetação a partir da luz refletida "
+            "(infravermelho vs. vermelho). Vai de **-1 a 1**: quanto mais alto, mais "
+            "vegetação verde e ativa.\n\n"
+            "**Faixas de valor:**\n\n"
+            "| NDVI | Normalmente indica |\n"
+            "|---|---|\n"
+            "| < 0,1 | Água, sombra, nuvem |\n"
+            "| 0,1 – 0,2 | Solo exposto, área construída, rocha |\n"
+            "| 0,2 – 0,4 | Vegetação rala / pastagem seca ou degradada |\n"
+            "| 0,4 – 0,6 | Pastagem em bom estado / vegetação moderada |\n"
+            "| 0,6 – 0,8 | Vegetação densa / cultura vigorosa / cerrado |\n"
+            "| 0,8 – 1,0 | Floresta densa / cultura no pico |\n"
+        )
+
+        st.markdown("**Assinaturas típicas ao longo do ano** (curvas ilustrativas — "
+                    "compare com o formato da sua):")
+        # Um exemplo por linha (gráfico à esquerda, texto à direita): legível
+        # mesmo com a janela estreita/lateral, onde 3 colunas ficariam espremidas.
+        for nome, cor, vals, desc in EXEMPLOS_NDVI:
+            c_graf, c_txt = st.columns([1, 1.25], vertical_alignment="center")
+            c_graf.plotly_chart(_mini_grafico_exemplo(nome, cor, vals),
+                                 use_container_width=True,
+                                 config={"displayModeBar": False},
+                                 key=f"ex_ndvi_{nome}")
+            c_txt.markdown(
+                f"<div style='display:flex;align-items:center;gap:6px;font-weight:600;"
+                f"font-size:0.92rem;color:#2C3E50;'>"
+                f"<span style='width:12px;height:12px;border-radius:3px;background:{cor};"
+                f"border:1px solid #999;display:inline-block;'></span>{nome}</div>",
+                unsafe_allow_html=True)
+            c_txt.caption(desc)
+
+        st.caption("⚠️ As curvas acima são **ilustrativas** (não são dados reais) — "
+                   "servem só para reconhecer o padrão. Buracos na sua linha = mês sem "
+                   "imagem limpa (nuvem ou sem passagem do satélite).")
+
+
+def _render_ndvi(gdf_imovel):
+    st.caption("Clique dentro do perímetro para coletar pontos e ver o vigor da "
+               "vegetação (NDVI) de cada um ao longo do tempo.")
+
+    geom = _imovel_wgs(gdf_imovel)
+    minx, miny, maxx, maxy = geom.bounds
+    pontos = st.session_state.setdefault("ndvi_pontos", [])
+
+    col_mapa, col_pts = st.columns([0.6, 0.4], gap="medium")
+
+    with col_mapa:
+        fmap = folium.Map(location=[(miny + maxy) / 2, (minx + maxx) / 2],
+                          zoom_start=_zoom_bounds(minx, miny, maxx, maxy),
+                          tiles="Esri World Imagery", control_scale=True)
+        folium.GeoJson(
+            mapping(geom), name="Perímetro",
+            style_function=lambda _f: {"color": "#FF3B30", "weight": 2, "fillOpacity": 0},
+        ).add_to(fmap)
+        for i, (lon, lat) in enumerate(pontos):
+            cor = CORES_PONTOS[i % len(CORES_PONTOS)]
+            folium.CircleMarker(
+                [lat, lon], radius=9, color="#ffffff", weight=2,
+                fill=True, fill_color=cor, fill_opacity=1.0, tooltip=f"Ponto {i + 1}",
+            ).add_to(fmap)
+            folium.Marker(
+                [lat, lon],
+                icon=folium.DivIcon(html=(
+                    "<div style='font-size:11px;font-weight:700;color:#fff;"
+                    "text-align:center;line-height:18px;width:18px;'>"
+                    f"{i + 1}</div>")),
+            ).add_to(fmap)
+        saida = st_folium(fmap, height=430, use_container_width=True,
+                          key="ndvi_map", returned_objects=["last_clicked"])
+
+    # trata o clique fora do bloco (para poder dar rerun com o novo marcador)
+    clk = (saida or {}).get("last_clicked")
+    if clk:
+        novo = (round(clk["lng"], 6), round(clk["lat"], 6))
+        if st.session_state.get("ndvi_last_click") != novo:
+            st.session_state["ndvi_last_click"] = novo
+            if geom.contains(Point(novo[0], novo[1])):
+                pontos.append(novo)
+            else:
+                st.session_state["ndvi_fora"] = True
+            st.rerun()
+
+    with col_pts:
+        st.markdown("**Pontos coletados**")
+        if st.session_state.pop("ndvi_fora", False):
+            st.warning("O ponto precisa estar **dentro** do perímetro.")
+        if not pontos:
+            st.caption("Clique no mapa, dentro do imóvel, para adicionar pontos.")
+        for i, (lon, lat) in enumerate(pontos):
+            cor = CORES_PONTOS[i % len(CORES_PONTOS)]
+            c1, c2 = st.columns([0.85, 0.15], vertical_alignment="center")
+            c1.markdown(
+                f"<span style='width:11px;height:11px;border-radius:50%;background:{cor};"
+                f"display:inline-block;margin-right:7px;'></span>"
+                f"<b>Ponto {i + 1}</b> · {lat:.4f}, {lon:.4f}",
+                unsafe_allow_html=True)
+            if c2.button("✕", key=f"ndvi_rm_{i}", help="Remover ponto"):
+                pontos.pop(i)
+                st.session_state.pop("ndvi_result", None)
+                st.rerun()
+        if pontos:
+            if st.button("🗑️ Limpar todos", key="ndvi_clear", use_container_width=True):
+                pontos.clear()
+                st.session_state.pop("ndvi_result", None)
+                st.session_state.pop("ndvi_last_click", None)
+                st.rerun()
+
+        st.divider()
+        anos = list(range(2019, date.today().year + 1))
+        ca, cb = st.columns(2)
+        ano_ini = ca.selectbox("De (ano)", anos, index=0, key="ndvi_ano_ini")
+        ano_fim = cb.selectbox("Até (ano)", anos, index=len(anos) - 1, key="ndvi_ano_fim")
+        gerar = st.button("📈 Gerar gráficos", type="primary", use_container_width=True,
+                          disabled=not pontos, key="ndvi_gerar")
+
+    if gerar and pontos:
+        if ano_fim < ano_ini:
+            st.warning("O ano final deve ser maior ou igual ao inicial.")
+        else:
+            with st.spinner("Calculando NDVI no Earth Engine..."):
+                dados = infer.ndvi_serie_mensal(pontos, ano_ini, ano_fim)
+            st.session_state["ndvi_result"] = {
+                "dados": dados, "n": len(pontos),
+                "chave": f"{[tuple(p) for p in pontos]}|{ano_ini}|{ano_fim}",
+            }
+
+    res = st.session_state.get("ndvi_result")
+    if not res:
+        st.info("Adicione pontos e clique em **Gerar gráficos**.")
+        _guia_ndvi()
+        return
+    if res.get("n") != len(pontos):
+        st.info("Os pontos mudaram. Clique em **Gerar gráficos** para atualizar.")
+        _guia_ndvi()
+        return
+
+    dados = res["dados"]
+    meses = dados["meses"]
+    series = dados["series"]
+    if not meses or not any(any(v is not None for v in s) for s in series.values()):
+        st.warning("Sem dados de NDVI no período/pontos selecionados. Tente outro período.")
+        _guia_ndvi()
+        return
+
+    st.markdown("##### Vigor no mês de referência")
+    mes_ref = st.select_slider("Mês de referência", options=meses, value=meses[-1],
+                               key="ndvi_mesref")
+    idx_ref = meses.index(mes_ref)
+
+    cols = st.columns(min(len(series), 4) or 1)
+    for i, (pid, serie) in enumerate(series.items()):
+        cols[i % len(cols)].markdown(_card_ponto_ndvi(pid, serie[idx_ref]),
+                                     unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+
+    fig = go.Figure()
+    for pid, serie in series.items():
+        cor = CORES_PONTOS[pid % len(CORES_PONTOS)]
+        fig.add_trace(go.Scatter(
+            x=meses, y=serie, mode="lines+markers", name=f"Ponto {pid + 1}",
+            line=dict(color=cor, width=2), marker=dict(size=4),
+            connectgaps=False, hovertemplate="%{y:.2f}",
+        ))
+    fig.add_vline(x=mes_ref, line=dict(color="#8899aa", dash="dot"))
+    fig.update_layout(
+        height=380, margin=dict(l=20, r=20, t=20, b=20),
+        yaxis_title="NDVI", yaxis_range=[-0.05, 1.0], hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Fonte: Sentinel-2 (10 m), nuvens mascaradas (CLOUD_SCORE_PLUS). "
+               "Média mensal de NDVI · buracos na linha = mês sem imagem limpa.")
+
+    _guia_ndvi()
