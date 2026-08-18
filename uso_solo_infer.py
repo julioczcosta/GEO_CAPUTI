@@ -309,3 +309,77 @@ def classificar_imovel(geom_ee, geom_shapely, ano, pacote,
         "n_sem_dado": int((dentro & ~valido).sum()),
         "scale_efetiva": scale_ef,
     }
+
+
+def ndvi_serie_mensal(pontos_lonlat, ano_ini, ano_fim):
+    """Serie temporal de NDVI (media mensal) em cada ponto clicado.
+
+    Usa Sentinel-2 com a MESMA mascara de nuvem da classificacao
+    (CLOUD_SCORE_PLUS via `_colecao_s2`), garantindo consistencia. Faz todo o
+    trabalho no servidor do Earth Engine e traz um unico getInfo.
+
+    pontos_lonlat: lista de (lon, lat) em graus (EPSG:4326).
+    Retorna:
+        {"meses": ["2019-01", ...],
+         "series": {i_ponto: [ndvi_ou_None por mes]}}
+    Mes sem imagem limpa (nuvem/sem passagem) vira None (buraco no grafico).
+    """
+    from datetime import date
+
+    pontos_lonlat = list(pontos_lonlat or [])
+    if not pontos_lonlat:
+        return {"meses": [], "series": {}}
+
+    hoje = date.today()
+    meses = []
+    for y in range(int(ano_ini), int(ano_fim) + 1):
+        for mth in range(1, 13):
+            if y == hoje.year and mth > hoje.month:
+                break
+            meses.append((y, mth))
+    if not meses:
+        return {"meses": [], "series": {}}
+
+    fc = ee.FeatureCollection([
+        ee.Feature(ee.Geometry.Point([float(lon), float(lat)]), {"pid": i})
+        for i, (lon, lat) in enumerate(pontos_lonlat)
+    ])
+    regiao = fc.geometry().bounds().buffer(500)
+
+    datas = ee.List([ee.Date.fromYMD(int(y), int(m), 1) for (y, m) in meses])
+
+    def por_mes_img(d):
+        d = ee.Date(d)
+        col = _colecao_s2(d, d.advance(1, "month"), regiao)
+        # If do mes sem imagem: banda toda mascarada -> media nula (buraco).
+        return ee.Image(ee.Algorithms.If(
+            col.size().gt(0),
+            col.median().normalizedDifference(["B8", "B4"]),
+            ee.Image.constant(0).updateMask(ee.Image.constant(0)),
+        ))
+
+    # Empilha um NDVI por mes numa imagem multi-banda e faz UM unico
+    # reduceRegions — evita o erro "Too many concurrent aggregations" que
+    # ocorre ao mapear um reduceRegions por mes.
+    bandas = [f"m{y:04d}_{m:02d}" for (y, m) in meses]
+    stack = ee.ImageCollection(datas.map(por_mes_img)).toBands().rename(bandas)
+    feats = stack.reduceRegions(
+        collection=fc, reducer=ee.Reducer.mean(), scale=10,
+    ).getInfo()["features"]
+
+    rotulos = [f"{y:04d}-{m:02d}" for (y, m) in meses]
+    series = {i: [None] * len(rotulos) for i in range(len(pontos_lonlat))}
+    for ft in feats:
+        p = ft.get("properties", {})
+        pid = p.get("pid")
+        if pid is None:
+            continue
+        pid = int(pid)
+        if pid not in series:
+            continue
+        for k, banda in enumerate(bandas):
+            val = p.get(banda)
+            if val is not None:
+                series[pid][k] = round(float(val), 3)
+
+    return {"meses": rotulos, "series": series}
