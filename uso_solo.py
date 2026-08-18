@@ -312,6 +312,11 @@ def render_tab():
     # silvicultura pingando) viram o vizinho majoritario mantido — somem do
     # mapa E das contagens, sem deixar buraco. Mapa e tabela ficam coerentes.
     classe_limpo = infer.limpar_ruido(classe_2d, keep)
+    # FILTRO DE AREA MINIMA (sieve/MMU): dissolve manchas conexas minusculas
+    # que sobraram DENTRO das classes confiaveis (ex.: pixels de lavoura soltos
+    # num pastagem) na classe majoritaria ao redor. Tira o 'sal e pimenta' que
+    # o filtro de maioria nao pega. Escala vem do recorte (criterio em ha).
+    classe_limpo = infer.peneira(classe_limpo, resultado["scale_efetiva"])
 
     cods1, cnts1 = np.unique(classe_limpo[classe_limpo >= 0], return_counts=True)
     contagem = {int(c): int(n) for c, n in zip(cods1, cnts1)}

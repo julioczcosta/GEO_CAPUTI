@@ -119,6 +119,62 @@ def limpar_ruido(classe_2d, keep_cods, iteracoes=12):
     return out
 
 
+def peneira(classe_2d, scale_m, mmu_ha=0.2):
+    """Filtro de area minima (sieve / MMU): dissolve cada MANCHA conexa menor
+    que `mmu_ha` hectares na classe majoritaria da vizinhanca — INDEPENDENTE da
+    classe. E o que remove o 'sal e pimenta' que sobra DENTRO das classes
+    confiaveis (ex.: alguns pixels de lavoura soltos no meio de um pastagem),
+    que o filtro de maioria (que so mexe nas classes de erro) nao pega. Formas
+    grandes ficam intactas; so o respingo isolado some. Mesma logica do MapBiomas.
+
+    A area minima e em HECTARES e vira nº de pixels pela escala efetiva do
+    recorte (nunca < 2 px), pra o criterio fisico nao mudar quando o app
+    aumenta o pixel em imoveis grandes. 8-conectividade.
+    """
+    try:
+        from scipy import ndimage
+    except Exception:
+        return classe_2d  # sem scipy: degrada limpo, mantem o mapa como esta
+
+    min_pixels = max(2, int(round(mmu_ha * 10000.0 / (scale_m * scale_m))))
+    out = classe_2d.copy()
+    estrutura = np.ones((3, 3), dtype=bool)  # vizinhanca-8
+
+    for _ in range(20):  # itera ate estabilizar (manchas somem em cascata)
+        classes = np.array([int(c) for c in np.unique(out) if c >= 0], dtype=out.dtype)
+        if classes.size <= 1:
+            break
+        absorver = np.zeros(out.shape, dtype=bool)
+        for c in classes:
+            lbl, n = ndimage.label(out == c, structure=estrutura)
+            if n == 0:
+                continue
+            tam = np.bincount(lbl.ravel())
+            pequenos = np.where(tam[1:] < min_pixels)[0] + 1  # rotulos 1..n
+            if pequenos.size:
+                absorver |= np.isin(lbl, pequenos)
+        if not absorver.any():
+            break
+        # reatribui cada pixel a absorver ao vizinho majoritario entre os pixels
+        # que NAO serao absorvidos (dado >= 0). Contagem 3x3 por classe.
+        fixos = (out >= 0) & ~absorver
+        counts = []
+        for c in classes:
+            m = (fixos & (out == c)).astype(np.int32)
+            p = np.pad(m, 1)
+            s = (p[:-2, :-2] + p[:-2, 1:-1] + p[:-2, 2:]
+                 + p[1:-1, :-2] + p[1:-1, 1:-1] + p[1:-1, 2:]
+                 + p[2:, :-2] + p[2:, 1:-1] + p[2:, 2:])
+            counts.append(s)
+        counts = np.stack(counts)
+        maioria = classes[counts.argmax(axis=0)]
+        alvo = absorver & (counts.max(axis=0) > 0)
+        if not alvo.any():
+            break  # so sobram manchas sem vizinho fixo -> para
+        out[alvo] = maioria[alvo]
+    return out
+
+
 def classificar_imovel(geom_ee, geom_shapely, ano, pacote,
                        scale=20, limite_pixels=400000):
     """Classifica o uso do solo dentro do imovel.
