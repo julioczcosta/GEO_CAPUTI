@@ -317,6 +317,12 @@ def render_tab():
     # num pastagem) na classe majoritaria ao redor. Tira o 'sal e pimenta' que
     # o filtro de maioria nao pega. Escala vem do recorte (criterio em ha).
     classe_limpo = infer.peneira(classe_limpo, resultado["scale_efetiva"])
+    # FILTRO CONTEXTUAL DE ILHA: dissolve MANCHAS pequenas de nativa/lavoura/
+    # pastagem embutidas em outra dessas classes (ex.: ilha de pastagem no meio
+    # de um lavoura, com o pastagem real concentrado noutro lugar) — mancha
+    # maior que a MMU, que o sieve nao pega. So mexe entre essas 3 classes que
+    # se confundem; agua/silvicultura/solo/varzea e feicoes lineares ficam a salvo.
+    classe_limpo = infer.suavizar_contexto(classe_limpo, resultado["scale_efetiva"])
 
     cods1, cnts1 = np.unique(classe_limpo[classe_limpo >= 0], return_counts=True)
     contagem = {int(c): int(n) for c, n in zip(cods1, cnts1)}

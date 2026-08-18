@@ -175,6 +175,79 @@ def peneira(classe_2d, scale_m, mmu_ha=0.2):
     return out
 
 
+def suavizar_contexto(classe_2d, scale_m, classes_confusas=(0, 1, 2),
+                      max_ha=2.0, pureza=0.75, aspecto_max=4.0, iteracoes=3):
+    """Filtro CONTEXTUAL de ilha: dissolve MANCHAS pequenas de classe errada
+    EMBUTIDAS em outra classe (ex.: uma ilha de pastagem no meio de um lavoura,
+    quando o pastagem de fato esta concentrado noutro lugar). Isso o sieve/MMU
+    nao pega — a mancha e maior que a area minima; e o filtro por-pixel tambem
+    nao, pois o interior da mancha segura suas proprias bordas. Aqui a decisao e
+    no COMPONENTE inteiro: se a mancha (a) e menor que `max_ha`, (b) e compacta
+    (nao e faixa linear) e (c) tem a borda dominada (>= `pureza`) por UMA unica
+    outra classe, a mancha toda vira essa classe. Baseia-se na suavidade
+    espacial do uso do solo.
+
+    Salvaguardas: so ENTRE as `classes_confusas` (nativa/lavoura/pastagem) —
+    agua, silvicultura, solo e varzea nao sao vitima nem alvo, entao lago /
+    reflorestamento reais nao somem. O teste de compacidade (`aspecto_max` da
+    bounding-box) protege feicoes LINEARES (mata ciliar): faixa fina tem aspecto
+    alto e e preservada. Borda entre dois blocos grandes: a mancha e grande
+    (> max_ha) e nao entra.
+    """
+    try:
+        from scipy import ndimage
+    except Exception:
+        return classe_2d
+
+    conf = set(int(c) for c in classes_confusas)
+    max_px = max(4, int(round(max_ha * 10000.0 / (scale_m * scale_m))))
+    out = classe_2d.copy()
+    estrutura = np.ones((3, 3), dtype=bool)
+
+    for _ in range(iteracoes):
+        mudou = False
+        for c in list(conf):
+            mask_c = out == c
+            if not mask_c.any():
+                continue
+            lbl, n = ndimage.label(mask_c, structure=estrutura)
+            if n == 0:
+                continue
+            tam = np.bincount(lbl.ravel())
+            objs = ndimage.find_objects(lbl)
+            for L in range(1, n + 1):
+                area = tam[L]
+                if area == 0 or area > max_px:
+                    continue
+                sl = objs[L - 1]
+                if sl is None:
+                    continue
+                h = sl[0].stop - sl[0].start
+                w = sl[1].stop - sl[1].start
+                aspecto = max(h, w) / max(1, min(h, w))
+                if aspecto > aspecto_max or area < 0.4 * h * w:
+                    continue  # faixa linear / esparramada -> nao e ilha compacta
+                sl2 = (slice(max(0, sl[0].start - 1), sl[0].stop + 1),
+                       slice(max(0, sl[1].start - 1), sl[1].stop + 1))
+                sub_lbl = lbl[sl2]
+                sub_out = out[sl2]
+                comp = sub_lbl == L
+                borda = ndimage.binary_dilation(comp, estrutura) & ~comp
+                vals = sub_out[borda]
+                vals = vals[(vals >= 0) & (vals != c)]
+                if vals.size == 0:
+                    continue
+                cc = np.bincount(vals)
+                D = int(cc.argmax())
+                if D in conf and cc[D] / vals.size >= pureza:
+                    reg = out[sl2]
+                    reg[comp] = D
+                    mudou = True
+        if not mudou:
+            break
+    return out
+
+
 def classificar_imovel(geom_ee, geom_shapely, ano, pacote,
                        scale=20, limite_pixels=400000):
     """Classifica o uso do solo dentro do imovel.
