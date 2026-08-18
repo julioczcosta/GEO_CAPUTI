@@ -120,7 +120,7 @@ def limpar_ruido(classe_2d, keep_cods, iteracoes=12):
 
 
 def classificar_imovel(geom_ee, geom_shapely, ano, pacote,
-                       scale=30, limite_pixels=400000):
+                       scale=20, limite_pixels=400000):
     """Classifica o uso do solo dentro do imovel.
 
     Retorna dict com: classe_2d (HxW, -1 = fora/sem dado), bounds (4326),

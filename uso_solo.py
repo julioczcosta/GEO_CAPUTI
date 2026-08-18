@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aba "Uso do Solo" — classificacao de uso do solo do imovel (Cerrado) por
-Sentinel-2 + Random Forest (modelo v7, hierarquico).
+Sentinel-2 + Random Forest hierarquico (modelo v9, base + cascata de especialistas).
 
 FERRAMENTA DE APOIO (nao vai para laudo). Usa o imovel ja carregado na aba
 Inicio (st.session_state['gdf_imovel']): recorta a classificacao ao perimetro,
@@ -27,10 +27,13 @@ from shapely.geometry import mapping, shape
 from PIL import Image
 
 import joblib
-import modelo_hierarquico  # noqa: F401 - necessario para o joblib desserializar
+import classificador_consolidado  # noqa: F401 - necessario para o joblib desserializar
 import uso_solo_infer as infer
 
-MODELO_PATH = os.path.join(os.path.dirname(__file__), "modelos", "modelo_uso_cerrado_v7.joblib")
+_MODELOS = os.path.join(os.path.dirname(__file__), "modelos")
+MODELO_PADRAO = os.path.join(_MODELOS, "modelo_uso_cerrado_v9.joblib")
+MODELO_SILVIC = os.path.join(_MODELOS, "modelo_uso_cerrado_v9_silvic.joblib")
+COD_SILVICULTURA = 5
 
 # Paleta dos manuais (PyQGIS). "solo_exposto" e exibido como "Area aberta".
 CORES = {
@@ -51,6 +54,12 @@ NOMES_EXIBE = {
 # depois de 30/set; antes disso a classificacao daquele ano sai PRELIMINAR.
 ANOS = list(range(2019, date.today().year + 1))
 
+
+def _ano_preliminar(ano):
+    """True se a estacao seca (mai-set) desse ano ainda nao terminou (corte 30/set)."""
+    h = date.today()
+    return ano > h.year or (ano == h.year and h.month <= 9)
+
 # Corte de significancia para a tabela (classe abaixo do corte nao aparece).
 # Duas faixas: classes CONFIAVEIS somem so se forem residuais; classes FRACAS
 # (pasto degradado, varzea, silvicultura, area aberta) precisam de um pedaco
@@ -62,8 +71,8 @@ LIMIAR_FRACA_PCT = 5.0
 
 
 @st.cache_resource(show_spinner=False)
-def _carregar_modelo():
-    return joblib.load(MODELO_PATH)
+def _carregar_modelo(path):
+    return joblib.load(path)
 
 
 @st.cache_resource(show_spinner=False)
@@ -191,8 +200,13 @@ def render_tab():
                 "é feita sobre o perímetro selecionado lá.")
         return
 
+    modo_silvic = st.checkbox(
+        "🌲 Modo silvicultura — ative para imóveis com reflorestamento",
+        value=False,
+        help="Detecta melhor a silvicultura (eucalipto/pínus). Deixe DESLIGADO em "
+             "imóveis sem reflorestamento — ligado, pode marcar silvicultura a mais.")
     try:
-        pacote = _carregar_modelo()
+        pacote = _carregar_modelo(MODELO_SILVIC if modo_silvic else MODELO_PADRAO)
     except Exception as e:
         st.error(f"Não foi possível carregar o modelo de classificação: {e}")
         return
@@ -200,6 +214,8 @@ def render_tab():
     classes = pacote["classes"]
     fracas_nomes = set(pacote.get("classes_fracas", []))
     fracas_cods = {c for c, n in classes.items() if n in fracas_nomes}
+    if modo_silvic:
+        fracas_cods.discard(COD_SILVICULTURA)  # detectada com confianca -> nao e "fraca"
 
     # partes distantes -> deixa escolher qual bloco classificar (como no Satelite)
     geom_shp, bloco_tag = _selecionar_bloco(gdf_imovel)
@@ -215,14 +231,23 @@ def render_tab():
         pass
 
     # --- controles ---
+    # default no ULTIMO ano COMPLETO (evita abrir ja num ano preliminar como 2026;
+    # vira o ano corrente sozinho depois de 30/set).
+    completos = [a for a in ANOS if not _ano_preliminar(a)]
+    idx_default = ANOS.index(completos[-1]) if completos else len(ANOS) - 1
     c1, c2 = st.columns([0.35, 0.65], vertical_alignment="bottom")
     with c1:
-        ano = st.selectbox("Ano da imagem", ANOS, index=len(ANOS) - 1)
+        ano = st.selectbox("Ano da imagem", ANOS, index=idx_default)
     with c2:
         rodar = st.button("🛰️ Classificar uso do solo", type="primary", use_container_width=True)
 
+    # alerta na HORA que escolher um ano incompleto (antes de rodar)
+    if _ano_preliminar(ano):
+        st.warning(f"⚠️ {ano}: a estação seca (mai–set) ainda não terminou — a "
+                   "classificação sai **preliminar** e pode mudar quando o ano se completar.")
+
     nome_imovel = st.session_state.get("last_code", "imóvel")
-    chave = f"{nome_imovel}|{ano}|{bloco_tag}"
+    chave = f"{nome_imovel}|{ano}|{bloco_tag}|{'silv' if modo_silvic else 'pad'}"
 
     if rodar:
         try:
@@ -341,20 +366,14 @@ def render_tab():
         res_map = {**resultado, "classe_2d": classe_limpo}
         st.components.v1.html(_mapa_html(geom_shp, res_map), height=470)
 
-    # aviso de ano preliminar (estacao seca ainda aberta) — abaixo do mapa/legenda
-    ano_result = resultado.get("ano", guardado["dados"]["ano"])
-    hoje = date.today()
-    if ano_result > hoje.year or (ano_result == hoje.year and hoje.month <= 9):
-        st.warning(f"⚠️ {ano_result}: a estação seca (mai–set) ainda não terminou — "
-                   "classificação **preliminar**, pode mudar quando o ano se completar.")
-
     # --- rodape / ressalvas ---
     margem = pacote.get("margem_area_pp", {})
+    conf = set(pacote.get("classes_confiaveis", []))
     if margem:
         txt = ", ".join(f"{NOMES_EXIBE[[k for k,v in classes.items() if v==nome][0]]} ±{_br(pp,1)}pp"
                         for nome, pp in margem.items()
-                        if any(v == nome for v in classes.values()))
-        st.caption(f"Margem típica por classe (validação por área, 80 fazendas): {txt}.")
+                        if nome in conf)
+        st.caption(f"Margem típica por classe confiável (validação por área, 80 fazendas): {txt}.")
 
     detalhe = f"Resolução: {resultado['scale_efetiva']} m · {n_total:,} pixels classificados".replace(",", ".")
     if resultado.get("n_sem_dado"):
