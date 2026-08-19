@@ -466,7 +466,9 @@ def _card_ponto_ndvi(pid, v):
 
 # Assinaturas de NDVI HIPOTÉTICAS (ilustrativas) de cada classe ao longo do ano,
 # para o usuário reconhecer o padrão. Valores Jan..Dez; cores da classificação.
-MESES_ABREV = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
+# O gráfico de exemplo repete estes 12 meses por alguns anos (o padrão sazonal
+# se repete), pra casar com o gráfico real, que é multianual (2019..atual).
+ANOS_EXEMPLO = 3
 EXEMPLOS_NDVI = [
     ("Lavoura anual", CORES[1],
      [0.85, 0.80, 0.55, 0.30, 0.20, 0.18, 0.17, 0.18, 0.28, 0.50, 0.72, 0.85],
@@ -492,20 +494,25 @@ EXEMPLOS_NDVI = [
 
 def _mini_grafico_exemplo(nome, cor, valores):
     r, g, b = _hex_rgb(cor)
-    # Eixo X numérico (0..11) — usar as letras direto como categoria embaralha a
-    # linha, porque meses repetem letra (M=Mar/Mai, J=Jun/Jul, A=Abr/Ago) e o
-    # Plotly funde categorias de mesmo nome. As letras entram só como rótulo.
-    x = list(range(len(valores)))
+    n = len(valores)                      # 12 meses
+    y = valores * ANOS_EXEMPLO            # repete o padrão sazonal por vários anos
+    x = list(range(len(y)))
     fig = go.Figure(go.Scatter(
-        x=x, y=valores, mode="lines",
+        x=x, y=y, mode="lines",
         line=dict(color=cor, width=2.5),
         fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.18)", hoverinfo="skip",
     ))
+    # separadores pontilhados entre os anos, pra deixar claro que o padrão
+    # se repete a cada ano (como no gráfico real, multianual)
+    for k in range(1, ANOS_EXEMPLO):
+        fig.add_vline(x=k * n - 0.5, line=dict(color="#ddd", width=1, dash="dot"))
     fig.update_layout(
         height=120, margin=dict(l=6, r=6, t=6, b=4),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
         yaxis=dict(range=[-0.15, 1.0], showticklabels=False, showgrid=False, zeroline=False),
-        xaxis=dict(showgrid=False, tickmode="array", tickvals=x, ticktext=MESES_ABREV,
+        xaxis=dict(showgrid=False, tickmode="array",
+                   tickvals=[k * n + n / 2 - 0.5 for k in range(ANOS_EXEMPLO)],
+                   ticktext=[f"ano {k + 1}" for k in range(ANOS_EXEMPLO)],
                    tickfont=dict(size=9, color="#999")),
     )
     return fig
@@ -528,8 +535,9 @@ def _guia_ndvi():
             "| 0,8 – 1,0 | Floresta densa / cultura no pico |\n"
         )
 
-        st.markdown("**Assinaturas típicas ao longo do ano** (curvas ilustrativas — "
-                    "compare com o formato da sua):")
+        st.markdown("**Assinaturas típicas ao longo de vários anos** (curvas "
+                    "ilustrativas — o padrão sazonal **se repete a cada ano**, como "
+                    "no seu gráfico; compare o formato):")
         # Um exemplo por linha (gráfico à esquerda, texto à direita): legível
         # mesmo com a janela estreita/lateral, onde 3 colunas ficariam espremidas.
         for nome, cor, vals, desc in EXEMPLOS_NDVI:
@@ -545,6 +553,12 @@ def _guia_ndvi():
                 f"border:1px solid #999;display:inline-block;'></span>{nome}</div>",
                 unsafe_allow_html=True)
             c_txt.caption(desc)
+
+        st.caption("🌎 As curvas seguem o regime do **Cerrado / Centro-Oeste** "
+                   "(seca mai–set). O **formato** vale em boa parte do Brasil agrícola, "
+                   "mas o *timing* e a amplitude deslocam em outros biomas — na "
+                   "**Caatinga**, por exemplo, a vegetação nativa é caducifólia e "
+                   "**cai muito na seca** (não fica alta e estável como acima).")
 
         st.caption("⚠️ As curvas acima são **ilustrativas** (não são dados reais) — "
                    "servem só para reconhecer o padrão. Buracos na sua linha = mês sem "
