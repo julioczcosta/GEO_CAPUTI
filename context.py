@@ -51,7 +51,7 @@ def consultar_camadas_extras(lat, lon):
     
 # --- RENDERIZAÇÃO DA ABA ---
 def render_tab():
-    st.markdown("### 📚 Contexto Territorial")
+    st.markdown("### 🌎 Contexto Territorial")
     
     geometry = st.session_state.get('current_geometry')
     source_name = st.session_state.get('source_name', 'Desconhecido')
