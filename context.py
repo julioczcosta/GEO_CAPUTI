@@ -1,5 +1,6 @@
 import streamlit as st
 import utils
+import ui
 import ee
 import requests
 
@@ -127,7 +128,7 @@ def render_tab():
         # ==========================================
         with col1:
             # --- DADOS POLÍTICOS ---
-            st.subheader("🏛️ Dados Político-Administrativos")
+            ui.secao("🏛️ Dados Político-Administrativos")
             if "erro" in dados_ibge:
                 st.error(f"{dados_ibge['erro']}")
             else:
@@ -164,7 +165,7 @@ def render_tab():
 
             # --- LOGÍSTICA ---
             st.write("")
-            st.subheader("🛣️ Logística (Sede ➔ Capital)")
+            ui.secao("🛣️ Logística (Sede ➔ Capital)")
             with st.container(border=True):
                 if "erro" in dados_rota:
                     st.warning(f"{dados_rota['erro']}")
@@ -187,7 +188,7 @@ def render_tab():
         # ==========================================
         with col2:
             # --- MEIO AMBIENTE ---
-            st.subheader("🌿 Enquadramento Ambiental")
+            ui.secao("🌿 Enquadramento Ambiental")
             with st.container(border=True):
                 bioma_raw = dados_extras['bioma']
                 bioma_display = bioma_raw.title() if bioma_raw else "Não Identificado"
@@ -213,7 +214,7 @@ def render_tab():
 
             # --- HIDROGRAFIA ---
             st.write("")
-            st.subheader("💧 Hidrografia")
+            ui.secao("💧 Hidrografia")
             with st.container(border=True):
                 if "erro" in dados_bacia:
                     st.warning(f"{dados_bacia['erro']}")
@@ -226,7 +227,7 @@ def render_tab():
 
             # --- ARMAZENAGEM ---
             st.write("")
-            st.subheader("🏭 Armazenagem (raio de 100 km)")
+            ui.secao("🏭 Armazenagem (raio de 100 km)")
             with st.container(border=True):
                 dados_arm = utils.get_armazens_proximos(lat_dec, lon_dec, raio_km=100)
                 if "erro" in dados_arm:
@@ -242,7 +243,7 @@ def render_tab():
         # BLOCO INFERIOR: REDAÇÃO DO LAUDO (Largura Total)
         # ==========================================
         st.divider()
-        st.subheader("📝 Resumo")
+        ui.secao("📝 Resumo")
         
         distancia_real = dados_rota.get('distancia_km', 0) if "erro" not in dados_rota else 0
         altitude_real = dados_altimetria.get('media', 0) if "erro" not in dados_altimetria else "N/A"
