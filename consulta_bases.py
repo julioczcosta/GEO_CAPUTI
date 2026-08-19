@@ -284,35 +284,35 @@ def render_tab():
                         f"**Área:** {area_val}"
                     ]
 
-                c_tit, c_down = st.columns([3, 1])
-                with c_tit:
+                # Detalhe LADO A LADO: dados/baixar à esquerda, mapa à direita
+                # (antes o mapa ficava empilhado abaixo das informações).
+                c_info, c_mapa = st.columns([0.42, 0.58], gap="medium")
+
+                with c_info:
                     st.markdown(f"##### 📍 {titulo}")
-                with c_down:
-                    with st.popover("📥 Baixar Arquivos", use_container_width=True):
+                    for info in infos:
+                        st.markdown(info)
+                    st.write("")
+                    with st.popover("📥 Baixar arquivos", use_container_width=True):
                         gdf_sel = gdf.iloc[[idx]]
-                        
+
                         kml_result = gerar_kml_perimetro(gdf_sel, cod_dl)
-                        
                         if isinstance(kml_result, bytes):
                             st.download_button("🌍 KML", data=kml_result, file_name=f"{cod_dl}.kml", use_container_width=True)
                         else:
                             st.error(f"Erro KML: {kml_result}")
-                        
+
                         shp_data = gerar_shp_perimetro(gdf_sel, cod_dl)
-                        if shp_data: 
+                        if shp_data:
                             st.download_button("🗺️ SHP (ZIP)", data=shp_data, file_name=f"{cod_dl}.zip", use_container_width=True)
 
-                cols_info = st.columns(len(infos))
-                for i, info in enumerate(infos):
-                    cols_info[i].markdown(info)
-
-                st.write("") 
-                m = folium.Map(location=[row.geometry.centroid.y, row.geometry.centroid.x], zoom_start=13, tiles="Esri World Imagery")
-                folium.GeoJson(
-                    row.geometry, 
-                    style_function=lambda x: {'color': '#FFFF00', 'weight': 3, 'fillOpacity': 0.0}
-                ).add_to(m)
-                st_folium(m, height=450, use_container_width=True, key="map_incra_wide_v7")
+                with c_mapa:
+                    m = folium.Map(location=[row.geometry.centroid.y, row.geometry.centroid.x], zoom_start=13, tiles="Esri World Imagery")
+                    folium.GeoJson(
+                        row.geometry,
+                        style_function=lambda x: {'color': '#FFFF00', 'weight': 3, 'fillOpacity': 0.0}
+                    ).add_to(m)
+                    st_folium(m, height=430, use_container_width=True, key="map_incra_wide_v7")
         
         else:
             st.info("👆 Selecione um imóvel na lista para ver o mapa e baixar.")
