@@ -865,7 +865,7 @@ def render_tab():
     # --- Verifica imóvel carregado ---
     gdf_imovel = st.session_state.get('gdf_imovel')
     if gdf_imovel is None or not isinstance(gdf_imovel, gpd.GeoDataFrame) or gdf_imovel.empty:
-        st.warning("⚠️ Nenhum imóvel carregado. Vá para a aba **Início**, faça o upload e clique em 'Usar Este Perímetro'.")
+        ui.vazio()
         return
 
     codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')

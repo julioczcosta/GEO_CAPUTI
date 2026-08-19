@@ -161,8 +161,7 @@ def render_tab():
             break
 
     if gdf_alvo is None:
-        st.warning("⚠️ Nenhum imóvel identificado.")
-        st.markdown("Vá para a aba **Início**, faça o upload e clique em 'Usar Este Perímetro'.")
+        ui.vazio()
         return
         
     # =======================================================

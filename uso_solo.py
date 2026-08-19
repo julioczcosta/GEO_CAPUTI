@@ -201,8 +201,7 @@ def render_tab():
 
     gdf_imovel = st.session_state.get("gdf_imovel")
     if gdf_imovel is None or gdf_imovel.empty:
-        st.info("📍 Carregue um imóvel na aba **Início** primeiro. As análises são "
-                "feitas sobre o perímetro selecionado lá.")
+        ui.vazio()
         return
 
     ui.barra_imovel()

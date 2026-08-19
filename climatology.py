@@ -315,7 +315,7 @@ def render_tab():
     source_name = st.session_state.get("source_name", "Desconhecido")
 
     if not geometry:
-        st.warning("⚠️ Selecione um imóvel na aba 'Início' primeiro.")
+        ui.vazio()
         return
 
     ui.barra_imovel(nome=source_name)

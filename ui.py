@@ -38,6 +38,25 @@ def secao(titulo):
     )
 
 
+def vazio(msg=None):
+    """Estado vazio padrão: nenhum imóvel carregado. Mesma mensagem/estilo em
+    todas as abas de análise (antes cada uma usava um warning/info diferente)."""
+    if msg is None:
+        msg = ("Carregue um imóvel na aba **Início** para começar. As análises "
+               "são feitas sobre o perímetro selecionado lá.")
+    st.info("📍 " + msg)
+
+
+def erro(msg, detalhe=None):
+    """Mensagem de erro padrão. Mostra o que aconteceu e, se houver, o
+    **detalhe técnico** (para reportar / diagnosticar) — em vez de sumir a
+    informação ou estourar um traceback."""
+    texto = "⚠️ " + msg
+    if detalhe:
+        texto += f"\n\n**Detalhe técnico:** `{detalhe}`"
+    st.error(texto)
+
+
 def _br_num(valor, dec=2):
     try:
         return f"{float(valor):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
