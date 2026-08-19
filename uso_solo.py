@@ -639,10 +639,15 @@ def _render_ndvi(gdf_imovel):
         if ano_fim < ano_ini:
             st.warning("O ano final deve ser maior ou igual ao inicial.")
         else:
-            with st.spinner("Calculando NDVI no Earth Engine..."):
+            with st.spinner("Calculando NDVI e precipitação no Earth Engine..."):
                 dados = infer.ndvi_serie_mensal(pontos, ano_ini, ano_fim)
+                try:
+                    precip = infer.precip_serie_mensal(
+                        ee.Geometry(mapping(geom)), ano_ini, ano_fim)
+                except Exception:
+                    precip = {"meses": [], "precip": []}
             st.session_state["ndvi_result"] = {
-                "dados": dados, "n": len(pontos),
+                "dados": dados, "precip": precip, "n": len(pontos),
                 "chave": f"{[tuple(p) for p in pontos]}|{ano_ini}|{ano_fim}",
             }
 
@@ -676,7 +681,19 @@ def _render_ndvi(gdf_imovel):
 
     st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
 
+    precip_vals = (res.get("precip") or {}).get("precip")
+    tem_precip = bool(precip_vals and len(precip_vals) == len(meses)
+                      and any(v is not None for v in precip_vals))
+
     fig = go.Figure()
+    if tem_precip:
+        # Barras de chuva ao FUNDO (eixo direito), como pano de fundo para
+        # comparar o vigor com a precipitação — média na região do imóvel.
+        fig.add_trace(go.Bar(
+            x=meses, y=precip_vals, name="Precipitação (mm)", yaxis="y2",
+            marker_color="rgba(64,120,200,0.22)", marker_line_width=0,
+            hovertemplate="%{y:.0f} mm",
+        ))
     for pid, serie in series.items():
         cor = CORES_PONTOS[pid % len(CORES_PONTOS)]
         fig.add_trace(go.Scatter(
@@ -685,13 +702,26 @@ def _render_ndvi(gdf_imovel):
             connectgaps=False, hovertemplate="%{y:.2f}",
         ))
     fig.add_vline(x=mes_ref, line=dict(color="#8899aa", dash="dot"))
-    fig.update_layout(
+    layout = dict(
         height=380, margin=dict(l=20, r=20, t=20, b=20),
-        yaxis_title="NDVI", yaxis_range=[-0.05, 1.0], hovermode="x unified",
+        yaxis=dict(title="NDVI", range=[-0.05, 1.0]),
+        hovermode="x unified", barmode="overlay",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
+    if tem_precip:
+        maxp = max(v for v in precip_vals if v is not None) or 1
+        # eixo da chuva "espremido" (2,2x o máximo) -> as barras ficam na metade
+        # de baixo, como backdrop sutil sem competir com as linhas de NDVI.
+        layout["yaxis2"] = dict(
+            title="Precipitação (mm)", overlaying="y", side="right",
+            showgrid=False, rangemode="tozero", range=[0, maxp * 2.2],
+        )
+    fig.update_layout(**layout)
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Fonte: Sentinel-2 (10 m), nuvens mascaradas (CLOUD_SCORE_PLUS). "
-               "Média mensal de NDVI · buracos na linha = mês sem imagem limpa.")
+    fonte = ("Fonte: Sentinel-2 (10 m), nuvens mascaradas (CLOUD_SCORE_PLUS). "
+             "Média mensal de NDVI · buracos na linha = mês sem imagem limpa.")
+    if tem_precip:
+        fonte += " Barras: precipitação CHIRPS (média na região do imóvel)."
+    st.caption(fonte)
 
     _guia_ndvi()

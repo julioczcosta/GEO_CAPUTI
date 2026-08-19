@@ -383,3 +383,57 @@ def ndvi_serie_mensal(pontos_lonlat, ano_ini, ano_fim):
                 series[pid][k] = round(float(val), 3)
 
     return {"meses": rotulos, "series": series}
+
+
+def precip_serie_mensal(geom_ee, ano_ini, ano_fim):
+    """Série mensal de precipitação (CHIRPS) média na REGIÃO do imóvel.
+
+    Uma única série (não por ponto): a chuva é regional, então basta a média
+    da área — o que também é rápido (um único reduceRegion multi-banda).
+    Alinha aos mesmos meses de `ndvi_serie_mensal` para sobrepor no gráfico.
+
+    Retorna: {"meses": ["2019-01", ...], "precip": [mm_ou_None por mês]}.
+    """
+    from datetime import date
+
+    hoje = date.today()
+    meses = []
+    for y in range(int(ano_ini), int(ano_fim) + 1):
+        for m in range(1, 13):
+            if y == hoje.year and m > hoje.month:
+                break
+            meses.append((y, m))
+    rotulos = [f"{y:04d}-{m:02d}" for (y, m) in meses]
+    if not meses:
+        return {"meses": [], "precip": []}
+
+    chirps = ee.ImageCollection("UCSB-CHG/CHIRPS/PENTAD").select("precipitation")
+    datas = ee.List([ee.Date.fromYMD(int(y), int(m), 1) for (y, m) in meses])
+
+    def total_mes(d):
+        d = ee.Date(d)
+        col = chirps.filterDate(d, d.advance(1, "month"))
+        # If garante 1 banda por mês mesmo quando não há dado (mês atual, que o
+        # CHIRPS ainda não publicou) — senão o mês vazio some e o toBands/rename
+        # quebra por contagem de bandas. Mês sem dado vira None (buraco).
+        return ee.Image(ee.Algorithms.If(
+            col.size().gt(0),
+            col.sum(),
+            ee.Image.constant(0).updateMask(ee.Image.constant(0)),
+        )).rename("precipitation")
+
+    bandas = [f"m{y:04d}_{m:02d}" for (y, m) in meses]
+    stack = ee.ImageCollection(datas.map(total_mes)).toBands().rename(bandas)
+    try:
+        vals = stack.reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=geom_ee, scale=5000,
+            bestEffort=True, maxPixels=1e13,
+        ).getInfo()
+    except Exception:
+        return {"meses": rotulos, "precip": [None] * len(rotulos)}
+
+    precip = []
+    for b in bandas:
+        v = vals.get(b)
+        precip.append(round(float(v), 1) if v is not None else None)
+    return {"meses": rotulos, "precip": precip}
