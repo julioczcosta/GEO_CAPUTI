@@ -218,51 +218,61 @@ def render_tab():
 
     # --- EXIBIÇÃO ---
     if st.session_state['impedimentos_done']:
-        st.divider()
         resultados = st.session_state['impedimentos_results']
-        encontrou_algum = any(r["status"] for r in resultados)
+        hits = [r for r in resultados if r["status"]]
+        n_hits = len(hits)
 
-        # 1. CHECKLIST
-        st.markdown("#### Checklist de Verificação")
-        c1, c2, c3 = st.columns(3)
-        cols_grid = [c1, c2, c3]
-        
-        for i, item in enumerate(resultados):
-            col_atual = cols_grid[i % 3]
+        st.divider()
+
+        # Resumo com severidade no topo (a resposta principal aparece primeiro).
+        if n_hits == 0:
+            st.success("✅ **Nada consta** — nenhuma sobreposição nas bases consultadas.")
+        else:
+            st.error(f"⚠️ **{n_hits} sobreposição(ões)** encontrada(s) — veja o detalhamento abaixo.")
+
+        def _badge(item):
             if item["status"]:
-                col_atual.markdown(
-                    f"""<div style="background-color:#ffe6e6;padding:8px;border-radius:5px;border-left:4px solid #ff4b4b;margin-bottom:8px;font-size:14px;">
-                    ❌ <b>{item['nome']}</b></div>""", unsafe_allow_html=True
-                )
-            else:
-                col_atual.markdown(
-                    f"""<div style="background-color:#e6ffec;padding:8px;border-radius:5px;border-left:4px solid #28a745;margin-bottom:8px;font-size:14px;color:#155724;">
-                    ✅ <b>{item['nome']}</b></div>""", unsafe_allow_html=True
-                )
+                return ('<div style="background-color:#ffe6e6;padding:8px 10px;border-radius:6px;'
+                        'border-left:4px solid #ff4b4b;margin-bottom:8px;font-size:14px;">'
+                        f'❌ <b>{item["nome"]}</b></div>')
+            return ('<div style="background-color:#e6ffec;padding:8px 10px;border-radius:6px;'
+                    'border-left:4px solid #28a745;margin-bottom:8px;font-size:14px;color:#155724;">'
+                    f'✅ <b>{item["nome"]}</b></div>')
 
-        # 2. MAPA
-        if encontrou_algum:
-            st.markdown("---")
-            st.markdown("#### Localização das Sobreposições")
-            
-            if gdf_alvo.crs != WFS_CRS: gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
-            
-            # Agora aqui o KML já está limpo e não vai dar erro
-            centro = [gdf_alvo.unary_union.centroid.y, gdf_alvo.unary_union.centroid.x]
-            
-            m = folium.Map(location=centro, zoom_start=12, tiles="Esri World Imagery")
-            
-            folium.GeoJson(
-                gdf_alvo, name="Imóvel",
-                style_function=lambda x: {'color': '#00FFFF', 'fillColor': '#00FFFF', 'fillOpacity': 0.1, 'weight': 2}
-            ).add_to(m)
+        # Sem sobreposição: só o checklist (tudo verde), num painel rolável.
+        if n_hits == 0:
+            with st.container(border=True, height=430):
+                st.markdown("##### Checklist de verificação")
+                st.markdown("".join(_badge(r) for r in resultados), unsafe_allow_html=True)
+            return
 
-            for item in resultados:
-                if item["status"]:
+        # Com sobreposição: checklist e mapa LADO A LADO (painéis de altura fixa),
+        # e o detalhamento em ABAS (uma por fonte) em vez de uma pilha de tabelas.
+        col_check, col_mapa = st.columns([0.42, 0.58], gap="medium")
+
+        with col_check:
+            with st.container(border=True, height=470):
+                st.markdown("##### Checklist de verificação")
+                st.markdown("".join(_badge(r) for r in resultados), unsafe_allow_html=True)
+
+        with col_mapa:
+            with st.container(border=True, height=470):
+                st.markdown("##### Localização das sobreposições")
+
+                if gdf_alvo.crs != WFS_CRS:
+                    gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
+                centro = [gdf_alvo.unary_union.centroid.y, gdf_alvo.unary_union.centroid.x]
+
+                m = folium.Map(location=centro, zoom_start=12, tiles="Esri World Imagery")
+                folium.GeoJson(
+                    gdf_alvo, name="Imóvel",
+                    style_function=lambda x: {'color': '#00FFFF', 'fillColor': '#00FFFF', 'fillOpacity': 0.1, 'weight': 2}
+                ).add_to(m)
+
+                for item in hits:
                     gdf_draw = item["dados"].copy()
-                    
                     is_point = gdf_draw.geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
-                    
+
                     for col in gdf_draw.columns:
                         if col == 'area_ha_sobreposta' and not is_point:
                             gdf_draw[col] = gdf_draw[col].round(4)
@@ -270,42 +280,29 @@ def render_tab():
                             gdf_draw[col] = gdf_draw[col].astype(str)
 
                     aliases_map = {k: v for k, v in COLUMN_ALIASES.items() if k in gdf_draw.columns}
-                    
                     cols_tooltip = [c for c in gdf_draw.columns if c not in ['geometry', 'geom_original']]
                     if is_point and 'area_ha_sobreposta' in cols_tooltip:
                         cols_tooltip.remove('area_ha_sobreposta')
-                    
                     tooltips_aliased = [aliases_map.get(c, c) for c in cols_tooltip]
-                    
+
                     folium.GeoJson(
                         gdf_draw, name=item["nome"],
                         style_function=lambda x, c=item["cor"]: {'color': c, 'fillColor': c, 'fillOpacity': 0.5, 'weight': 1},
                         tooltip=folium.GeoJsonTooltip(
-                            fields=cols_tooltip[:5], 
-                            aliases=tooltips_aliased[:5], 
-                            sticky=True
+                            fields=cols_tooltip[:5], aliases=tooltips_aliased[:5], sticky=True
                         ) if cols_tooltip else None
                     ).add_to(m)
-            
-            folium.LayerControl().add_to(m)
-            st_folium(m, height=500, use_container_width=True)
 
-            # 3. TABELAS DETALHADAS
-            st.markdown("---")
-            st.markdown("#### Detalhamento Técnico")
-            for item in resultados:
-                if item["status"]:
-                    with st.expander(f"🔴 {item['nome']} (Ver Detalhes)", expanded=True):
-                        df_show = pd.DataFrame(item["dados"].drop(columns=['geometry'], errors='ignore'))
-                        
-                        is_point_table = item["dados"].geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
-                        if is_point_table and 'area_ha_sobreposta' in df_show.columns:
-                            df_show = df_show.drop(columns=['area_ha_sobreposta'])
-                        
-                        df_show = df_show.rename(columns=COLUMN_ALIASES)
-                        
-                        st.dataframe(df_show, use_container_width=True, hide_index=True)
-        
-        else:
-            st.markdown("---")
-            st.success("Nada Consta: Nenhuma sobreposição encontrada nas bases consultadas.")
+                folium.LayerControl().add_to(m)
+                st_folium(m, height=400, use_container_width=True, key="imp_map")
+
+        st.markdown("##### Detalhamento técnico")
+        abas = st.tabs([f"🔴 {h['nome']}" for h in hits])
+        for aba, item in zip(abas, hits):
+            with aba:
+                df_show = pd.DataFrame(item["dados"].drop(columns=['geometry'], errors='ignore'))
+                is_point_table = item["dados"].geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
+                if is_point_table and 'area_ha_sobreposta' in df_show.columns:
+                    df_show = df_show.drop(columns=['area_ha_sobreposta'])
+                df_show = df_show.rename(columns=COLUMN_ALIASES)
+                st.dataframe(df_show, use_container_width=True, hide_index=True)
