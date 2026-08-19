@@ -195,7 +195,6 @@ def _selecionar_bloco(gdf_imovel):
 
 
 def render_tab():
-    st.markdown("### Uso do Solo")
     st.warning("🧪 **Versão de testes.** Resultados experimentais, apenas para apoio "
                "— não use em laudo. A técnica ainda está em ajuste.")
 

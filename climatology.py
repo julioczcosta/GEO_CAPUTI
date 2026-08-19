@@ -309,8 +309,6 @@ def plotar_precipitacao(df):
 
 
 def render_tab():
-    st.markdown("### 🌦️ Climatologia")
-
     geometry = st.session_state.get("current_geometry")
     source_name = st.session_state.get("source_name", "Desconhecido")
 
