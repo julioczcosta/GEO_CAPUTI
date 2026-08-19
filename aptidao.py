@@ -826,7 +826,7 @@ def render_tab():
 
     st_folium(
         m,
-        height=550,
+        height=ui.MAPA_H_INTER,
         use_container_width=True,
         returned_objects=[],
         key="mapa_aptidao"

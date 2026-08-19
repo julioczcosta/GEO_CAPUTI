@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import folium
+import ui
 from streamlit_folium import st_folium
 import ssl
 from requests.adapters import HTTPAdapter
@@ -288,7 +289,7 @@ def render_tab():
                 )
             ).add_to(m)
             
-            st_folium(m, width="100%", height=600)
+            st_folium(m, width="100%", height=ui.MAPA_H_INTER)
             
         except Exception as e:
             st.error(f"Erro ao processar dados: {e}")

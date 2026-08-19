@@ -1249,7 +1249,7 @@ def render_tab():
 
         # Key dinâmica força re-mount limpo do mapa
         map_key = f"mapa_conf_{len(gdf_res)}"
-        st_folium(m, height=540, use_container_width=True, key=map_key)
+        st_folium(m, height=ui.MAPA_H_INTER, use_container_width=True, key=map_key)
 
     with col_tabela:
         ui.secao("Registros Encontrados")
