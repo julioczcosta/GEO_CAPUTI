@@ -205,6 +205,8 @@ def render_tab():
                 "feitas sobre o perímetro selecionado lá.")
         return
 
+    ui.barra_imovel()
+
     tab_classe, tab_ndvi = st.tabs(["📊 Classificação", "🌱 NDVI (vigor)"])
     with tab_classe:
         _render_classificacao(gdf_imovel)

@@ -78,8 +78,8 @@ def render_tab():
     # ==========================================
     # BLOCO SUPERIOR: LOCALIZAÇÃO (Largura Total)
     # ==========================================
-    st.markdown(f"**Imóvel Analisado:** {source_name}")
-    
+    ui.barra_imovel(nome=source_name)
+
     with st.spinner("Mapeando intersecção municipal..."):
         chave_unica = f"{source_name}_{lat_dec}_{lon_dec}"
         dados_muns = utils.obter_municipios_interseccao(geometry, chave_unica)

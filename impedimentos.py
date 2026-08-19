@@ -172,7 +172,7 @@ def render_tab():
     gdf_alvo = corrigir_geometrias(gdf_alvo)
 
     codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
-    st.info(f"Analisando perímetro: **{codigo_display}**")
+    ui.barra_imovel(nome=codigo_display)
 
     if 'impedimentos_done' not in st.session_state: st.session_state['impedimentos_done'] = False
     if 'impedimentos_results' not in st.session_state: st.session_state['impedimentos_results'] = []

@@ -869,6 +869,7 @@ def render_tab():
         return
 
     codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
+    ui.barra_imovel(nome=codigo_display)
 
     # --- Seletor de fonte ---
     fonte_sel = st.radio(
@@ -883,16 +884,8 @@ def render_tab():
     # --- Painel de ação ---
     col_info, col_btn = st.columns([2.2, 1], vertical_alignment="center")
     with col_info:
-        st.markdown(f"""
-            <div style="background:#f8f9fa;padding:12px 16px;border-radius:8px;border:1px solid #e9ecef;">
-                <div style="font-size:0.78rem;color:#6c757d;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">
-                    Imóvel em Análise
-                </div>
-                <div style="font-size:0.95rem;color:#2C3E50;font-weight:600;margin-top:4px;">
-                    {codigo_display}
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.caption("Busca imóveis (CAR/SIGEF/SNCI) que tocam ou se sobrepõem ao "
+                   "perímetro, na(s) UF(s) do imóvel.")
     with col_btn:
         rodar = st.button("🔍 Buscar Confrontantes", type="primary", use_container_width=True)
 

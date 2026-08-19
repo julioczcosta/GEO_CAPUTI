@@ -36,3 +36,45 @@ def secao(titulo):
         "letter-spacing:-.01em;'>" + titulo + "</span></div>",
         unsafe_allow_html=True,
     )
+
+
+def _br_num(valor, dec=2):
+    try:
+        return f"{float(valor):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(valor)
+
+
+def barra_imovel(nome=None, area_ha=None):
+    """Faixa padrão de 'imóvel ativo' no topo das abas de análise (item 3 da
+    auditoria). Mostra o imóvel + área. Lê do session_state se não vier por
+    parâmetro e NÃO faz rede (área calculada localmente do gdf) — assim pode
+    aparecer em toda aba sem custo. Não renderiza nada se não houver imóvel."""
+    if nome is None:
+        nome = st.session_state.get("last_code") or st.session_state.get("source_name")
+    if not nome:
+        return
+
+    if area_ha is None:
+        gdf = st.session_state.get("gdf_imovel")
+        if gdf is not None and getattr(gdf, "empty", True) is False:
+            try:
+                g = gdf if gdf.crs is not None else gdf.set_crs(4326)
+                area_ha = float(g.to_crs(5880).area.sum() / 1e4)
+            except Exception:
+                area_ha = None
+
+    area_txt = ""
+    if area_ha:
+        area_txt = (f"<span style='color:#5a6b62;font-size:.9rem;'>"
+                    f"· {_br_num(area_ha)} ha</span>")
+
+    st.markdown(
+        "<div style='display:flex;align-items:center;gap:10px;background:#eef5f0;"
+        f"border:1px solid #d7e6dd;border-left:4px solid {VERDE};border-radius:8px;"
+        "padding:8px 14px;margin:0 0 14px;'>"
+        "<span>📍</span>"
+        f"<span style='font-weight:650;color:{CHUMBO};'>{nome}</span>"
+        f"{area_txt}</div>",
+        unsafe_allow_html=True,
+    )

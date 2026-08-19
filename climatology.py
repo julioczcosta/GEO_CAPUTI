@@ -318,6 +318,8 @@ def render_tab():
         st.warning("⚠️ Selecione um imóvel na aba 'Início' primeiro.")
         return
 
+    ui.barra_imovel(nome=source_name)
+
     centroide = geometry.centroid(1).coordinates().getInfo()
     lon_dec, lat_dec = centroide[0], centroide[1]
 

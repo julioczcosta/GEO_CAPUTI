@@ -4,6 +4,7 @@ import geemap.foliumap as geemap
 import io
 import streamlit.components.v1 as components
 import utils
+import ui
 from datetime import datetime
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
@@ -16,6 +17,8 @@ def render_tab():
     if not geometry:
         st.warning("⚠️ Por favor, selecione um imóvel na aba '🏠 Início' primeiro.")
         return
+
+    ui.barra_imovel(nome=source_name)
 
     # ==========================================
     # 🧹 FAXINA AUTOMÁTICA
