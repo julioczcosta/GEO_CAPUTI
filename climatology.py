@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import io
 import utils
+import ui
 
 # ==========================================
 # 0. CONFIGURAÇÕES E UTILITÁRIOS
@@ -480,7 +481,7 @@ def render_tab():
     # ----------------------------------------------------------
     with col_temp:
         with st.container(border=True, height=585):
-            st.subheader("🌡️ Temperatura")
+            ui.secao("🌡️ Temperatura")
             st.markdown("**Médias históricas mensais — ERA5/ECMWF**")
 
             if df_temp_resumo is not None and not df_temp_resumo.empty:
@@ -515,7 +516,7 @@ def render_tab():
     # ----------------------------------------------------------
     with col_rain:
         with st.container(border=True, height=585):
-            st.subheader("☔ Precipitação")
+            ui.secao("☔ Precipitação")
             st.markdown("**Médias históricas mensais — CHIRPS 0,05°**")
 
             if df_rain_resumo is not None and not df_rain_resumo.empty:
@@ -547,7 +548,7 @@ def render_tab():
     # Resumo para laudo técnico
     # ----------------------------------------------------------
     st.divider()
-    st.subheader("📝 Resumo Climatológico")
+    ui.secao("📝 Resumo Climatológico")
 
     texto_laudo = gerar_resumo_climatologico(
         area_label=area_label,

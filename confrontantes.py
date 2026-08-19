@@ -6,6 +6,7 @@ import folium
 import time
 import io
 import utils
+import ui
 import xml.etree.ElementTree as ET
 from streamlit_folium import st_folium
 from shapely.geometry import shape, Polygon
@@ -1251,7 +1252,7 @@ def render_tab():
         st_folium(m, height=540, use_container_width=True, key=map_key)
 
     with col_tabela:
-        st.markdown("##### Registros Encontrados")
+        ui.secao("Registros Encontrados")
         st.caption("Selecione uma linha para ver detalhes e baixar")
 
         # Botão de download completo (imóvel + todos)
@@ -1471,7 +1472,7 @@ def render_tab():
     gdf_proprio = st.session_state.get('confrontantes_proprio')
     if gdf_proprio is not None and not gdf_proprio.empty:
         st.markdown("---")
-        st.markdown("#### 📌 Registros do Próprio Imóvel")
+        ui.secao("📌 Registros do Próprio Imóvel")
         st.caption(
             "Imóveis das bases que coincidem com o perímetro analisado "
             "(o próprio imóvel cadastrado). Útil para confirmar/validar o registro."

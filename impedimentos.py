@@ -3,6 +3,7 @@ import geopandas as gpd
 import pandas as pd
 import requests
 import folium
+import ui
 from streamlit_folium import st_folium
 from io import BytesIO
 import math
@@ -242,7 +243,7 @@ def render_tab():
         # Sem sobreposição: só o checklist (tudo verde), num painel rolável.
         if n_hits == 0:
             with st.container(border=True, height=430):
-                st.markdown("##### Checklist de verificação")
+                ui.secao("Checklist de verificação")
                 st.markdown("".join(_badge(r) for r in resultados), unsafe_allow_html=True)
             return
 
@@ -252,12 +253,12 @@ def render_tab():
 
         with col_check:
             with st.container(border=True, height=470):
-                st.markdown("##### Checklist de verificação")
+                ui.secao("Checklist de verificação")
                 st.markdown("".join(_badge(r) for r in resultados), unsafe_allow_html=True)
 
         with col_mapa:
             with st.container(border=True, height=470):
-                st.markdown("##### Localização das sobreposições")
+                ui.secao("Localização das sobreposições")
 
                 if gdf_alvo.crs != WFS_CRS:
                     gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
@@ -296,7 +297,7 @@ def render_tab():
                 folium.LayerControl().add_to(m)
                 st_folium(m, height=400, use_container_width=True, key="imp_map")
 
-        st.markdown("##### Detalhamento técnico")
+        ui.secao("Detalhamento técnico")
         abas = st.tabs([f"🔴 {h['nome']}" for h in hits])
         for aba, item in zip(abas, hits):
             with aba:

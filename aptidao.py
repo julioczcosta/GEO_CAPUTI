@@ -13,6 +13,7 @@ import io
 import time
 import requests
 import bs4
+import ui
 
 
 # ============================================================
@@ -862,7 +863,7 @@ def render_tab():
                 agri["nivel"] = agri["classe_norm"].apply(nivel_aptidao)
                 agri["%"] = agri["area_ha"].apply(_pct)
 
-            st.markdown("#### 📊 Resultados da Análise")
+            ui.secao("📊 Resultados da Análise")
 
             # ---------------- KPIs ----------------
             nivel_pred = nivel_aptidao(agri.iloc[0]["classe_norm"]) if not agri.empty else "—"
