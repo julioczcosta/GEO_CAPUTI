@@ -29,6 +29,7 @@ from shapely.geometry import mapping, shape, Point
 from PIL import Image
 
 import joblib
+import ui
 import classificador_consolidado  # noqa: F401 - necessario para o joblib desserializar
 import uso_solo_infer as infer
 
@@ -138,7 +139,7 @@ def _mapa_html(geom_outline, resultado):
 
     folium.GeoJson(
         mapping(geom_outline), name="Perímetro",
-        style_function=lambda _f: {"color": "#FF0000", "weight": 2, "fillOpacity": 0},
+        style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
     ).add_to(m)
 
     m.fit_bounds([[miny, minx], [maxy, maxx]])
@@ -565,7 +566,7 @@ def _render_ndvi(gdf_imovel):
                           tiles="Esri World Imagery", control_scale=True)
         folium.GeoJson(
             mapping(geom), name="Perímetro",
-            style_function=lambda _f: {"color": "#FF3B30", "weight": 2, "fillOpacity": 0},
+            style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
         ).add_to(fmap)
         for i, (lon, lat) in enumerate(pontos):
             cor = CORES_PONTOS[i % len(CORES_PONTOS)]

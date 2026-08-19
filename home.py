@@ -1,5 +1,6 @@
 import streamlit as st
 import utils
+import ui
 import geemap.foliumap as geemap
 import ee
 import streamlit.components.v1 as components
@@ -127,7 +128,7 @@ def render_tab():
                 
                 empty = ee.Image().byte()
                 outline = empty.paint(ee.FeatureCollection(st.session_state['preview_geometry']), 2, 3)
-                m.add_layer(outline, {'palette': 'FF0000'}, "Preview")
+                m.add_layer(outline, {'palette': ui.COR_PERIMETRO.lstrip('#')}, "Preview")
                 
                 with io.BytesIO() as buffer:
                     m.save(buffer, close_file=False)
