@@ -577,10 +577,15 @@ def _render_ndvi(gdf_imovel):
             ).add_to(fmap)
             folium.Marker(
                 [lat, lon],
-                icon=folium.DivIcon(html=(
-                    "<div style='font-size:11px;font-weight:700;color:#fff;"
-                    "text-align:center;line-height:18px;width:18px;'>"
-                    f"{i + 1}</div>")),
+                # icon_size/icon_anchor centram o número sobre a bolinha
+                # (o DivIcon ancora no canto sup.-esq. por padrão, deslocando-o).
+                icon=folium.DivIcon(
+                    icon_size=(18, 18),
+                    icon_anchor=(9, 9),
+                    html=(
+                        "<div style='font-size:11px;font-weight:700;color:#fff;"
+                        "text-align:center;line-height:18px;width:18px;height:18px;'>"
+                        f"{i + 1}</div>")),
             ).add_to(fmap)
         saida = st_folium(fmap, height=430, use_container_width=True,
                           key="ndvi_map", returned_objects=["last_clicked"])
