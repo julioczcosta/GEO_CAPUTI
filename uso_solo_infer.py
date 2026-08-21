@@ -437,3 +437,40 @@ def precip_serie_mensal(geom_ee, ano_ini, ano_fim):
         v = vals.get(b)
         precip.append(round(float(v), 1) if v is not None else None)
     return {"meses": rotulos, "precip": precip}
+
+
+# ==========================================================================
+#  MapBiomas (uso e cobertura do solo — referência, anual, 30 m)
+# ==========================================================================
+
+MAPBIOMAS_ASSET = ("projects/mapbiomas-public/assets/brazil/lulc/"
+                   "collection9/mapbiomas_collection90_integration_v1")
+
+
+def mapbiomas_anos():
+    """Anos disponíveis na coleção MapBiomas (lidos das bandas do asset)."""
+    bandas = ee.Image(MAPBIOMAS_ASSET).bandNames().getInfo()
+    return sorted(int(b.split("_")[-1]) for b in bandas
+                  if b.startswith("classification_"))
+
+
+def mapbiomas_areas(geom_ee, ano):
+    """Contagem de pixels por classe MapBiomas no imóvel, para o ano dado.
+
+    Server-side (frequencyHistogram) — rápido e sem download, escala p/ qualquer
+    área. Retorna {codigo_classe(int): n_pixels(int)}. O % por classe sai da
+    contagem; os hectares vêm da área real da geometria (como na classificação).
+    """
+    banda = f"classification_{int(ano)}"
+    hist = ee.Image(MAPBIOMAS_ASSET).select(banda).reduceRegion(
+        reducer=ee.Reducer.frequencyHistogram(), geometry=geom_ee, scale=30,
+        maxPixels=1e13, bestEffort=True,
+    ).getInfo().get(banda, {}) or {}
+
+    out = {}
+    for k, v in hist.items():
+        try:
+            out[int(k)] = int(round(float(v)))
+        except Exception:
+            continue
+    return out

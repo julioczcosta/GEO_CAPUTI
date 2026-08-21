@@ -57,6 +57,32 @@ NOMES_EXIBE = {
 # Cores distintas para os pontos de NDVI coletados (sub-aba NDVI).
 CORES_PONTOS = ["#e6194B", "#4363d8", "#3cb44b", "#f58231",
                 "#911eb4", "#008080", "#f032e6", "#9A6324"]
+
+# MapBiomas Coleção 9 — nomes e cores oficiais das classes comuns no Brasil.
+NOMES_MB = {
+    1: "Floresta", 3: "Formação Florestal", 4: "Formação Savânica", 5: "Mangue",
+    6: "Floresta Alagável", 9: "Silvicultura", 10: "Formação Natural não Florestal",
+    11: "Campo Alagado e Área Pantanosa", 12: "Formação Campestre",
+    13: "Outra Formação não Florestal", 15: "Pastagem", 18: "Agricultura",
+    19: "Lavoura Temporária", 20: "Cana", 21: "Mosaico de Usos",
+    22: "Área não Vegetada", 23: "Praia, Duna e Areal", 24: "Área Urbanizada",
+    25: "Outras Áreas não Vegetadas", 27: "Não Observado", 29: "Afloramento Rochoso",
+    30: "Mineração", 31: "Aquicultura", 32: "Apicum", 33: "Rio, Lago e Oceano",
+    35: "Dendê", 36: "Lavoura Perene", 39: "Soja", 40: "Arroz",
+    41: "Outras Lavouras Temporárias", 46: "Café", 47: "Citrus",
+    48: "Outras Lavouras Perenes", 62: "Algodão",
+}
+CORES_MB = {
+    1: "#32a65e", 3: "#1f8d49", 4: "#7dc975", 5: "#04381d", 6: "#026975",
+    9: "#7a5900", 10: "#d6bc74", 11: "#519799", 12: "#d6bc74", 13: "#d89f5c",
+    15: "#edde8e", 18: "#e974ed", 19: "#c27ba0", 20: "#db7093", 21: "#ffefc3",
+    22: "#d4271e", 23: "#ffa07a", 24: "#d4271e", 25: "#db4d4f", 27: "#ffffff",
+    29: "#ffaa5f", 30: "#9c0027", 31: "#091077", 32: "#fc8114", 33: "#2532e4",
+    35: "#9065d0", 36: "#f3b4f1", 39: "#f5b3c8", 40: "#c71585", 41: "#f54ca9",
+    46: "#d68fe2", 47: "#9932cc", 48: "#e6ccff", 62: "#ff69b4",
+}
+# Paleta indexada por código (0..máx) para renderizar o MapBiomas no mapa (ee).
+PALETA_MB_LISTA = [CORES_MB.get(c, "#bdbdbd") for c in range(max(CORES_MB) + 1)]
 # 2019..ano corrente. O ano corrente so tem a estacao seca (mai-set) COMPLETA
 # depois de 30/set; antes disso a classificacao daquele ano sai PRELIMINAR.
 ANOS = list(range(2019, date.today().year + 1))
@@ -205,9 +231,12 @@ def render_tab():
 
     ui.barra_imovel()
 
-    tab_classe, tab_ndvi = st.tabs(["📊 Classificação", "🌱 NDVI (vigor)"])
+    tab_classe, tab_mb, tab_ndvi = st.tabs(
+        ["📊 Classificação", "🗂️ MapBiomas", "🌱 NDVI (vigor)"])
     with tab_classe:
         _render_classificacao(gdf_imovel)
+    with tab_mb:
+        _render_mapbiomas(gdf_imovel)
     with tab_ndvi:
         _render_ndvi(gdf_imovel)
 
@@ -738,3 +767,128 @@ def _render_ndvi(gdf_imovel):
     st.caption(fonte)
 
     _guia_ndvi()
+
+
+# ==========================================================================
+#  SUB-ABA: MapBiomas (uso/cobertura de referência — anual, 30 m)
+# ==========================================================================
+
+def _mapa_mapbiomas_html(geom_shp, ano):
+    """HTML do mapa MapBiomas recortado no imóvel (tiles do GEE, sem download)."""
+    geom_ee = ee.Geometry(mapping(geom_shp))
+    minx, miny, maxx, maxy = geom_shp.bounds
+    m = geemap.Map(
+        center=[(miny + maxy) / 2, (minx + maxx) / 2], zoom=13, height=460,
+        draw_control=False, scale_control=False, fullscreen_control=False,
+        attribution_control=False, toolbar_control=False, lite_mode=True,
+    )
+    m.add_basemap("HYBRID")
+    img = (ee.Image(infer.MAPBIOMAS_ASSET)
+           .select(f"classification_{int(ano)}").clip(geom_ee))
+    m.add_layer(img, {"min": 0, "max": len(PALETA_MB_LISTA) - 1,
+                      "palette": PALETA_MB_LISTA}, "MapBiomas")
+    folium.GeoJson(
+        mapping(geom_shp), name="Perímetro",
+        style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
+    ).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+    with io.BytesIO() as buffer:
+        m.save(buffer, close_file=False)
+        return buffer.getvalue().decode("utf-8")
+
+
+# Cache das chamadas ao GEE: o st.tabs renderiza TODAS as sub-abas a cada
+# interação, então sem cache o MapBiomas bateria no GEE a cada rerun. Cacheado
+# por (imóvel|ano), só recalcula ao trocar o ano.
+@st.cache_data(show_spinner=False)
+def _mb_anos():
+    try:
+        return infer.mapbiomas_anos()
+    except Exception:
+        return list(range(1985, 2024))
+
+
+@st.cache_data(show_spinner=False)
+def _mb_areas(_geom_ee, ano, cache_id):
+    return infer.mapbiomas_areas(_geom_ee, ano)
+
+
+@st.cache_data(show_spinner=False)
+def _mb_mapa(_geom_shp, ano, cache_id):
+    return _mapa_mapbiomas_html(_geom_shp, ano)
+
+
+def _render_mapbiomas(gdf_imovel):
+    st.caption("Uso e cobertura do solo pelo **MapBiomas** (referência anual, 30 m). "
+               "Serve para comparar/validar a classificação do app.")
+
+    geom_shp = unary_union(gdf_imovel.geometry.values)
+    area_ha = float(gpd.GeoSeries([geom_shp], crs=gdf_imovel.crs)
+                    .to_crs(5880).area.iloc[0] / 1e4)
+    geom_ee = ee.Geometry(mapping(geom_shp))
+    nome_imovel = st.session_state.get("last_code", "imovel")
+
+    anos = _mb_anos()
+    c1, c2 = st.columns([0.35, 0.65], vertical_alignment="bottom")
+    with c1:
+        ano = st.selectbox("Ano MapBiomas", anos, index=len(anos) - 1, key="mb_ano")
+    with c2:
+        area_ref = st.number_input(
+            "Área de referência (matrícula/SIGEF), em ha — opcional",
+            min_value=0.0, value=0.0, step=0.0001, format="%.4f", key="mb_area_ref",
+            help="Se preenchida, mostra os hectares proporcionais a essa área.")
+
+    try:
+        contagem = _mb_areas(geom_ee, ano, f"{nome_imovel}|{ano}")
+    except Exception as e:
+        st.error(f"Não foi possível consultar o MapBiomas: {e}")
+        return
+
+    if not contagem:
+        st.warning("Sem dados do MapBiomas para este imóvel/ano.")
+        return
+
+    total = sum(contagem.values()) or 1
+    linhas = sorted(contagem.items(), key=lambda kv: -kv[1])
+
+    m1, m2 = st.columns(2)
+    m1.metric("Área calculada (perímetro)", f"{_br(area_ha, 4)} ha")
+    if area_ref and area_ref > 0:
+        m2.metric("Área de referência", f"{_br(area_ref, 4)} ha")
+
+    usar_ref = bool(area_ref and area_ref > 0)
+    thead = ("<tr><th style='text-align:left;'>Classe</th>"
+             "<th style='text-align:right;'>%</th>"
+             "<th style='text-align:right;'>Hectares</th>"
+             + ("<th style='text-align:right;'>Ha (referência)</th>" if usar_ref else "")
+             + "</tr>")
+    corpo = ""
+    for cod, n in linhas:
+        pct = n / total * 100.0
+        ha = area_ha * pct / 100.0
+        ha_ref = area_ref * pct / 100.0
+        cor = CORES_MB.get(cod, "#bdbdbd")
+        nome = NOMES_MB.get(cod, f"Classe {cod}")
+        swatch = (f"<span style='width:13px;height:13px;border-radius:3px;background:{cor};"
+                  "border:1px solid #999;display:inline-block;margin-right:8px;vertical-align:middle;'></span>")
+        corpo += ("<tr>"
+                  f"<td style='text-align:left;'>{swatch}{nome}</td>"
+                  f"<td style='text-align:right;'>{_br(pct, 2)}</td>"
+                  f"<td style='text-align:right;'>{_br(ha, 4)}</td>"
+                  + (f"<td style='text-align:right;'>{_br(ha_ref, 4)}</td>" if usar_ref else "")
+                  + "</tr>")
+    tabela = ("<table style='width:100%;border-collapse:collapse;font-size:0.92rem;'>"
+              f"<thead style='border-bottom:2px solid #2C3E50;'>{thead}</thead>"
+              f"<tbody>{corpo}</tbody></table>")
+
+    col_tab, col_mapa = st.columns([0.42, 0.58], gap="medium")
+    with col_tab:
+        st.markdown(tabela, unsafe_allow_html=True)
+    with col_mapa:
+        try:
+            st.components.v1.html(_mb_mapa(geom_shp, ano, f"{nome_imovel}|{ano}"), height=470)
+        except Exception:
+            st.caption("Mapa indisponível no momento.")
+
+    st.caption(f"Fonte: MapBiomas Coleção 9 ({ano}) · 30 m. Referência independente — "
+               "as classes e a resolução diferem da classificação do app.")
