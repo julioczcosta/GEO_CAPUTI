@@ -36,7 +36,9 @@ import uso_solo_infer as infer
 _MODELOS = os.path.join(os.path.dirname(__file__), "modelos")
 MODELO_PADRAO = os.path.join(_MODELOS, "modelo_uso_cerrado_v9.joblib")
 MODELO_SILVIC = os.path.join(_MODELOS, "modelo_uso_cerrado_v9_silvic.joblib")
+MODELO_MA = os.path.join(_MODELOS, "modelo_uso_ma_v8.joblib")  # piloto Mata Atlantica Sudeste
 COD_SILVICULTURA = 5
+COD_PERENE = 8  # lavoura perene / cafe (so no modelo da MA)
 
 # Paleta dos manuais (PyQGIS). "solo_exposto" e exibido como "Area aberta".
 CORES = {
@@ -48,10 +50,12 @@ CORES = {
     5: "#ff9a01",  # Silvicultura
     6: "#3f9571",  # Area aberta (solo exposto)
     7: "#091d61",  # Area de varzea
+    8: "#a05a2c",  # Lavoura perene / cafe (so na Mata Atlantica)
 }
 NOMES_EXIBE = {
     0: "Vegetação Nativa", 1: "Lavoura", 2: "Pastagem", 3: "Pastagem degradada",
     4: "Corpo d'água", 5: "Silvicultura", 6: "Área aberta", 7: "Área de várzea",
+    8: "Lavoura perene (café)",
 }
 
 # Cores distintas para os pontos de NDVI coletados (sub-aba NDVI).
@@ -113,6 +117,20 @@ def _cerrado_geom():
     """Poligono (simplificado) do bioma Cerrado, para avisar quando o imovel
     esta fora da area de treino do modelo. None se o arquivo faltar."""
     p = os.path.join(os.path.dirname(__file__), "dados", "cerrado.geojson")
+    try:
+        with open(p, encoding="utf-8") as f:
+            gj = json.load(f)
+        feats = gj.get("features")
+        return shape(feats[0]["geometry"]) if feats else shape(gj)
+    except Exception:
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def _ma_geom():
+    """Poligono (simplificado) da Mata Atlantica Sudeste (piloto MA). Define
+    quando usar o modelo da MA em vez do Cerrado. None se o arquivo faltar."""
+    p = os.path.join(os.path.dirname(__file__), "dados", "mata_atlantica_se.geojson")
     try:
         with open(p, encoding="utf-8") as f:
             gj = json.load(f)
@@ -245,13 +263,38 @@ def _render_classificacao(gdf_imovel):
     st.caption("Classificação automática de uso do solo do imóvel (Sentinel-2 + "
                "Random Forest), recortada ao perímetro.")
 
-    modo_silvic = st.checkbox(
-        "🌲 Modo silvicultura — ative para imóveis com reflorestamento",
-        value=False,
-        help="Detecta melhor a silvicultura (eucalipto/pínus). Deixe DESLIGADO em "
-             "imóveis sem reflorestamento — ligado, pode marcar silvicultura a mais.")
+    # --- roteamento de BIOMA: escolhe o modelo pelo centroide do imovel ---
+    # Cerrado -> v9 (+ modo silvicultura); Mata Atlantica Sudeste -> v8 (piloto,
+    # inclui cafe/lavoura perene). Fora dos dois: usa Cerrado com aviso.
     try:
-        pacote = _carregar_modelo(MODELO_SILVIC if modo_silvic else MODELO_PADRAO)
+        g4326 = gdf_imovel.to_crs(4326) if gdf_imovel.crs else gdf_imovel
+        cent = unary_union(list(g4326.geometry)).centroid
+    except Exception:
+        cent = gdf_imovel.geometry.iloc[0].centroid
+    cerr, ma = _cerrado_geom(), _ma_geom()
+    em_cerrado = cerr is not None and cerr.contains(cent)
+    em_ma = (not em_cerrado) and ma is not None and ma.contains(cent)
+
+    if em_ma:
+        st.info("🌱 Imóvel na **Mata Atlântica (Sudeste)** — modelo **piloto** da MA "
+                "(inclui **lavoura perene / café**). Erro de área ~5 pp; o café é classe "
+                "de **baixa confiança** (limite do satélite gratuito para café × floresta).")
+        modo_silvic = False
+        modelo_path = MODELO_MA
+    else:
+        modo_silvic = st.checkbox(
+            "🌲 Modo silvicultura — ative para imóveis com reflorestamento",
+            value=False,
+            help="Detecta melhor a silvicultura (eucalipto/pínus). Deixe DESLIGADO em "
+                 "imóveis sem reflorestamento — ligado, pode marcar silvicultura a mais.")
+        modelo_path = MODELO_SILVIC if modo_silvic else MODELO_PADRAO
+        if not em_cerrado:
+            st.warning("⚠️ Este imóvel parece estar **fora do Cerrado e da Mata Atlântica "
+                       "(Sudeste)** — áreas de treino. Usando o Cerrado; o resultado pode "
+                       "não ser confiável aqui.")
+
+    try:
+        pacote = _carregar_modelo(modelo_path)
     except Exception as e:
         st.error(f"Não foi possível carregar o modelo de classificação: {e}")
         return
@@ -264,16 +307,6 @@ def _render_classificacao(gdf_imovel):
 
     # partes distantes -> deixa escolher qual bloco classificar (como no Satelite)
     geom_shp, bloco_tag = _selecionar_bloco(gdf_imovel)
-
-    # aviso se a area escolhida estiver fora do Cerrado (area de treino do modelo)
-    try:
-        cerr = _cerrado_geom()
-        if cerr is not None and not cerr.contains(geom_shp.centroid):
-            st.warning("⚠️ Este imóvel parece estar **fora do bioma Cerrado**. O modelo "
-                       "foi treinado apenas no Cerrado — o resultado pode não ser "
-                       "confiável aqui.")
-    except Exception:
-        pass
 
     # --- controles ---
     # default no ULTIMO ano COMPLETO (evita abrir ja num ano preliminar como 2026;
@@ -292,7 +325,8 @@ def _render_classificacao(gdf_imovel):
                    "classificação sai **preliminar** e pode mudar quando o ano se completar.")
 
     nome_imovel = st.session_state.get("last_code", "imóvel")
-    chave = f"{nome_imovel}|{ano}|{bloco_tag}|{'silv' if modo_silvic else 'pad'}"
+    chave = (f"{nome_imovel}|{ano}|{bloco_tag}|{'silv' if modo_silvic else 'pad'}"
+             f"|{pacote.get('versao', 'cerrado')}")
 
     if rodar:
         try:
@@ -367,7 +401,10 @@ def _render_classificacao(gdf_imovel):
     # de um lavoura, com o pastagem real concentrado noutro lugar) — mancha
     # maior que a MMU, que o sieve nao pega. So mexe entre essas 3 classes que
     # se confundem; agua/silvicultura/solo/varzea e feicoes lineares ficam a salvo.
-    classe_limpo = infer.suavizar_contexto(classe_limpo, resultado["scale_efetiva"])
+    # café(8) confunde com nativa na MA -> incluir no filtro de ilha (no-op no
+    # Cerrado, que nao tem a classe 8).
+    classe_limpo = infer.suavizar_contexto(classe_limpo, resultado["scale_efetiva"],
+                                           classes_confusas=(0, 1, 2, 8))
 
     cods1, cnts1 = np.unique(classe_limpo[classe_limpo >= 0], return_counts=True)
     contagem = {int(c): int(n) for c, n in zip(cods1, cnts1)}
