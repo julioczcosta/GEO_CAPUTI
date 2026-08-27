@@ -7,8 +7,9 @@ import streamlit.components.v1 as components
 import io
 import geopandas as gpd
 import json
-from shapely.geometry import shape
-import time 
+from shapely.geometry import shape, mapping
+from shapely.ops import unary_union
+import time
 
 # --- FUNÇÃO DE LIMPEZA GERAL (Reseta Análises) ---
 def resetar_analises_anteriores():
@@ -17,7 +18,8 @@ def resetar_analises_anteriores():
     """
     chaves_para_limpar = [
         'camadas_fixas', 'camada_preview', 'ndvi_stats', 'ndvi_colorbar',
-        'clim_temp', 'clim_rain', 'last_clim_source', 'ctx_dados', 'gdf_imovel'
+        'clim_temp', 'clim_rain', 'last_clim_source', 'ctx_dados', 'gdf_imovel',
+        'gdf_features', 'preview_gdf', 'uso_matricula',
     ]
     
     for chave in chaves_para_limpar:
@@ -40,6 +42,7 @@ def render_tab():
     def limpar_tela_preview():
         st.session_state['preview_geometry'] = None
         st.session_state['preview_data'] = None
+        st.session_state['preview_gdf'] = None
 
     # =========================================================
     # LINHA 1: INPUTS
@@ -50,13 +53,15 @@ def render_tab():
         with st.container(border=True, height=220):
             st.markdown("##### 1. Buscar Perímetro")
             
-            metodo = st.radio("Tipo", ["KML", "CAR"], horizontal=True, label_visibility="collapsed", on_change=limpar_tela_preview)
-            
+            metodo = st.radio("Tipo", ["Arquivo", "CAR"], horizontal=True, label_visibility="collapsed", on_change=limpar_tela_preview)
+
             c_input, c_btn = st.columns([0.80, 0.20], gap="small", vertical_alignment="bottom")
-            
+
             with c_input:
-                if metodo == "KML":
-                    file_kml = st.file_uploader("KML", type=["kml", "kmz", "zip"], label_visibility="collapsed", key="uploader_kml_home")
+                if metodo == "Arquivo":
+                    file_kml = st.file_uploader("Arquivo", type=["kml", "kmz", "zip", "gpkg"],
+                                                label_visibility="collapsed", key="uploader_kml_home",
+                                                help="KML, KMZ, GPKG ou shapefile (.shp) zipado")
                     input_car = None
                 else:
                     input_car = st.text_input("CAR", placeholder="Ex: SP-35074...", label_visibility="collapsed")
@@ -66,18 +71,24 @@ def render_tab():
                 if st.button("🔍", help="Localizar Imóvel", use_container_width=True):
                     limpar_tela_preview()
                     
-                    if metodo == "KML":
+                    if metodo == "Arquivo":
                         if file_kml:
-                            with st.spinner("Lendo KML..."):
-                                geom, erro = utils.processar_kml_conteudo(file_kml.read())
-                                if not erro and geom:
+                            with st.spinner("Lendo arquivo..."):
+                                gdf_f, campo, erro = utils.carregar_vetor_upload(file_kml)
+                                if erro or gdf_f is None or gdf_f.empty:
+                                    st.error(f"Erro ao ler arquivo: {erro or 'sem geometria válida'}")
+                                else:
+                                    uniao = unary_union(gdf_f.geometry.values)
+                                    geom = ee.Geometry(mapping(uniao))
+                                    area_ha = float(gdf_f.to_crs(5880).area.sum() / 1e4)
                                     st.session_state['preview_geometry'] = geom
-                                    area_m2 = geom.area(1).getInfo()
+                                    st.session_state['preview_gdf'] = gdf_f
                                     st.session_state['preview_data'] = {
-                                        "tipo": "KML", "nome": file_kml.name, "area_ha": area_m2 / 10000
+                                        "tipo": "ARQUIVO", "nome": file_kml.name,
+                                        "area_ha": area_ha, "n_feicoes": len(gdf_f),
+                                        "campo": campo, "rotulos": list(gdf_f["_rotulo"]),
                                     }
                                     st.rerun()
-                                else: st.error(f"Erro ao ler KML: {erro}")
                         else: st.warning("Anexe um arquivo.")
                     
                     else: # CAR
@@ -98,7 +109,7 @@ def render_tab():
             st.markdown("##### 2. Instruções")
             st.markdown("""
             <div style="font-size: 0.9rem; line-height: 1.5;">
-            <b>1.</b> Selecione <b>KML</b> ou <b>CAR</b>.<br>
+            <b>1.</b> Selecione <b>Arquivo</b> (KML/KMZ/GPKG/SHP.zip) ou <b>CAR</b>.<br>
             <b>2.</b> Insira o dado e clique na Lupa 🔍.<br>
             <b>3.</b> Confirme os dados no quadro abaixo.<br>
             <b>4.</b> Clique em <b>'✅ Usar Este Perímetro'</b>.<br>
@@ -172,13 +183,35 @@ def render_tab():
                         </div>
                         """, unsafe_allow_html=True)
                         
-                    elif data.get("tipo") == "KML":
-                        st.markdown(f"""
-                        <div style="font-size: 0.9rem; margin-bottom: 20px;">
-                            <b>Arquivo:</b> {data.get('nome')}<br>
-                            <b>Área Calculada:</b> {data.get('area_ha'):.2f} ha
-                        </div>
-                        """, unsafe_allow_html=True)
+                    elif data.get("tipo") == "ARQUIVO":
+                        n = data.get("n_feicoes", 1)
+                        rotulos = data.get("rotulos") or []
+                        if n <= 1:
+                            extra = (f"<b>Matrícula:</b> {rotulos[0]}<br>"
+                                     if data.get("campo") and rotulos else "")
+                            st.markdown(f"""
+                            <div style="font-size: 0.9rem; margin-bottom: 20px;">
+                                <b>Arquivo:</b> {data.get('nome')}<br>
+                                {extra}<b>Área Calculada:</b> {data.get('area_ha'):.2f} ha
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            campo_txt = "matrículas" if data.get("campo") else "feições (numeradas)"
+                            amostra = ", ".join(str(r) for r in rotulos[:6])
+                            if len(rotulos) > 6:
+                                amostra += f" … (+{len(rotulos) - 6})"
+                            st.markdown(f"""
+                            <div style="font-size: 0.9rem;">
+                                <b>Arquivo:</b> {data.get('nome')}<br>
+                                <b>Feições:</b> {n} ({campo_txt})<br>
+                                <b>Área total:</b> {data.get('area_ha'):.2f} ha
+                            </div>
+                            <div style="font-size: 0.82rem; color:#666; margin-top:4px;">📋 {amostra}</div>
+                            <div style="font-size: 0.8rem; color:#888; margin-top:8px;">
+                              A análise geral usa <b>tudo junto</b>; no <b>Uso do Solo</b>
+                              você escolhe por matrícula.
+                            </div>
+                            """, unsafe_allow_html=True)
 
                 # --- BOTÃO DE CONFIRMAÇÃO ---
                 if st.button("✅ Usar Este Perímetro", use_container_width=True):
@@ -198,6 +231,11 @@ def render_tab():
                             st.session_state['last_code'] = nome_oficial
                         else:
                             nome_oficial = data.get('nome')
+                            rotulos = data.get('rotulos') or []
+                            # imóvel de 1 feição com matrícula -> usa a matrícula como nome
+                            if (data.get("tipo") == "ARQUIVO" and data.get("n_feicoes", 1) == 1
+                                    and data.get("campo") and rotulos):
+                                nome_oficial = str(rotulos[0])
                             st.session_state['source_name'] = nome_oficial
                             st.session_state['last_code'] = nome_oficial
 
@@ -210,7 +248,14 @@ def render_tab():
                                 crs="EPSG:4326"
                             )
                             st.session_state['gdf_imovel'] = gdf_conv
-                            
+
+                            # Guarda TAMBÉM as feições individuais (multi-matrícula),
+                            # para o Uso do Solo poder analisar por matrícula. As demais
+                            # abas seguem usando gdf_imovel (a união = geral).
+                            gdf_feat = st.session_state.get('preview_gdf')
+                            if gdf_feat is not None and not gdf_feat.empty:
+                                st.session_state['gdf_features'] = gdf_feat.copy()
+
                             # MENSAGEM DE SUCESSO COM DELAY
                             st.success(f"Perímetro definido! Carregando abas...")
                             

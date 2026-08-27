@@ -287,6 +287,114 @@ def carregar_kml_geopandas(uploaded_file):
     except Exception as e:
         return None, f"Erro ao processar arquivo: {str(e)}"
 
+
+# Campos que costumam guardar a matrícula do imóvel (variações comuns).
+_CAMPOS_MATRICULA = [
+    "matricula", "matrícula", "num_matric", "nm_matric", "no_matric",
+    "matric", "registro", "num_registro", "nr_matric",
+]
+
+
+def _achar_campo_matricula(colunas):
+    """Acha, de forma flexível, a coluna que representa a matrícula (ou None)."""
+    low = {str(c).lower().strip(): c for c in colunas}
+    # match exato primeiro, depois 'contém'
+    for cand in _CAMPOS_MATRICULA:
+        if cand in low:
+            return low[cand]
+    for cand in _CAMPOS_MATRICULA:
+        for lc, orig in low.items():
+            if cand in lc:
+                return orig
+    return None
+
+
+def carregar_vetor_upload(uploaded_file):
+    """Lê KML/KMZ/GPKG/SHP(zipado)/ZIP em GeoDataFrame (EPSG:4326) com TODAS as
+    feições e seus atributos — NÃO une tudo. Acrescenta a coluna '_rotulo':
+    a matrícula (campo auto-detectado) ou, se não houver, 'Feição N'.
+
+    Retorna (gdf, campo_matricula_ou_None, erro).
+    """
+    if gpd is None:
+        return None, None, "Biblioteca Geopandas não instalada."
+
+    nome = uploaded_file.name.lower()
+    temp_dir = tempfile.mkdtemp()
+    try:
+        fpath = os.path.join(temp_dir, uploaded_file.name)
+        with open(fpath, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        alvos = []  # (caminho, layer_ou_None)
+        if nome.endswith(".gpkg"):
+            try:
+                layers = fiona.listlayers(fpath)
+            except Exception:
+                layers = [None]
+            alvos = [(fpath, ly) for ly in (layers or [None])]
+        elif nome.endswith((".kml", ".kmz", ".zip")):
+            target = fpath
+            if nome.endswith((".kmz", ".zip")):
+                with zipfile.ZipFile(fpath, "r") as z:
+                    nomes = z.namelist()
+                    kmls = [n for n in nomes if n.lower().endswith(".kml")]
+                    shps = [n for n in nomes if n.lower().endswith(".shp")]
+                    if kmls:
+                        z.extractall(temp_dir)
+                        target = os.path.join(temp_dir, kmls[0])
+                    elif shps:
+                        z.extractall(temp_dir)
+                        target = os.path.join(temp_dir, shps[0])
+                    else:
+                        return None, None, "ZIP sem arquivo .kml ou .shp dentro."
+            try:
+                layers = fiona.listlayers(target)
+            except Exception:
+                layers = [None]
+            alvos = [(target, ly) for ly in (layers or [None])]
+        else:
+            return None, None, ("Formato não suportado. Use KML, KMZ, GPKG "
+                                "ou shapefile (.shp) zipado.")
+
+        gdfs = []
+        for caminho, layer in alvos:
+            try:
+                g = gpd.read_file(caminho, layer=layer) if layer is not None else gpd.read_file(caminho)
+                if not g.empty:
+                    gdfs.append(g)
+            except Exception:
+                continue
+
+        if not gdfs:
+            return None, None, "Nenhuma geometria válida encontrada no arquivo."
+
+        gdf = pd.concat(gdfs, ignore_index=True)
+        gdf["geometry"] = gdf.geometry.apply(_force_2d)
+        gdf = gdf.set_crs(epsg=4326) if gdf.crs is None else gdf.to_crs(epsg=4326)
+        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()].reset_index(drop=True)
+        if gdf.empty:
+            return None, None, "Nenhuma geometria válida encontrada no arquivo."
+
+        campo = _achar_campo_matricula(gdf.columns)
+        rotulos = []
+        for i in range(len(gdf)):
+            val = str(gdf.iloc[i][campo]).strip() if campo else ""
+            if not val or val.lower() in ("none", "nan", "<na>"):
+                val = f"Feição {i + 1}"
+            rotulos.append(val)
+        gdf["_rotulo"] = rotulos
+
+        gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs="EPSG:4326")
+        return gdf, campo, None
+    except Exception as e:
+        return None, None, f"Erro ao ler arquivo: {e}"
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
+
 # ==========================================
 # 5. DADOS DE CONTEXTO E ALTIMETRIA
 # ==========================================
