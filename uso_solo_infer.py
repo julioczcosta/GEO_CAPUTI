@@ -57,13 +57,32 @@ def _temporais_ano(ano, regiao):
     return ee.Image.cat([ndvi_min, ndvi_max, ndvi_std, ndre_max, frac_solo])
 
 
+# Satellite Embedding (AlphaEarth): 64 dims/pixel de um foundation model
+# multimodal. So o modelo da Mata Atlantica (v2emb) usa (bandas A00..A63); no
+# Cerrado essas bandas NAO entram em pacote["bandas"] -> o EE nem as computa.
+BANDAS_EMB = [f"A{i:02d}" for i in range(64)]
+
+
+def _emb(ano, regiao):
+    """Media anual das 64 dims do GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL. Anual
+    (max 2024) -> usa o ano mais proximo <= 2024."""
+    yr = min(int(ano), 2024)
+    col = (ee.ImageCollection("GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL")
+           .filterBounds(regiao)
+           .filterDate(ee.Date.fromYMD(yr, 1, 1), ee.Date.fromYMD(yr, 12, 31)))
+    return col.mosaic().rename(BANDAS_EMB)
+
+
 def mosaico_s2(ano, regiao):
-    """Mosaico de 25 bandas identico ao do treino v7."""
+    """Mosaico de 25 bandas (base) + 64 do Satellite Embedding. O download so
+    puxa as bandas de pacote["bandas"], entao o embedding so e computado quando
+    o modelo (MA v2emb) o pede."""
     seca = _composto_estacao(ee.Date.fromYMD(ano, 5, 1), ee.Date.fromYMD(ano, 9, 30), regiao)
     chuva = _composto_estacao(ee.Date.fromYMD(ano - 1, 11, 1), ee.Date.fromYMD(ano, 3, 31), regiao)
     seca = seca.rename([b + "_seca" for b in BANDAS_BASE])
     chuva = chuva.rename([b + "_chuva" for b in BANDAS_BASE])
-    return seca.addBands(chuva).addBands(_temporais_ano(ano, regiao))
+    return (seca.addBands(chuva).addBands(_temporais_ano(ano, regiao))
+            .addBands(_emb(ano, regiao)))
 
 
 def _escala_efetiva(bounds, scale, limite_pixels):
@@ -267,7 +286,11 @@ def classificar_imovel(geom_ee, geom_shapely, ano, pacote,
     modelo = pacote["modelo"]
 
     bounds = geom_shapely.bounds
-    scale_ef = _escala_efetiva(bounds, scale, limite_pixels)
+    # teto de pixels adaptado ao nº de bandas (o download NPY do EE tem limite
+    # ~50MB): o modelo da MA (embedding) tem 57 bandas -> pixel maior em imovel
+    # grande, senao estoura. As % por classe sao robustas (area vem da geometria).
+    lim = min(limite_pixels, int(45e6 / (max(1, len(bandas)) * 4)))
+    scale_ef = _escala_efetiva(bounds, scale, lim)
 
     img = mosaico_s2(int(ano), geom_ee).select(bandas).unmask(SENTINELA)
     url = img.getDownloadURL({

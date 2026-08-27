@@ -36,7 +36,7 @@ import uso_solo_infer as infer
 _MODELOS = os.path.join(os.path.dirname(__file__), "modelos")
 MODELO_PADRAO = os.path.join(_MODELOS, "modelo_uso_cerrado_v9.joblib")
 MODELO_SILVIC = os.path.join(_MODELOS, "modelo_uso_cerrado_v9_silvic.joblib")
-MODELO_MA = os.path.join(_MODELOS, "modelo_uso_ma_v8.joblib")  # piloto Mata Atlantica Sudeste
+MODELO_MA = os.path.join(_MODELOS, "modelo_uso_ma_v2emb.joblib")  # piloto MA-SE (base + Satellite Embedding)
 COD_SILVICULTURA = 5
 COD_PERENE = 8  # lavoura perene / cafe (so no modelo da MA)
 
