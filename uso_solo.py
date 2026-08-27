@@ -204,6 +204,27 @@ def _legenda_html(cods_presentes):
     return f'<div style="line-height:1.3;">{itens}</div>'
 
 
+def _opcoes_escopo():
+    """Se o imóvel veio de um arquivo com VÁRIAS matrículas (gdf_features),
+    devolve as opções de escopo: 'Tudo junto (geral)' + uma por matrícula.
+    Retorna (labels, geoms_shapely, tags) ou None quando não há multi-feição."""
+    feats = st.session_state.get("gdf_features")
+    if feats is None or len(feats) <= 1:
+        return None
+    labels = ["🟩 Tudo junto (geral)"]
+    geoms = [unary_union(feats.geometry.values)]
+    tags = ["geral"]
+    for i in range(len(feats)):
+        try:
+            rot = str(feats.iloc[i]["_rotulo"])
+        except Exception:
+            rot = f"Feição {i + 1}"
+        labels.append(f"📄 {rot}")
+        geoms.append(feats.geometry.iloc[i])
+        tags.append(f"m{i}")
+    return labels, geoms, tags
+
+
 def _selecionar_bloco(gdf_imovel):
     """Se o imovel tem partes geograficamente distantes, mostra um seletor para
     escolher qual classificar (como no Satelite). Retorna (geometria_shapely,
@@ -305,8 +326,19 @@ def _render_classificacao(gdf_imovel):
     if modo_silvic:
         fracas_cods.discard(COD_SILVICULTURA)  # detectada com confianca -> nao e "fraca"
 
-    # partes distantes -> deixa escolher qual bloco classificar (como no Satelite)
-    geom_shp, bloco_tag = _selecionar_bloco(gdf_imovel)
+    # Arquivo com várias matrículas -> seleciona por matrícula (estatísticas por
+    # matrícula por padrão; 'Tudo junto' = geral). Senão, o seletor antigo de
+    # partes geograficamente distantes.
+    esc = _opcoes_escopo()
+    if esc:
+        labels, geoms, tags = esc
+        st.caption("Arquivo com várias matrículas — estatísticas **por matrícula** "
+                   "(escolha *Tudo junto* para o geral).")
+        sel = st.selectbox("Matrícula", labels, index=1, key="uso_classe_matricula")
+        i = labels.index(sel)
+        geom_shp, bloco_tag = geoms[i], tags[i]
+    else:
+        geom_shp, bloco_tag = _selecionar_bloco(gdf_imovel)
 
     # --- controles ---
     # default no ULTIMO ano COMPLETO (evita abrir ja num ano preliminar como 2026;
@@ -859,7 +891,15 @@ def _render_mapbiomas(gdf_imovel):
     st.caption("Uso e cobertura do solo pelo **MapBiomas** (referência anual, 30 m). "
                "Serve para comparar/validar a classificação do app.")
 
-    geom_shp = unary_union(gdf_imovel.geometry.values)
+    # Escopo: geral por padrão; se houver várias matrículas, opção por matrícula.
+    esc = _opcoes_escopo()
+    if esc:
+        labels, geoms, tags = esc
+        sel = st.selectbox("Escopo", labels, index=0, key="mb_escopo")
+        i = labels.index(sel)
+        geom_shp, escopo_tag = geoms[i], tags[i]
+    else:
+        geom_shp, escopo_tag = unary_union(gdf_imovel.geometry.values), "geral"
     area_ha = float(gpd.GeoSeries([geom_shp], crs=gdf_imovel.crs)
                     .to_crs(5880).area.iloc[0] / 1e4)
     geom_ee = ee.Geometry(mapping(geom_shp))
@@ -876,7 +916,7 @@ def _render_mapbiomas(gdf_imovel):
             help="Se preenchida, mostra os hectares proporcionais a essa área.")
 
     try:
-        contagem = _mb_areas(geom_ee, ano, f"{nome_imovel}|{ano}")
+        contagem = _mb_areas(geom_ee, ano, f"{nome_imovel}|{escopo_tag}|{ano}")
     except Exception as e:
         st.error(f"Não foi possível consultar o MapBiomas: {e}")
         return
@@ -923,7 +963,7 @@ def _render_mapbiomas(gdf_imovel):
         st.markdown(tabela, unsafe_allow_html=True)
     with col_mapa:
         try:
-            st.components.v1.html(_mb_mapa(geom_shp, ano, f"{nome_imovel}|{ano}"), height=470)
+            st.components.v1.html(_mb_mapa(geom_shp, ano, f"{nome_imovel}|{escopo_tag}|{ano}"), height=470)
         except Exception:
             st.caption("Mapa indisponível no momento.")
 
