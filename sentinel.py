@@ -34,7 +34,15 @@ def render_tab():
     is_multipart = False
     opcoes = []
     geometrias_separadas = []
+    geometrias_shp = []       # shapely, paralelo a geometrias_separadas (p/ fit_bounds local)
+    shp_geom = None
+    geom_alvo_shp = None
     area_total_ha = 0
+
+    # Se o imóvel veio de arquivo com VÁRIAS matrículas, a seleção é por
+    # matrícula (não por bloco geográfico) — igual ao Uso do Solo.
+    feats = st.session_state.get("gdf_features")
+    usar_matricula = feats is not None and len(feats) > 1
     
     with st.spinner("Analisando a topologia e distribuição das áreas..."):
         try:
@@ -46,7 +54,23 @@ def render_tab():
             else:
                 shp_geom = shape(geom_dict)
             
-            if shp_geom.geom_type in ['MultiPolygon', 'GeometryCollection']:
+            if usar_matricula:
+                # Seleção por matrícula: 'Tudo junto (geral)' + uma por matrícula.
+                is_multipart = True
+                opcoes.append("🟩 Tudo junto (geral)")
+                geometrias_separadas.append(geometry)
+                geometrias_shp.append(shp_geom)
+                for i in range(len(feats)):
+                    try:
+                        rot = str(feats.iloc[i]["_rotulo"])
+                    except Exception:
+                        rot = f"Feição {i + 1}"
+                    g_shp = feats.geometry.iloc[i]
+                    opcoes.append(f"📄 {rot}")
+                    geometrias_separadas.append(ee.Geometry(mapping(g_shp)))
+                    geometrias_shp.append(g_shp)
+
+            elif shp_geom.geom_type in ['MultiPolygon', 'GeometryCollection']:
                 poligonos = list(shp_geom.geoms) if shp_geom.geom_type == 'MultiPolygon' else [g for g in shp_geom.geoms if g.geom_type == 'Polygon']
                 
                 if len(poligonos) > 1:
@@ -59,33 +83,41 @@ def render_tab():
                         area_total_ha = geometry.area().divide(10000).getInfo()
                         opcoes.append(f"🟩 Visualizar Tudo Junto ({area_total_ha:.1f} ha)")
                         geometrias_separadas.append(geometry)
-                        
+                        geometrias_shp.append(shp_geom)
+
                         for i, bloco_inflado in enumerate(blocos_fundidos):
                             pols_originais = [p for p in poligonos if p.intersects(bloco_inflado)]
                             bloco_limpo = unary_union(pols_originais)
-                            
+
                             gee_bloco = ee.Geometry(mapping(bloco_limpo))
                             area_ha = gee_bloco.area().divide(10000).getInfo()
-                            
+
                             opcoes.append(f"📍 Bloco Isolado {i+1} ({area_ha:.1f} ha)")
                             geometrias_separadas.append(gee_bloco)
+                            geometrias_shp.append(bloco_limpo)
                             
         except Exception as e:
             pass
 
     if is_multipart:
-        st.info("🌍 Foram identificadas áreas geograficamente distantes. Escolha a porção para visualizar:")
-        selecao = st.selectbox("Selecione o Bloco", opcoes, label_visibility="collapsed", on_change=utils.reset_preview)
-        
+        if usar_matricula:
+            st.info("🗂️ Arquivo com várias matrículas — escolha qual visualizar (ou *Tudo junto*).")
+            _label = "Matrícula"
+        else:
+            st.info("🌍 Foram identificadas áreas geograficamente distantes. Escolha a porção para visualizar:")
+            _label = "Selecione o Bloco"
+        selecao = st.selectbox(_label, opcoes, label_visibility="collapsed", on_change=utils.reset_preview)
+
         idx = opcoes.index(selecao)
         geom_alvo = geometrias_separadas[idx]
-        
-        if idx == 0:
-            area_alvo_ha = area_total_ha
-        else:
-            area_alvo_ha = float(selecao.split('(')[1].replace(' ha)', ''))
+        geom_alvo_shp = geometrias_shp[idx] if idx < len(geometrias_shp) else shp_geom
+        try:
+            area_alvo_ha = geom_alvo.area().divide(10000).getInfo()
+        except Exception:
+            area_alvo_ha = area_total_ha or 100
     else:
         geom_alvo = geometry
+        geom_alvo_shp = shp_geom
         try: area_alvo_ha = geom_alvo.area().divide(10000).getInfo()
         except Exception: area_alvo_ha = 100
 
@@ -140,11 +172,15 @@ def render_tab():
 
     # --- MAPA ---
     with st.container():
-        m = geemap.Map(center=[-14, -50], zoom=4, draw_control=False, scale_control=True)
+        # Centro inicial no centroide do imóvel (local, sem GEE); o fit_bounds
+        # no fim ajusta o zoom exato à extensão.
+        try:
+            _c = geom_alvo_shp.centroid
+            _center = [_c.y, _c.x]
+        except Exception:
+            _center = [-14, -50]
+        m = geemap.Map(center=_center, zoom=12, draw_control=False, scale_control=True)
         m.add_basemap("HYBRID")
-        
-        try: m.centerObject(geom_alvo, 13)
-        except Exception: pass
 
         # ==========================================
         # 🚀 O MOTOR MULTI-SATÉLITE
@@ -325,6 +361,15 @@ def render_tab():
         except Exception: pass
         
         m.add_layer_control()
+
+        # Enquadra SEMPRE no perímetro (fit_bounds local, sem depender do GEE) —
+        # corrige o "às vezes não foca / corta a imagem" do centerObject com
+        # zoom fixo: o zoom passa a se adaptar à extensão do imóvel.
+        try:
+            b = geom_alvo_shp.bounds  # (minx, miny, maxx, maxy)
+            m.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
+        except Exception:
+            pass
 
         with io.BytesIO() as buffer:
             m.save(buffer, close_file=False)

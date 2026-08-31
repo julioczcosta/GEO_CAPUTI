@@ -217,6 +217,9 @@ def render_tab():
                 if st.button("✅ Usar Este Perímetro", use_container_width=True):
                     
                     with st.spinner("Configurando ambiente de análise..."):
+                        # Captura as feições ANTES da faxina (resetar limpa preview_gdf).
+                        gdf_feat = st.session_state.get('preview_gdf')
+
                         # 1. FAXINA
                         resetar_analises_anteriores()
                         
@@ -250,9 +253,8 @@ def render_tab():
                             st.session_state['gdf_imovel'] = gdf_conv
 
                             # Guarda TAMBÉM as feições individuais (multi-matrícula),
-                            # para o Uso do Solo poder analisar por matrícula. As demais
-                            # abas seguem usando gdf_imovel (a união = geral).
-                            gdf_feat = st.session_state.get('preview_gdf')
+                            # para o Uso do Solo/Satélite analisarem por matrícula. As
+                            # demais abas seguem usando gdf_imovel (a união = geral).
                             if gdf_feat is not None and not gdf_feat.empty:
                                 st.session_state['gdf_features'] = gdf_feat.copy()
 
