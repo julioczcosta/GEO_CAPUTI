@@ -684,60 +684,6 @@ def extrair_area(row):
             return None
     return None
 
-
-def impedimentos_por_matricula(gdf_cand, feats, fonte_sel):
-    """Resumo consolidado de impedimentos (sobreposições) por matrícula.
-
-    Recebe os candidatos já buscados (gdf_cand, EPSG:4674) e as feições
-    individuais (feats). Para CADA matrícula, classifica os candidatos contra
-    ela (sem fundir com as vizinhas) e lista as sobreposições, com a área
-    sobreposta (ha) e o quanto isso representa da matrícula (%). Assim um mesmo
-    CAR/SIGEF que invade duas matrículas aparece uma vez por matrícula, com a
-    área correspondente a cada uma. Ordena por matrícula e maior área sobreposta.
-    """
-    if gdf_cand is None or gdf_cand.empty or feats is None or len(feats) == 0:
-        return pd.DataFrame()
-
-    feats_4674 = feats.to_crs("EPSG:4674")
-    linhas = []
-    for i in range(len(feats_4674)):
-        rotulo = str(feats.iloc[i]["_rotulo"])
-        gdf_m = feats_4674.iloc[[i]][["geometry"]].reset_index(drop=True)
-        gdf_class = classificar_imoveis(gdf_cand.copy(), gdf_m)
-        if gdf_class.empty:
-            continue
-        # Exclui o próprio imóvel (registro ~idêntico à matrícula nas bases).
-        viz = gdf_class[gdf_class["_classificacao"] != "Próprio"].copy()
-        if fonte_sel == "Consolidado":
-            viz = consolidar_fontes(viz)
-        sob = viz[viz["_classificacao"] == "Sobreposição"]
-        if sob.empty:
-            continue
-        utm = gdf_m.estimate_utm_crs()
-        area_m_ha = float(gdf_m.to_crs(utm).geometry.area.iloc[0] / 1e4)
-        perim_m = gdf_m.unary_union
-        for _, r in sob.iterrows():
-            a_sob = calcular_area_sobreposicao_ha(r.geometry, perim_m, utm)
-            if a_sob <= 0:
-                continue
-            pct = (a_sob / area_m_ha * 100) if area_m_ha > 0 else 0.0
-            linhas.append({
-                "Matrícula": rotulo,
-                "Fonte": r.get("_fonte", "CAR"),
-                "Código": extrair_codigo_car(r),
-                "Município": extrair_municipio(r),
-                "Área sobreposta (ha)": round(a_sob, 4),
-                "% da matrícula": round(pct, 2),
-            })
-
-    if not linhas:
-        return pd.DataFrame()
-    df = pd.DataFrame(linhas)
-    return df.sort_values(
-        ["Matrícula", "Área sobreposta (ha)"], ascending=[True, False]
-    ).reset_index(drop=True)
-
-
 # ==========================================
 # 4. GERAÇÃO DE KML
 # ==========================================
@@ -967,28 +913,11 @@ def render_tab():
     if rodar:
         st.session_state['confrontantes_resultado'] = None
         st.session_state['confrontantes_proprio'] = None
-        st.session_state['confrontantes_impedimentos'] = None
         st.session_state['confrontantes_done'] = False
 
-        multi = feats is not None and len(feats) > 1
-
-        # Geometria de BUSCA: com várias matrículas, busca no bbox da UNIÃO (pega
-        # candidatos ao redor de todas de uma vez); a classificação é feita por
-        # matrícula, então a divisa entre matrículas vizinhas segue como confrontante.
-        if multi:
-            gdf_fetch_wgs = gpd.GeoDataFrame(
-                geometry=[feats.unary_union], crs=feats.crs
-            ).to_crs("EPSG:4674")
-        else:
-            gdf_fetch_wgs = (gdf_imovel.to_crs("EPSG:4674")
-                             if gdf_imovel.crs.to_epsg() != 4674 else gdf_imovel.copy())
-
-        # Perímetro ATIVO (matrícula selecionada, ou imóvel único): mapa/tabela.
-        gdf_wgs = (gdf_imovel.to_crs("EPSG:4674")
-                   if gdf_imovel.crs.to_epsg() != 4674 else gdf_imovel.copy())
-
         with st.spinner("Detectando UFs do imóvel..."):
-            ufs = detectar_ufs(gdf_fetch_wgs)
+            gdf_wgs = gdf_imovel.to_crs("EPSG:4674") if gdf_imovel.crs.to_epsg() != 4674 else gdf_imovel.copy()
+            ufs = detectar_ufs(gdf_wgs)
 
         if not ufs:
             st.error("Não foi possível identificar a UF do imóvel. Verifique o KML carregado.")
@@ -997,36 +926,30 @@ def render_tab():
         st.caption(f"UFs detectadas: **{', '.join([u.upper() for u in ufs])}**")
 
         fontes_alvo = ["CAR", "SIGEF", "SNCI"] if fonte_sel == "Consolidado" else [fonte_sel]
-        cand_partes, diag = [], []
+        partes, diag = [], []
         with st.spinner(f"Consultando {fonte_sel} ({', '.join(u.upper() for u in ufs)})..."):
             for f in fontes_alvo:
                 # Cronometra cada fonte: como o INCRA é lento a partir de servidor
                 # no exterior (Streamlit Cloud), o tempo por fonte no diagnóstico
                 # ajuda a ver onde o gargalo realmente está.
                 t0 = time.time()
-                gdf_f = buscar_fonte(gdf_fetch_wgs, ufs, f)  # candidatos crus (bbox união)
+                gdf_f = buscar_fonte(gdf_wgs, ufs, f)
                 dt = time.time() - t0
-                n = 0 if gdf_f is None or gdf_f.empty else len(gdf_f)
-                diag.append(f"{f}: {n} ({dt:.0f}s)")
-                if n:
-                    cand_partes.append(gdf_f)
+                if gdf_f.empty:
+                    diag.append(f"{f}: 0 ({dt:.0f}s)")
+                    continue
+                gdf_f = classificar_imoveis(gdf_f, gdf_wgs)
+                diag.append(f"{f}: {len(gdf_f)} ({dt:.0f}s)")
+                if not gdf_f.empty:
+                    partes.append(gdf_f)
 
-        st.caption("Encontrados por fonte → " + " · ".join(diag))
+        st.caption("Vizinhos por fonte → " + " · ".join(diag))
 
-        if not cand_partes:
+        if not partes:
             st.warning("Nenhum confrontante/sobreposição encontrado (ou as bases estão indisponíveis no momento).")
             return
 
-        gdf_cand = gpd.GeoDataFrame(pd.concat(cand_partes, ignore_index=True), crs="EPSG:4674")
-
-        # Resumo consolidado de impedimentos por matrícula (todas as matrículas),
-        # a partir dos mesmos candidatos — uma única busca serve para tudo.
-        if multi:
-            st.session_state['confrontantes_impedimentos'] = impedimentos_por_matricula(
-                gdf_cand, feats, fonte_sel)
-
-        # Classifica os candidatos contra o perímetro ATIVO (matrícula selecionada).
-        gdf_all = classificar_imoveis(gdf_cand.copy(), gdf_wgs)
+        gdf_all = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs=gdf_wgs.crs)
 
         # Separa o PRÓPRIO imóvel (registro do imóvel na base, IoU >= 90%) ANTES de
         # consolidar — guarda um por fonte para o bloco "consta nas bases".
@@ -1043,12 +966,8 @@ def render_tab():
             gdf_resultado["_tambem_em"] = ""
 
         if gdf_resultado.empty and gdf_proprio.empty:
-            imp = st.session_state.get('confrontantes_impedimentos')
-            if imp is None or imp.empty:
-                st.success("Nenhum confrontante ou sobreposição encontrado na área consultada.")
-                return
-            # A matrícula ativa não tem vizinhos, mas há impedimentos em outras
-            # matrículas: segue para armazenar e mostrar o resumo consolidado.
+            st.success("Nenhum confrontante ou sobreposição encontrado na área consultada.")
+            return
 
         # Calcula área de sobreposição (só vizinhos)
         perimetro_real = gdf_wgs.unary_union
@@ -1138,43 +1057,6 @@ def render_tab():
             "própria geometria — não contabilizado como sobreposição):  \n"
             + "  ·  ".join(itens)
         )
-
-    # --- Resumo consolidado de impedimentos por matrícula (todas) ---
-    imp = st.session_state.get('confrontantes_impedimentos')
-    if imp is not None and not imp.empty:
-        ui.secao("🚧 Impedimentos por matrícula")
-        n_imp = len(imp)
-        n_mat = imp["Matrícula"].nunique()
-        area_tot = float(imp["Área sobreposta (ha)"].sum())
-        st.caption(
-            f"**{n_imp}** sobreposição(ões) atingindo **{n_mat}** matrícula(s) · "
-            f"total sobreposto **{f'{area_tot:.2f}'.replace('.', ',')} ha**. "
-            "Cada linha é um impedimento sobre a matrícula indicada, com a área "
-            "invadida (ha) e quanto representa dela (%)."
-        )
-
-        # Rollup por matrícula (nº de impedimentos + área sobreposta total).
-        roll = (imp.groupby("Matrícula")
-                   .agg(Impedimentos=("Código", "count"))
-                   .reset_index())
-        _areas = (imp.groupby("Matrícula")["Área sobreposta (ha)"]
-                     .sum().round(4).reset_index())
-        roll = roll.merge(_areas, on="Matrícula")
-        st.dataframe(roll, use_container_width=True, hide_index=True)
-
-        with st.expander("Ver impedimentos detalhados (um por registro)"):
-            st.dataframe(imp, use_container_width=True, hide_index=True)
-            _buf = io.BytesIO()
-            with pd.ExcelWriter(_buf, engine="xlsxwriter") as _w:
-                imp.to_excel(_w, index=False, sheet_name="Impedimentos")
-                roll.to_excel(_w, index=False, sheet_name="Resumo por matrícula")
-            st.download_button(
-                "📥 Baixar impedimentos (Excel)",
-                data=_buf.getvalue(),
-                file_name="impedimentos_por_matricula.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True, key="dl_impedimentos")
-        st.markdown("---")
 
     # --- Cards de métricas ---
     c1, c2, c3, c4 = st.columns(4)
