@@ -143,8 +143,86 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
 
     cols_existentes = [c for c in colunas if c in gdf_inter.columns]
     cols_final = ['area_ha_sobreposta', 'geometry'] + cols_existentes
-    
+
     return True, gdf_inter[cols_final], None
+
+
+# --- 2b. IMPEDIMENTOS POR MATRÍCULA ---
+
+# Colunas (por fonte) que identificam o impedimento, em ordem de preferência.
+_COLS_IDENT = ['nom_pessoa', 'autuado', 'nome_uc', 'nomeuc', 'terrai_nome',
+               'nome_aldeia', 'identificacao_bem', 'num_auto_infracao', 'processo']
+
+
+def _identificar(row):
+    """Rótulo curto do impedimento, escolhido conforme a fonte."""
+    for c in _COLS_IDENT:
+        v = row.get(c)
+        if v is not None and str(v).strip() not in ('', 'nan', 'None', 'NaT'):
+            return str(v).strip()
+    return "—"
+
+
+def _impedimentos_por_matricula(resultados, feats):
+    """Distribui os impedimentos encontrados pelas matrículas do imóvel.
+
+    Para cada impedimento (feição já recortada ao perímetro), descobre em
+    qual(is) matrícula(s) ele incide e a área sobreposta em cada uma (ha e % da
+    matrícula). Um embargo/UC/TI que atravessa duas matrículas aparece uma vez
+    por matrícula, com a área correspondente a cada uma. Só se aplica quando há
+    mais de uma matrícula. Pontos (sem área) entram com 0."""
+    if feats is None or len(feats) < 2:
+        return pd.DataFrame()
+
+    feats_4674 = feats.to_crs(WFS_CRS).reset_index(drop=True)
+    # Área (ha) e UTM de cada matrícula, calculados uma única vez.
+    info_mat = []
+    for i in range(len(feats_4674)):
+        g = feats_4674.geometry.iloc[i]
+        utm = calcular_epsg_utm(g.centroid)
+        area_ha = gpd.GeoSeries([g], crs=WFS_CRS).to_crs(utm).area.iloc[0] / 1e4
+        info_mat.append((utm, area_ha))
+
+    linhas = []
+    for item in resultados:
+        if not item.get("status") or item.get("dados") is None or item["dados"].empty:
+            continue
+        fonte = item["nome"]
+        for _, r in item["dados"].iterrows():
+            geom = r.geometry
+            if geom is None or geom.is_empty:
+                continue
+            ident = _identificar(r)
+            eh_ponto = geom.geom_type in ("Point", "MultiPoint")
+            for i in range(len(feats_4674)):
+                mat_geom = feats_4674.geometry.iloc[i]
+                if not geom.intersects(mat_geom):
+                    continue
+                rotulo = str(feats.iloc[i]["_rotulo"])
+                if eh_ponto:
+                    linhas.append({
+                        "Matrícula": rotulo, "Fonte": fonte, "Identificação": ident,
+                        "Área sobreposta (ha)": 0.0, "% da matrícula": 0.0})
+                    continue
+                inter = geom.intersection(mat_geom)
+                if inter.is_empty:
+                    continue
+                utm, area_m_ha = info_mat[i]
+                a = gpd.GeoSeries([inter], crs=WFS_CRS).to_crs(utm).area.iloc[0] / 1e4
+                if a <= 0:
+                    continue
+                pct = (a / area_m_ha * 100) if area_m_ha > 0 else 0.0
+                linhas.append({
+                    "Matrícula": rotulo, "Fonte": fonte, "Identificação": ident,
+                    "Área sobreposta (ha)": round(a, 4), "% da matrícula": round(pct, 2)})
+
+    if not linhas:
+        return pd.DataFrame()
+    df = pd.DataFrame(linhas)
+    return df.sort_values(
+        ["Matrícula", "Área sobreposta (ha)"], ascending=[True, False]
+    ).reset_index(drop=True)
+
 
 # --- 3. RENDERIZAÇÃO ---
 
@@ -245,6 +323,39 @@ def render_tab():
                 ui.secao("Checklist de verificação")
                 st.markdown("".join(_badge(r) for r in resultados), unsafe_allow_html=True)
             return
+
+        # --- Impedimentos por matrícula (imóvel com várias matrículas) ---
+        feats = st.session_state.get('gdf_features')
+        df_mat = _impedimentos_por_matricula(resultados, feats)
+        if not df_mat.empty:
+            ui.secao("🗂️ Impedimentos por matrícula")
+            n_mat = df_mat["Matrícula"].nunique()
+            area_tot = float(df_mat["Área sobreposta (ha)"].sum())
+            st.caption(
+                f"Os impedimentos atingem **{n_mat}** matrícula(s) · área sobreposta "
+                f"total **{f'{area_tot:.2f}'.replace('.', ',')} ha**. Cada linha é um "
+                "impedimento sobre a matrícula indicada, com a área invadida (ha) e o "
+                "quanto representa dela (%). Pontos (sem área) entram com 0."
+            )
+            roll = (df_mat.groupby("Matrícula")
+                          .agg(Impedimentos=("Fonte", "count")).reset_index())
+            _a = (df_mat.groupby("Matrícula")["Área sobreposta (ha)"]
+                        .sum().round(4).reset_index())
+            roll = roll.merge(_a, on="Matrícula")
+            st.dataframe(roll, use_container_width=True, hide_index=True)
+            with st.expander("Ver impedimentos detalhados (um por matrícula atingida)"):
+                st.dataframe(df_mat, use_container_width=True, hide_index=True)
+                _buf = BytesIO()
+                with pd.ExcelWriter(_buf, engine="xlsxwriter") as _w:
+                    df_mat.to_excel(_w, index=False, sheet_name="Impedimentos")
+                    roll.to_excel(_w, index=False, sheet_name="Resumo por matrícula")
+                st.download_button(
+                    "📥 Baixar impedimentos por matrícula (Excel)",
+                    data=_buf.getvalue(),
+                    file_name="impedimentos_por_matricula.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key="dl_imp_matricula")
+            st.divider()
 
         # Com sobreposição: checklist e mapa LADO A LADO (painéis de altura fixa),
         # e o detalhamento em ABAS (uma por fonte) em vez de uma pilha de tabelas.
