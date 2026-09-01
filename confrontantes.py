@@ -871,6 +871,25 @@ def render_tab():
     codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
     ui.barra_imovel(nome=codigo_display)
 
+    # --- Seleção por matrícula (arquivo multi-feição) ---
+    # Analisa UMA matrícula por vez: evita fundir matrículas próximas (a divisa
+    # entre elas deixa de ser "interna" e vira confrontante) e dá percentuais/
+    # numeração por matrícula. 'Tudo junto (geral)' usa a união.
+    feats = st.session_state.get('gdf_features')
+    if feats is not None and len(feats) > 1:
+        _labels = ["🟩 Tudo junto (geral)"] + [
+            f"📄 {feats.iloc[i]['_rotulo']}" for i in range(len(feats))]
+        _sel = st.selectbox(
+            "Matrícula", _labels, index=0, key="confront_matricula",
+            on_change=lambda: st.session_state.update({'confrontantes_done': False}),
+            help="Analisa a matrícula escolhida (ou tudo junto). Por matrícula, "
+                 "matrículas vizinhas próximas aparecem como confrontantes.")
+        _idx = _labels.index(_sel)
+        if _idx > 0:
+            _g = feats.iloc[[_idx - 1]][["geometry"]].reset_index(drop=True)
+            gdf_imovel = gpd.GeoDataFrame(_g, geometry="geometry", crs=feats.crs)
+            codigo_display = str(feats.iloc[_idx - 1]['_rotulo'])
+
     # --- Seletor de fonte ---
     fonte_sel = st.radio(
         "Fonte de dados",
