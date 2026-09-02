@@ -20,6 +20,11 @@ def resetar_analises_anteriores():
         'camadas_fixas', 'camada_preview', 'ndvi_stats', 'ndvi_colorbar',
         'clim_temp', 'clim_rain', 'last_clim_source', 'ctx_dados', 'gdf_imovel',
         'gdf_features', 'preview_gdf', 'uso_matricula',
+        # Pontos do NDVI (sub-aba vigor): pertencem ao perímetro anterior.
+        'ndvi_pontos', 'ndvi_result', 'ndvi_last_click', 'ndvi_fora',
+        # Confrontantes: resultado atrelado ao perímetro anterior.
+        'confrontantes_resultado', 'confrontantes_principais',
+        'confrontantes_proprio', 'confrontantes_done',
     ]
     
     for chave in chaves_para_limpar:

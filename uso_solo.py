@@ -663,8 +663,9 @@ def _guia_ndvi():
 
 
 def _render_ndvi(gdf_imovel):
-    st.caption("Clique dentro do perímetro para coletar pontos e ver o vigor da "
-               "vegetação (NDVI) de cada um ao longo do tempo.")
+    st.caption("Clique no mapa para coletar pontos e ver o vigor da vegetação "
+               "(NDVI) de cada um ao longo do tempo. Pode coletar **fora** do "
+               "perímetro também — útil para comparar com um vizinho.")
 
     geom = _imovel_wgs(gdf_imovel)
     minx, miny, maxx, maxy = geom.bounds
@@ -682,9 +683,13 @@ def _render_ndvi(gdf_imovel):
         ).add_to(fmap)
         for i, (lon, lat) in enumerate(pontos):
             cor = CORES_PONTOS[i % len(CORES_PONTOS)]
+            dentro = geom.contains(Point(lon, lat))
+            # Ponto fora do perímetro: borda âmbar (sinaliza "vizinho/comparação").
+            borda = "#ffffff" if dentro else "#ffb300"
+            tip = f"Ponto {i + 1}" + ("" if dentro else " (fora do perímetro)")
             folium.CircleMarker(
-                [lat, lon], radius=9, color="#ffffff", weight=2,
-                fill=True, fill_color=cor, fill_opacity=1.0, tooltip=f"Ponto {i + 1}",
+                [lat, lon], radius=9, color=borda, weight=3 if not dentro else 2,
+                fill=True, fill_color=cor, fill_opacity=1.0, tooltip=tip,
             ).add_to(fmap)
             folium.Marker(
                 [lat, lon],
@@ -707,25 +712,24 @@ def _render_ndvi(gdf_imovel):
         novo = (round(clk["lng"], 6), round(clk["lat"], 6))
         if st.session_state.get("ndvi_last_click") != novo:
             st.session_state["ndvi_last_click"] = novo
-            if geom.contains(Point(novo[0], novo[1])):
-                pontos.append(novo)
-            else:
-                st.session_state["ndvi_fora"] = True
+            # Aceita pontos dentro OU fora do perímetro (comparação com vizinhos).
+            pontos.append(novo)
             st.rerun()
 
     with col_pts:
         st.markdown("**Pontos coletados**")
-        if st.session_state.pop("ndvi_fora", False):
-            st.warning("O ponto precisa estar **dentro** do perímetro.")
         if not pontos:
-            st.caption("Clique no mapa, dentro do imóvel, para adicionar pontos.")
+            st.caption("Clique no mapa para adicionar pontos (dentro ou fora).")
         for i, (lon, lat) in enumerate(pontos):
             cor = CORES_PONTOS[i % len(CORES_PONTOS)]
+            fora = not geom.contains(Point(lon, lat))
+            tag_fora = (" · <span style='color:#b8860b;font-weight:600;'>fora</span>"
+                        if fora else "")
             c1, c2 = st.columns([0.85, 0.15], vertical_alignment="center")
             c1.markdown(
                 f"<span style='width:11px;height:11px;border-radius:50%;background:{cor};"
                 f"display:inline-block;margin-right:7px;'></span>"
-                f"<b>Ponto {i + 1}</b> · {lat:.4f}, {lon:.4f}",
+                f"<b>Ponto {i + 1}</b> · {lat:.4f}, {lon:.4f}{tag_fora}",
                 unsafe_allow_html=True)
             if c2.button("✕", key=f"ndvi_rm_{i}", help="Remover ponto"):
                 pontos.pop(i)
