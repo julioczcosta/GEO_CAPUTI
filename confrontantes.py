@@ -684,6 +684,76 @@ def extrair_area(row):
             return None
     return None
 
+
+def casar_matriculas(gdf_cand, matriculas, utm):
+    """Casa cada matrícula do imóvel (~100%) com um registro das bases.
+
+    A ANÁLISE de confrontantes é geral (imóvel inteiro); esta função é o passo
+    POR MATRÍCULA: para cada matrícula tenta achar o registro (SIGEF/CAR/SNCI)
+    que coincide ~100% com ela (IoU >= LIMIAR_PROPRIO) e diz qual é. Esses
+    registros casados são os "perímetros principais", que recebem a numeração
+    inicial (#1..#N). Um CAR que cobre várias matrículas NÃO casa com uma só
+    (IoU baixo) — ele fica como sobreposição na análise geral.
+
+    Args:
+      gdf_cand: candidatos das bases (EPSG:4674), com coluna _fonte. Índice reset.
+      matriculas: lista de (rotulo, geom_4674) — as matrículas (ou o imóvel único).
+      utm: CRS métrico para medir o IoU.
+
+    Retorna (gdf_principais, proprio_idx):
+      gdf_principais: 1 linha por matrícula (EPSG:4674), na ORDEM das matrículas,
+        com geometry = registro casado de maior prioridade (SIGEF>SNCI>CAR) ou a
+        própria matrícula se não casar; colunas _rotulo, _casado, _num,
+        _matches (lista {fonte,codigo,iou}) e _match_txt (resumo legível).
+      proprio_idx: set de índices de gdf_cand consumidos como 'próprio' de alguma
+        matrícula (para excluí-los dos vizinhos/confrontantes).
+    """
+    proprio_idx = set()
+    cand_utm = (gdf_cand.to_crs(utm).geometry.tolist()
+                if gdf_cand is not None and not gdf_cand.empty else [])
+    linhas = []
+    for rotulo, mat_geom in matriculas:
+        mat_u = gpd.GeoSeries([mat_geom], crs="EPSG:4674").to_crs(utm).iloc[0]
+        melhores = {}  # fonte -> {idx, iou, row}
+        for idx in range(len(cand_utm)):
+            gu = cand_utm[idx]
+            if gu is None or gu.is_empty or not gu.intersects(mat_u):
+                continue
+            inter = gu.intersection(mat_u).area
+            uni = gu.union(mat_u).area
+            iou = (inter / uni) if uni > 0 else 0.0
+            if iou < LIMIAR_PROPRIO:
+                continue
+            r = gdf_cand.iloc[idx]
+            f = r.get("_fonte", "CAR")
+            proprio_idx.add(idx)
+            if f not in melhores or iou > melhores[f]["iou"]:
+                melhores[f] = {"idx": idx, "iou": iou, "row": r}
+
+        fontes_ord = sorted(melhores, key=lambda f: PRIORIDADE_FONTE.get(f, 9))
+        casado = len(fontes_ord) > 0
+        if casado:
+            geom_princ = melhores[fontes_ord[0]]["row"].geometry
+            matches = [{"fonte": f,
+                        "codigo": extrair_codigo_car(melhores[f]["row"]),
+                        "iou": round(melhores[f]["iou"] * 100, 1)}
+                       for f in fontes_ord]
+            match_txt = " · ".join(f"{m['fonte']} {m['codigo']} ({m['iou']:.0f}%)"
+                                   for m in matches)
+        else:
+            geom_princ = mat_geom
+            matches = []
+            match_txt = "não localizada nas bases"
+
+        linhas.append({"_rotulo": rotulo, "_casado": casado,
+                        "_matches": matches, "_match_txt": match_txt,
+                        "geometry": geom_princ})
+
+    gdf_princ = gpd.GeoDataFrame(linhas, geometry="geometry", crs="EPSG:4674")
+    gdf_princ["_num"] = range(1, len(gdf_princ) + 1)
+    return gdf_princ, proprio_idx
+
+
 # ==========================================
 # 4. GERAÇÃO DE KML
 # ==========================================
@@ -752,17 +822,19 @@ def _placemark(num, nome, descricao, style_id, geom):
     )
 
 
-def gerar_kml_completo(gdf_imovel, gdf_res, codigo_imovel):
-    """KML único com o imóvel + todos confrontantes/sobreposições numerados."""
-    geom_imovel = gdf_imovel.unary_union
-
-    placemarks = [
-        _placemark(
-            1, "Imóvel Analisado",
-            f"Código: {codigo_imovel}",
-            "imovel", geom_imovel
-        )
-    ]
+def gerar_kml_completo(gdf_princ, gdf_res, codigo_imovel):
+    """KML único: perímetros principais (matrículas) + confrontantes/sobreposições,
+    numerados na mesma sequência (#1..#N principais, depois os vizinhos)."""
+    placemarks = []
+    if gdf_princ is not None and not gdf_princ.empty:
+        for _, p in gdf_princ.iterrows():
+            pnum = int(p["_num"])
+            prot = str(p["_rotulo"])
+            desc = ("Perímetro principal (matrícula)\n"
+                    f"Matrícula: {prot}\n"
+                    f"Correspondência: {p['_match_txt']}")
+            placemarks.append(
+                _placemark(pnum, f"Principal · {prot}", desc, "imovel", p.geometry))
 
     for idx, row in gdf_res.iterrows():
         num = int(row["_num"])
@@ -871,26 +943,11 @@ def render_tab():
     codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
     ui.barra_imovel(nome=codigo_display)
 
-    # --- Seleção por matrícula (arquivo multi-feição) ---
-    # Cada matrícula do arquivo é um perímetro PRÓPRIO, analisado individualmente
-    # (nunca fundidas): a numeração e os percentuais valem para a matrícula
-    # escolhida, e a divisa entre matrículas vizinhas passa a ser detectada como
-    # confrontante (com a união ela ficava "interna" e sumia). Duas matrículas que
-    # por acaso caiam num mesmo CAR/SNCI continuam separadas — o arquivo do
-    # usuário as traz como matrículas distintas. Sem opção "tudo junto".
+    # A ANÁLISE é sempre GERAL (imóvel inteiro / união das matrículas). O passo
+    # POR MATRÍCULA fica só no casamento ~100% (casar_matriculas): cada matrícula
+    # acha o registro que coincide com ela e vira um "perímetro principal"
+    # numerado no início (#1..#N); os vizinhos vêm depois.
     feats = st.session_state.get('gdf_features')
-    if feats is not None and len(feats) > 1:
-        _labels = [f"📄 {feats.iloc[i]['_rotulo']}" for i in range(len(feats))]
-        _sel = st.selectbox(
-            "Matrícula (analisada individualmente)", _labels, index=0,
-            key="confront_matricula",
-            on_change=lambda: st.session_state.update({'confrontantes_done': False}),
-            help="Cada matrícula é um perímetro próprio, com numeração e "
-                 "percentuais dela. Troque para analisar as outras.")
-        _idx = _labels.index(_sel)
-        _g = feats.iloc[[_idx]][["geometry"]].reset_index(drop=True)
-        gdf_imovel = gpd.GeoDataFrame(_g, geometry="geometry", crs=feats.crs)
-        codigo_display = str(feats.iloc[_idx]['_rotulo'])
 
     # --- Seletor de fonte ---
     fonte_sel = st.radio(
@@ -912,7 +969,8 @@ def render_tab():
 
     if rodar:
         st.session_state['confrontantes_resultado'] = None
-        st.session_state['confrontantes_proprio'] = None
+        st.session_state['confrontantes_principais'] = None
+        st.session_state['confrontantes_proprio'] = None  # bloco antigo aposentado
         st.session_state['confrontantes_done'] = False
 
         with st.spinner("Detectando UFs do imóvel..."):
@@ -926,38 +984,55 @@ def render_tab():
         st.caption(f"UFs detectadas: **{', '.join([u.upper() for u in ufs])}**")
 
         fontes_alvo = ["CAR", "SIGEF", "SNCI"] if fonte_sel == "Consolidado" else [fonte_sel]
-        partes, diag = [], []
+        cand_partes, diag = [], []
         with st.spinner(f"Consultando {fonte_sel} ({', '.join(u.upper() for u in ufs)})..."):
             for f in fontes_alvo:
                 # Cronometra cada fonte: como o INCRA é lento a partir de servidor
                 # no exterior (Streamlit Cloud), o tempo por fonte no diagnóstico
                 # ajuda a ver onde o gargalo realmente está.
                 t0 = time.time()
-                gdf_f = buscar_fonte(gdf_wgs, ufs, f)
+                gdf_f = buscar_fonte(gdf_wgs, ufs, f)  # candidatos crus
                 dt = time.time() - t0
-                if gdf_f.empty:
-                    diag.append(f"{f}: 0 ({dt:.0f}s)")
-                    continue
-                gdf_f = classificar_imoveis(gdf_f, gdf_wgs)
-                diag.append(f"{f}: {len(gdf_f)} ({dt:.0f}s)")
-                if not gdf_f.empty:
-                    partes.append(gdf_f)
+                n = 0 if gdf_f is None or gdf_f.empty else len(gdf_f)
+                diag.append(f"{f}: {n} ({dt:.0f}s)")
+                if n:
+                    cand_partes.append(gdf_f)
 
-        st.caption("Vizinhos por fonte → " + " · ".join(diag))
+        st.caption("Encontrados por fonte → " + " · ".join(diag))
 
-        if not partes:
+        if not cand_partes:
             st.warning("Nenhum confrontante/sobreposição encontrado (ou as bases estão indisponíveis no momento).")
             return
 
-        gdf_all = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs=gdf_wgs.crs)
+        gdf_cand = gpd.GeoDataFrame(
+            pd.concat(cand_partes, ignore_index=True), crs="EPSG:4674"
+        ).reset_index(drop=True)
 
-        # Separa o PRÓPRIO imóvel (registro do imóvel na base, IoU >= 90%) ANTES de
-        # consolidar — guarda um por fonte para o bloco "consta nas bases".
-        eh_proprio = gdf_all["_classificacao"] == "Próprio"
-        gdf_proprio = gdf_all[eh_proprio].copy()
-        gdf_vizinhos = gdf_all[~eh_proprio].copy()
-        if "_tambem_em" not in gdf_proprio.columns:
-            gdf_proprio["_tambem_em"] = ""
+        utm_crs = gdf_wgs.estimate_utm_crs()
+
+        # --- PASSO POR MATRÍCULA: casa cada matrícula (~100%) com um registro. ---
+        # Vira "perímetro principal" e recebe a numeração inicial (#1..#N).
+        if feats is not None and len(feats) > 1:
+            feats_4674 = feats.to_crs("EPSG:4674").reset_index(drop=True)
+            matriculas = [(str(feats.iloc[i]["_rotulo"]), feats_4674.geometry.iloc[i])
+                          for i in range(len(feats_4674))]
+        else:
+            matriculas = [(codigo_display, gdf_wgs.unary_union)]
+
+        gdf_princ, proprio_idx = casar_matriculas(gdf_cand, matriculas, utm_crs)
+        n_princ = len(gdf_princ)
+
+        # --- ANÁLISE GERAL: vizinhos contra a UNIÃO, tirando os já casados. ---
+        gdf_viz_cand = gdf_cand.drop(index=list(proprio_idx)).reset_index(drop=True)
+        gdf_all = (classificar_imoveis(gdf_viz_cand, gdf_wgs)
+                   if not gdf_viz_cand.empty else gdf_viz_cand)
+
+        if not gdf_all.empty and "_classificacao" in gdf_all.columns:
+            gdf_vizinhos = gdf_all[
+                gdf_all["_classificacao"].isin(["Sobreposição", "Confrontante"])
+            ].copy()
+        else:
+            gdf_vizinhos = gdf_all.copy()
 
         if fonte_sel == "Consolidado":
             gdf_resultado = consolidar_fontes(gdf_vizinhos)
@@ -965,24 +1040,22 @@ def render_tab():
             gdf_resultado = gdf_vizinhos.copy()
             gdf_resultado["_tambem_em"] = ""
 
-        if gdf_resultado.empty and gdf_proprio.empty:
+        if gdf_resultado.empty and n_princ == 0:
             st.success("Nenhum confrontante ou sobreposição encontrado na área consultada.")
             return
 
-        # Calcula área de sobreposição (só vizinhos)
+        # Área de sobreposição (só vizinhos), contra a união.
         perimetro_real = gdf_wgs.unary_union
-        utm_crs = gdf_wgs.estimate_utm_crs()
         areas_sob = [
             calcular_area_sobreposicao_ha(row.geometry, perimetro_real, utm_crs)
             if row["_classificacao"] == "Sobreposição" else 0.0
             for _, row in gdf_resultado.iterrows()
-        ]
+        ] if not gdf_resultado.empty else []
         gdf_resultado["_area_sobreposicao_ha"] = areas_sob
 
-        # Numera a partir de 2 (#1 = imóvel).
+        # NUMERAÇÃO: principais #1..#N; vizinhos a partir de N+1.
         # Consolidado: ordem por prioridade de fonte (SIGEF > SNCI > CAR), e
         # dentro de cada fonte sobreposição antes de confrontante.
-        # Fonte única: sobreposição primeiro.
         if not gdf_resultado.empty:
             gdf_resultado["_ordem_classe"] = gdf_resultado["_classificacao"].apply(
                 lambda x: 0 if x == "Sobreposição" else 1
@@ -997,11 +1070,16 @@ def render_tab():
                 gdf_resultado = gdf_resultado.drop(columns=["_ordem_fonte"])
             else:
                 gdf_resultado = gdf_resultado.sort_values("_ordem_classe").reset_index(drop=True)
-            gdf_resultado["_num"] = range(2, len(gdf_resultado) + 2)
+            gdf_resultado["_num"] = range(n_princ + 1, len(gdf_resultado) + n_princ + 1)
             gdf_resultado = gdf_resultado.drop(columns=["_ordem_classe"])
 
+        # Garante colunas mesmo quando só há principais (sem vizinhos), para o render.
+        for _c in ("_classificacao", "_fonte", "_tambem_em"):
+            if _c not in gdf_resultado.columns:
+                gdf_resultado[_c] = pd.Series([], dtype=object)
+
         st.session_state['confrontantes_resultado'] = gdf_resultado
-        st.session_state['confrontantes_proprio'] = gdf_proprio
+        st.session_state['confrontantes_principais'] = gdf_princ
         st.session_state['confrontantes_imovel_wgs'] = gdf_wgs
         st.session_state['confrontantes_fonte'] = fonte_sel
         st.session_state['confrontantes_done'] = True
@@ -1042,21 +1120,24 @@ def render_tab():
 
     st.markdown("---")
 
-    # --- Bloco: o próprio imóvel já consta nestas bases ---
-    gdf_proprio = st.session_state.get('confrontantes_proprio')
-    if gdf_proprio is not None and not gdf_proprio.empty:
-        itens, vistos = [], set()
-        for _, r in gdf_proprio.iterrows():
-            f = r.get("_fonte", "CAR")
-            if f in vistos:
-                continue
-            vistos.add(f)
-            itens.append(f"**{f}**: `{extrair_codigo_car(r)}`")
-        st.success(
-            "📌 O imóvel analisado **já consta** nestas bases (identificado pela "
-            "própria geometria — não contabilizado como sobreposição):  \n"
-            + "  ·  ".join(itens)
+    # --- Bloco: perímetros principais (cada matrícula ↔ registro casado ~100%) ---
+    gdf_princ = st.session_state.get('confrontantes_principais')
+    if gdf_princ is not None and not gdf_princ.empty:
+        n_casadas = int(gdf_princ["_casado"].sum())
+        linhas_p = []
+        for _, p in gdf_princ.iterrows():
+            n = int(p["_num"])
+            rot = p["_rotulo"]
+            if p["_casado"]:
+                linhas_p.append(f"**#{n} · {rot}** → {p['_match_txt']}")
+            else:
+                linhas_p.append(f"**#{n} · {rot}** → ⚠️ não localizada nas bases")
+        titulo = (
+            f"📌 **Perímetros principais** — {len(gdf_princ)} matrícula(s), "
+            f"{n_casadas} casada(s) ~100% com o registro correspondente "
+            "(recebem a numeração inicial; não contam como sobreposição):"
         )
+        st.success(titulo + "  \n" + "  \n".join(linhas_p))
 
     # --- Cards de métricas ---
     c1, c2, c3, c4 = st.columns(4)
@@ -1214,65 +1295,83 @@ def render_tab():
 
             fg_item.add_to(m)
 
-        # ---- 2º: Imóvel principal POR ÚLTIMO (sempre no topo, máximo destaque) ----
-        fg_imovel = folium.FeatureGroup(name="🔷 #1 - Imóvel Analisado", show=True)
+        # ---- 2º: Perímetros principais (matrículas casadas) POR ÚLTIMO ----
+        # Cada matrícula é desenhada com a geometria do registro casado (ou a
+        # própria matrícula, tracejada fina, se não casou), com seu número inicial.
+        gdf_princ_map = st.session_state.get('confrontantes_principais')
+        if gdf_princ_map is not None and not gdf_princ_map.empty:
+            for _, p in gdf_princ_map.iterrows():
+                pnum = int(p["_num"])
+                prot = str(p["_rotulo"])
+                pcasado = bool(p["_casado"])
+                ptxt = p["_match_txt"]
+                geo = p.geometry.__geo_interface__
+                fg_p = folium.FeatureGroup(name=f"🔷 #{pnum} - {prot}", show=True)
 
-        # Halo escuro por baixo: realça o perímetro sobre qualquer cor de fonte.
-        folium.GeoJson(
-            gdf_wgs,
-            style_function=lambda x: {
-                'color': '#003844', 'weight': 9,
-                'fill': False, 'opacity': 0.55
-            }
-        ).add_to(fg_imovel)
+                folium.GeoJson(geo, style_function=lambda x: {
+                    'color': '#003844', 'weight': 9, 'fill': False, 'opacity': 0.55
+                }).add_to(fg_p)
+                folium.GeoJson(
+                    geo,
+                    style_function=lambda x, dash=('4, 8' if not pcasado else '10, 6'): {
+                        'color': COR_IMOVEL, 'weight': 5, 'fillColor': COR_IMOVEL,
+                        'fillOpacity': 0.06, 'dashArray': dash
+                    },
+                    tooltip=folium.Tooltip(f"<b>#{pnum} · {prot}</b><br>{ptxt}")
+                ).add_to(fg_p)
 
-        # Linha principal ciano (grossa, tracejada) por cima.
-        folium.GeoJson(
-            gdf_wgs,
-            style_function=lambda x: {
-                'color': COR_IMOVEL,
-                'weight': 5,
-                'fillColor': COR_IMOVEL,
-                'fillOpacity': 0.06,
-                'dashArray': '10, 6'
-            },
-            tooltip=folium.Tooltip(f"<b>#1 · Imóvel Analisado:</b> {codigo_display}")
-        ).add_to(fg_imovel)
-
-        # Marcador #1 no centroide do imóvel (maior que os demais)
-        cent_imovel = gdf_wgs.unary_union.centroid
-        folium.Marker(
-            location=[cent_imovel.y, cent_imovel.x],
-            icon=folium.DivIcon(
-                html=(
-                    f'<div style="background:{COR_IMOVEL};color:#003844;'
-                    'border-radius:50%;width:40px;height:40px;'
-                    'display:flex;align-items:center;justify-content:center;'
-                    'font-weight:800;font-size:17px;font-family:sans-serif;'
-                    'border:3px solid white;'
-                    'box-shadow:0 2px 10px rgba(0,0,0,0.5);">1</div>'
-                ),
-                icon_size=(40, 40),
-                icon_anchor=(20, 20)
-            )
-        ).add_to(fg_imovel)
-
-        fg_imovel.add_to(m)
+                cent = p.geometry.centroid
+                folium.Marker(
+                    location=[cent.y, cent.x],
+                    icon=folium.DivIcon(
+                        html=(
+                            f'<div style="background:{COR_IMOVEL};color:#003844;'
+                            'border-radius:50%;width:38px;height:38px;'
+                            'display:flex;align-items:center;justify-content:center;'
+                            'font-weight:800;font-size:16px;font-family:sans-serif;'
+                            'border:3px solid white;'
+                            f'box-shadow:0 2px 10px rgba(0,0,0,0.5);">{pnum}</div>'
+                        ),
+                        icon_size=(38, 38), icon_anchor=(19, 19)
+                    )
+                ).add_to(fg_p)
+                fg_p.add_to(m)
+            n_princ_map = len(gdf_princ_map)
+        else:
+            # Fallback (sessão sem principais): desenha o imóvel como #1.
+            fg_imovel = folium.FeatureGroup(name="🔷 #1 - Imóvel Analisado", show=True)
+            folium.GeoJson(gdf_wgs, style_function=lambda x: {
+                'color': '#003844', 'weight': 9, 'fill': False, 'opacity': 0.55}).add_to(fg_imovel)
+            folium.GeoJson(gdf_wgs, style_function=lambda x: {
+                'color': COR_IMOVEL, 'weight': 5, 'fillColor': COR_IMOVEL,
+                'fillOpacity': 0.06, 'dashArray': '10, 6'},
+                tooltip=folium.Tooltip(f"<b>#1 · Imóvel Analisado:</b> {codigo_display}")).add_to(fg_imovel)
+            cent_imovel = gdf_wgs.unary_union.centroid
+            folium.Marker(location=[cent_imovel.y, cent_imovel.x], icon=folium.DivIcon(
+                html=(f'<div style="background:{COR_IMOVEL};color:#003844;border-radius:50%;'
+                      'width:40px;height:40px;display:flex;align-items:center;'
+                      'justify-content:center;font-weight:800;font-size:17px;'
+                      'font-family:sans-serif;border:3px solid white;'
+                      'box-shadow:0 2px 10px rgba(0,0,0,0.5);">1</div>'),
+                icon_size=(40, 40), icon_anchor=(20, 20))).add_to(fg_imovel)
+            fg_imovel.add_to(m)
+            n_princ_map = 1
 
         folium.LayerControl(collapsed=True).add_to(m)
 
         # Key dinâmica força re-mount limpo do mapa
-        map_key = f"mapa_conf_{len(gdf_res)}"
+        map_key = f"mapa_conf_{len(gdf_res)}_{n_princ_map}"
         st_folium(m, height=ui.MAPA_H_INTER, use_container_width=True, key=map_key)
 
     with col_tabela:
         ui.secao("Registros Encontrados")
         st.caption("Selecione uma linha para ver detalhes e baixar")
 
-        # Botão de download completo (imóvel + todos)
-        kml_completo = gerar_kml_completo(gdf_wgs, gdf_res, codigo_display)
+        # Botão de download completo (principais + todos os vizinhos)
+        _n_princ_kml = 0 if gdf_princ is None or gdf_princ.empty else len(gdf_princ)
+        kml_completo = gerar_kml_completo(gdf_princ, gdf_res, codigo_display)
         st.download_button(
-            label=f"📥 Baixar KML Completo ({len(gdf_res) + 1} feições)",
+            label=f"📥 Baixar KML Completo ({len(gdf_res) + _n_princ_kml} feições)",
             data=kml_completo,
             file_name=f"confrontantes_{codigo_display.replace(' ', '_').replace(':', '')}.kml",
             mime="application/vnd.google-earth.kml+xml",
