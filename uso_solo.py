@@ -833,6 +833,8 @@ def _render_ndvi(gdf_imovel):
              "Média mensal de NDVI · buracos na linha = mês sem imagem limpa.")
     if tem_precip:
         fonte += " Barras: precipitação CHIRPS (média na região do imóvel)."
+    else:
+        fonte += " (Precipitação CHIRPS indisponível para esta área/período.)"
     st.caption(fonte)
 
     _guia_ndvi()

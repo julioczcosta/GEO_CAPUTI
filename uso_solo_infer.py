@@ -447,9 +447,14 @@ def precip_serie_mensal(geom_ee, ano_ini, ano_fim):
 
     bandas = [f"m{y:04d}_{m:02d}" for (y, m) in meses]
     stack = ee.ImageCollection(datas.map(total_mes)).toBands().rename(bandas)
+    # CHIRPS tem pixel ~5,5 km. Em imóveis pequenos (< pixel), um reduceRegion a
+    # scale=5000 amostra o grid a cada 5 km e pode não cair NENHUM ponto dentro
+    # do perímetro -> retorna None em todos os meses e a precip "some". Como a
+    # chuva é regional, bufferizamos para cobrir ao menos um pixel (garante valor).
+    regiao = geom_ee.buffer(3000)
     try:
         vals = stack.reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=geom_ee, scale=5000,
+            reducer=ee.Reducer.mean(), geometry=regiao, scale=5000,
             bestEffort=True, maxPixels=1e13,
         ).getInfo()
     except Exception:
