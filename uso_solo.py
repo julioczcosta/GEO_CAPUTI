@@ -864,23 +864,26 @@ def _mapa_mapbiomas_html(geom_shp, ano):
     """HTML do mapa MapBiomas recortado no imóvel (tiles do GEE, sem download)."""
     geom_ee = ee.Geometry(mapping(geom_shp))
     minx, miny, maxx, maxy = geom_shp.bounds
-    m = geemap.Map(
-        center=[(miny + maxy) / 2, (minx + maxx) / 2], zoom=13, height=460,
-        draw_control=False, scale_control=False, fullscreen_control=False,
-        attribution_control=False, toolbar_control=False, lite_mode=True,
-    )
-    m.add_basemap("HYBRID")
+    # folium.Map puro (honra location/zoom_start) + camada do GEE via getMapId.
+    # O geemap.add_layer resetava a visão para o globo; o fit_bounds seguinte não
+    # "pega" no HTML salvo. Assim o mapa sempre abre enquadrado no imóvel.
+    fmap = folium.Map(
+        location=[(miny + maxy) / 2, (minx + maxx) / 2],
+        zoom_start=_zoom_bounds(minx, miny, maxx, maxy),
+        tiles=None, control_scale=True)
+    folium.TileLayer(tiles="Esri World Imagery", name="Satélite", attr="Esri").add_to(fmap)
     img = (ee.Image(infer.MAPBIOMAS_ASSET)
            .select(f"classification_{int(ano)}").clip(geom_ee))
-    m.add_layer(img, {"min": 0, "max": len(PALETA_MB_LISTA) - 1,
-                      "palette": PALETA_MB_LISTA}, "MapBiomas")
+    mid = img.getMapId({"min": 0, "max": len(PALETA_MB_LISTA) - 1,
+                        "palette": PALETA_MB_LISTA})
+    folium.TileLayer(tiles=mid["tile_fetcher"].url_format, attr="MapBiomas",
+                     name="MapBiomas", overlay=True, control=True).add_to(fmap)
     folium.GeoJson(
         mapping(geom_shp), name="Perímetro",
         style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
-    ).add_to(m)
-    m.fit_bounds([[miny, minx], [maxy, maxx]])
+    ).add_to(fmap)
     with io.BytesIO() as buffer:
-        m.save(buffer, close_file=False)
+        fmap.save(buffer, close_file=False)
         return buffer.getvalue().decode("utf-8")
 
 
@@ -1048,22 +1051,23 @@ def _mapa_declividade_html(geom_shp):
     """HTML do mapa de declividade (classes EMBRAPA) recortado no imóvel."""
     geom_ee = ee.Geometry(mapping(geom_shp))
     minx, miny, maxx, maxy = geom_shp.bounds
-    m = geemap.Map(
-        center=[(miny + maxy) / 2, (minx + maxx) / 2], zoom=13, height=460,
-        draw_control=False, scale_control=False, fullscreen_control=False,
-        attribution_control=False, toolbar_control=False, lite_mode=True,
-    )
-    m.add_basemap("HYBRID")
+    # folium.Map puro (honra location/zoom_start) + camada do GEE via getMapId,
+    # para o mapa sempre abrir enquadrado no imóvel (não no globo).
+    fmap = folium.Map(
+        location=[(miny + maxy) / 2, (minx + maxx) / 2],
+        zoom_start=_zoom_bounds(minx, miny, maxx, maxy),
+        tiles=None, control_scale=True)
+    folium.TileLayer(tiles="Esri World Imagery", name="Satélite", attr="Esri").add_to(fmap)
     img = infer._imagem_declividade(geom_ee)
-    m.add_layer(img, {"min": 1, "max": 6, "palette": PALETA_REL_LISTA},
-                "Declividade", True, 0.75)
+    mid = img.getMapId({"min": 1, "max": 6, "palette": PALETA_REL_LISTA})
+    folium.TileLayer(tiles=mid["tile_fetcher"].url_format, attr="Relevo",
+                     name="Declividade", overlay=True, control=True, opacity=0.75).add_to(fmap)
     folium.GeoJson(
         mapping(geom_shp), name="Perímetro",
         style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
-    ).add_to(m)
-    m.fit_bounds([[miny, minx], [maxy, maxx]])
+    ).add_to(fmap)
     with io.BytesIO() as buffer:
-        m.save(buffer, close_file=False)
+        fmap.save(buffer, close_file=False)
         return buffer.getvalue().decode("utf-8")
 
 
