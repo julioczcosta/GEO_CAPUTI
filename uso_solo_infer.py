@@ -504,6 +504,34 @@ def mapbiomas_areas(geom_ee, ano):
     return out
 
 
+def mapbiomas_series(geom_ee, anos):
+    """Composição MapBiomas por classe para VÁRIOS anos, numa única chamada.
+
+    Faz um só reduceRegion (frequencyHistogram) sobre a imagem multi-banda dos
+    anos pedidos — evita um getInfo por ano. Retorna {ano(int): {classe(int):
+    n_pixels(int)}}. Anos sem dado saem vazios.
+    """
+    anos = [int(a) for a in anos]
+    bandas = [f"classification_{a}" for a in anos]
+    img = ee.Image(MAPBIOMAS_ASSET).select(bandas)
+    res = img.reduceRegion(
+        reducer=ee.Reducer.frequencyHistogram(), geometry=geom_ee, scale=30,
+        maxPixels=1e13, bestEffort=True,
+    ).getInfo() or {}
+
+    out = {}
+    for a, banda in zip(anos, bandas):
+        hist = res.get(banda, {}) or {}
+        ano_dict = {}
+        for k, v in hist.items():
+            try:
+                ano_dict[int(float(k))] = int(round(float(v)))
+            except Exception:
+                continue
+        out[a] = ano_dict
+    return out
+
+
 # ==========================================================================
 #  Declividade (relevo) — classes EMBRAPA, DEM reamostrado (< 30 m)
 # ==========================================================================

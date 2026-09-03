@@ -905,6 +905,11 @@ def _mb_mapa(_geom_shp, ano, cache_id):
     return _mapa_mapbiomas_html(_geom_shp, ano)
 
 
+@st.cache_data(show_spinner=False)
+def _mb_series(_geom_ee, anos, cache_id):
+    return infer.mapbiomas_series(_geom_ee, anos)
+
+
 def _render_mapbiomas(gdf_imovel):
     st.caption("Uso e cobertura do solo pelo **MapBiomas** (referência anual, 30 m). "
                "Serve para comparar/validar a classificação do app.")
@@ -987,6 +992,52 @@ def _render_mapbiomas(gdf_imovel):
 
     st.caption(f"Fonte: MapBiomas Coleção 9 ({ano}) · 30 m. Referência independente — "
                "as classes e a resolução diferem da classificação do app.")
+
+    # --- Histórico de uso do solo (série de todos os anos) ---
+    st.markdown("##### 📈 Histórico de uso do solo")
+    st.caption("Como a composição de uso/cobertura evoluiu ano a ano — revela "
+               "desmatamento/conversão, degradação e estabilidade ao longo do tempo.")
+    try:
+        serie = _mb_series(geom_ee, tuple(anos), f"{nome_imovel}|{escopo_tag}|serie")
+    except Exception as e:
+        serie = None
+        st.caption(f"Não foi possível carregar o histórico: {e}")
+
+    if serie:
+        anos_ord = sorted(serie.keys())
+        pct_por_ano = {}
+        for a in anos_ord:
+            tot = sum(serie[a].values()) or 1
+            pct_por_ano[a] = {c: n / tot * 100.0 for c, n in serie[a].items()}
+        # Classes relevantes: >= 3% em algum ano; as demais entram em "Outros".
+        relevantes = sorted({c for a in anos_ord
+                             for c, p in pct_por_ano[a].items() if p >= 3.0})
+        fig_h = go.Figure()
+        for c in relevantes:
+            ys = [pct_por_ano[a].get(c, 0.0) for a in anos_ord]
+            cor = CORES_MB.get(c, "#bdbdbd")
+            fig_h.add_trace(go.Scatter(
+                x=anos_ord, y=ys, name=NOMES_MB.get(c, f"Classe {c}"),
+                mode="lines", stackgroup="one", line=dict(width=0.5, color=cor),
+                fillcolor=cor, hovertemplate="%{y:.1f}%",
+            ))
+        outros = [max(0.0, 100.0 - sum(pct_por_ano[a].get(c, 0.0) for c in relevantes))
+                  for a in anos_ord]
+        if any(v > 0.05 for v in outros):
+            fig_h.add_trace(go.Scatter(
+                x=anos_ord, y=outros, name="Outros", mode="lines",
+                stackgroup="one", line=dict(width=0.5, color="#bdbdbd"),
+                fillcolor="#bdbdbd", hovertemplate="%{y:.1f}%",
+            ))
+        fig_h.update_layout(
+            height=340, margin=dict(l=20, r=20, t=10, b=20),
+            yaxis=dict(title="% da área", range=[0, 100]),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_h, use_container_width=True)
+        st.caption("Fonte: MapBiomas Coleção 9 (30 m). Classes abaixo de 3% em todos "
+                   "os anos entram em 'Outros'. Leitura de tendência.")
 
 
 # ==========================================================================
