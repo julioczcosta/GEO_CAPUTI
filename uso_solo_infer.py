@@ -502,3 +502,75 @@ def mapbiomas_areas(geom_ee, ano):
         except Exception:
             continue
     return out
+
+
+# ==========================================================================
+#  Áreas difíceis — índice combinado de restrição (relevo + água + solo)
+# ==========================================================================
+
+# Códigos das classes de restrição (0 = sem restrição detectada).
+REST_OK, REST_RELEVO, REST_AGUA, REST_SOLO = 0, 1, 2, 3
+
+
+def _imagem_restricoes(geom_ee, limiar_declive_pct=20.0):
+    """Imagem classificada de restrições no imóvel (tudo no servidor do GEE).
+
+    Combina três fontes de "dificuldade" para o uso/valor do imóvel rural:
+      1 = RELEVO   — declividade acima do limiar (SRTM). Difícil mecanizar; vira
+                     APP/reserva em encostas fortes.
+      2 = ÁGUA     — corpos d'água / solo encharcado (NDWI de Sentinel-2 > 0).
+                     Candidato a APP de nascente/curso d'água; área alagável.
+      3 = SOLO     — solo exposto / degradado (BSI > 0 e NDVI < 0,30).
+    Quando um pixel se enquadra em mais de uma, vale a PRIORIDADE água > relevo
+    > solo (a mais restritiva ao uso). O relevo é global (SRTM), então classifica
+    mesmo sem imagem limpa; água/solo dependem do composto Sentinel-2 recente.
+    """
+    from datetime import date
+
+    # Relevo: declividade em PORCENTO (o slope do GEE vem em graus).
+    slope_deg = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003"))
+    slope_pct = slope_deg.multiply(3.141592653589793 / 180.0).tan().multiply(100)
+    relevo = slope_pct.gt(limiar_declive_pct)
+
+    # Composto Sentinel-2 dos últimos 24 meses, nuvens mascaradas (CLOUD_SCORE+).
+    hoje = date.today()
+    d_fim = ee.Date.fromYMD(hoje.year, hoje.month, 1).advance(1, "month")
+    d_ini = d_fim.advance(-24, "month")
+    m = _colecao_s2(d_ini, d_fim, geom_ee).median()
+
+    ndvi = m.normalizedDifference(["B8", "B4"])
+    ndwi = m.normalizedDifference(["B3", "B8"])  # McFeeters: água > 0
+    # BSI = ((SWIR+Red) - (NIR+Blue)) / ((SWIR+Red) + (NIR+Blue))
+    swir_red = m.select("B11").add(m.select("B4"))
+    nir_blue = m.select("B8").add(m.select("B2"))
+    bsi = swir_red.subtract(nir_blue).divide(swir_red.add(nir_blue))
+
+    agua = ndwi.gt(0.0)
+    solo = bsi.gt(0.0).And(ndvi.lt(0.30))  # solo nu e não vegetado
+
+    classe = (ee.Image(0)
+              .where(solo, REST_SOLO)
+              .where(relevo, REST_RELEVO)
+              .where(agua, REST_AGUA))  # água por último = maior prioridade
+    return classe.rename("restricao").toInt().clip(geom_ee)
+
+
+def restricoes_areas(geom_ee, limiar_declive_pct=20.0):
+    """Contagem de pixels por classe de restrição (frequencyHistogram, 10 m).
+
+    Retorna {codigo(int): n_pixels(int)} incluindo 0 (sem restrição). O % sai da
+    contagem; os hectares vêm da área real da geometria (como nas outras abas).
+    """
+    img = _imagem_restricoes(geom_ee, limiar_declive_pct)
+    hist = img.reduceRegion(
+        reducer=ee.Reducer.frequencyHistogram(), geometry=geom_ee, scale=10,
+        maxPixels=1e13, bestEffort=True,
+    ).getInfo().get("restricao", {}) or {}
+
+    out = {}
+    for k, v in hist.items():
+        try:
+            out[int(float(k))] = int(round(float(v)))
+        except Exception:
+            continue
+    return out

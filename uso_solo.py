@@ -87,6 +87,15 @@ CORES_MB = {
 }
 # Paleta indexada por código (0..máx) para renderizar o MapBiomas no mapa (ee).
 PALETA_MB_LISTA = [CORES_MB.get(c, "#bdbdbd") for c in range(max(CORES_MB) + 1)]
+
+# Áreas difíceis (índice combinado de restrição). Códigos iguais aos do infer.
+REST_NOMES = {
+    0: "Sem restrição detectada",
+    1: "Relevo (declividade alta)",
+    2: "Água / área úmida",
+    3: "Solo exposto / degradado",
+}
+REST_CORES = {0: "#c8e6c9", 1: "#8d6e63", 2: "#1e88e5", 3: "#fb8c00"}
 # 2019..ano corrente. O ano corrente so tem a estacao seca (mai-set) COMPLETA
 # depois de 30/set; antes disso a classificacao daquele ano sai PRELIMINAR.
 ANOS = list(range(2019, date.today().year + 1))
@@ -270,14 +279,16 @@ def render_tab():
 
     ui.barra_imovel()
 
-    tab_classe, tab_mb, tab_ndvi = st.tabs(
-        ["📊 Classificação", "🗂️ MapBiomas", "🌱 NDVI (vigor)"])
+    tab_classe, tab_mb, tab_ndvi, tab_rest = st.tabs(
+        ["📊 Classificação", "🗂️ MapBiomas", "🌱 NDVI (vigor)", "⛰️ Áreas difíceis"])
     with tab_classe:
         _render_classificacao(gdf_imovel)
     with tab_mb:
         _render_mapbiomas(gdf_imovel)
     with tab_ndvi:
         _render_ndvi(gdf_imovel)
+    with tab_rest:
+        _render_restricoes(gdf_imovel)
 
 
 def _render_classificacao(gdf_imovel):
@@ -975,3 +986,160 @@ def _render_mapbiomas(gdf_imovel):
 
     st.caption(f"Fonte: MapBiomas Coleção 9 ({ano}) · 30 m. Referência independente — "
                "as classes e a resolução diferem da classificação do app.")
+
+
+# ==========================================================================
+#  SUB-ABA: Áreas difíceis (índice combinado de restrição)
+# ==========================================================================
+
+# Limiares de declividade (%) oferecidos, alinhados às classes de relevo EMBRAPA.
+_REST_LIMIARES = {
+    "8% — a partir de suave ondulado": 8.0,
+    "20% — a partir de forte ondulado (padrão)": 20.0,
+    "45% — a partir de montanhoso": 45.0,
+}
+
+
+def _mapa_restricoes_html(geom_shp, limiar):
+    """HTML do mapa de restrições recortado no imóvel (tiles do GEE, sem download).
+    Só as restrições (1/2/3) são pintadas; onde não há, aparece o satélite."""
+    geom_ee = ee.Geometry(mapping(geom_shp))
+    minx, miny, maxx, maxy = geom_shp.bounds
+    m = geemap.Map(
+        center=[(miny + maxy) / 2, (minx + maxx) / 2], zoom=13, height=460,
+        draw_control=False, scale_control=False, fullscreen_control=False,
+        attribution_control=False, toolbar_control=False, lite_mode=True,
+    )
+    m.add_basemap("HYBRID")
+    img = infer._imagem_restricoes(geom_ee, limiar)
+    disp = img.updateMask(img.neq(0))
+    paleta = [REST_CORES[1], REST_CORES[2], REST_CORES[3]]
+    m.add_layer(disp, {"min": 1, "max": 3, "palette": paleta}, "Restrições")
+    folium.GeoJson(
+        mapping(geom_shp), name="Perímetro",
+        style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
+    ).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+    with io.BytesIO() as buffer:
+        m.save(buffer, close_file=False)
+        return buffer.getvalue().decode("utf-8")
+
+
+# Cache das chamadas ao GEE (o st.tabs renderiza todas as sub-abas a cada rerun).
+@st.cache_data(show_spinner=False)
+def _rest_areas(_geom_ee, limiar, cache_id):
+    return infer.restricoes_areas(_geom_ee, limiar)
+
+
+@st.cache_data(show_spinner=False)
+def _rest_mapa(_geom_shp, limiar, cache_id):
+    return _mapa_restricoes_html(_geom_shp, limiar)
+
+
+def _guia_restricoes():
+    with st.expander("📖 Como ler as 'áreas difíceis'"):
+        st.markdown(
+            "Combina três sinais de **dificuldade de uso/valor** do imóvel rural, "
+            "cada pixel recebendo o mais restritivo (**água › relevo › solo**):\n\n"
+            "| Cor | Classe | O que é | Origem |\n"
+            "|---|---|---|---|\n"
+            "| 🟫 | **Relevo** | Declividade acima do limiar — difícil mecanizar, "
+            "tende a APP/reserva em encostas | SRTM (30 m) |\n"
+            "| 🟦 | **Água / úmido** | Corpo d'água ou solo encharcado (NDWI > 0) — "
+            "candidato a APP de nascente/curso d'água, área alagável | Sentinel-2 |\n"
+            "| 🟧 | **Solo exposto** | Solo nu / degradado (BSI > 0 e NDVI < 0,30) — "
+            "baixa aptidão, custo de recuperação | Sentinel-2 |\n\n"
+            "É uma leitura **indicativa** (10–30 m, últimos 24 meses de imagem). "
+            "Serve para localizar rápido os trechos problemáticos e dimensioná-los "
+            "(ha e %); não substitui levantamento topográfico/de campo."
+        )
+
+
+def _render_restricoes(gdf_imovel):
+    st.caption("Localiza os trechos que **dificultam o uso/valor** do imóvel — relevo "
+               "forte, água/áreas úmidas e solo exposto — com área (ha e %) de cada.")
+
+    # Escopo: geral por padrão; por matrícula quando houver várias.
+    esc = _opcoes_escopo()
+    if esc:
+        labels, geoms, tags = esc
+        sel = st.selectbox("Escopo", labels, index=0, key="rest_escopo")
+        i = labels.index(sel)
+        geom_shp, escopo_tag = geoms[i], tags[i]
+    else:
+        geom_shp, escopo_tag = unary_union(gdf_imovel.geometry.values), "geral"
+
+    area_ha = float(gpd.GeoSeries([geom_shp], crs=gdf_imovel.crs)
+                    .to_crs(5880).area.iloc[0] / 1e4)
+    geom_ee = ee.Geometry(mapping(geom_shp))
+    nome_imovel = st.session_state.get("last_code", "imovel")
+
+    lbl = st.selectbox("Declividade que já conta como restrição",
+                       list(_REST_LIMIARES.keys()), index=1, key="rest_limiar")
+    limiar = _REST_LIMIARES[lbl]
+
+    cache_id = f"{nome_imovel}|{escopo_tag}|{limiar}"
+    try:
+        with st.spinner("Analisando relevo, água e solo no Earth Engine..."):
+            cont = _rest_areas(geom_ee, limiar, cache_id)
+    except Exception as e:
+        st.error(f"Não foi possível rodar a análise: {e}")
+        return
+
+    if not cont:
+        st.warning("Sem dados para este imóvel (imagem indisponível no período).")
+        _guia_restricoes()
+        return
+
+    total = sum(cont.values()) or 1
+    n_rest = sum(v for k, v in cont.items() if k != 0)
+    pct_rest = n_rest / total * 100.0
+    ha_rest = area_ha * pct_rest / 100.0
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Área do perímetro", f"{_br(area_ha, 2)} ha")
+    m2.metric("Área com restrição", f"{_br(ha_rest, 2)} ha")
+    m3.metric("% do imóvel difícil", f"{_br(pct_rest, 1)}%")
+
+    # Tabela por classe de restrição (1/2/3), maior área primeiro.
+    thead = ("<tr><th style='text-align:left;'>Restrição</th>"
+             "<th style='text-align:right;'>%</th>"
+             "<th style='text-align:right;'>Hectares</th></tr>")
+    corpo = ""
+    for cod in sorted([1, 2, 3], key=lambda c: -cont.get(c, 0)):
+        n = cont.get(cod, 0)
+        pct = n / total * 100.0
+        ha = area_ha * pct / 100.0
+        cor = REST_CORES[cod]
+        nome = REST_NOMES[cod]
+        swatch = (f"<span style='width:13px;height:13px;border-radius:3px;background:{cor};"
+                  "border:1px solid #999;display:inline-block;margin-right:8px;vertical-align:middle;'></span>")
+        corpo += ("<tr>"
+                  f"<td style='text-align:left;'>{swatch}{nome}</td>"
+                  f"<td style='text-align:right;'>{_br(pct, 2)}</td>"
+                  f"<td style='text-align:right;'>{_br(ha, 4)}</td>"
+                  "</tr>")
+    # Linha "sem restrição" ao final, para fechar 100%.
+    n0 = cont.get(0, 0)
+    pct0 = n0 / total * 100.0
+    corpo += ("<tr style='color:#6c757d;'>"
+              f"<td style='text-align:left;'>{REST_NOMES[0]}</td>"
+              f"<td style='text-align:right;'>{_br(pct0, 2)}</td>"
+              f"<td style='text-align:right;'>{_br(area_ha * pct0 / 100.0, 4)}</td>"
+              "</tr>")
+    tabela = ("<table style='width:100%;border-collapse:collapse;font-size:0.92rem;'>"
+              f"<thead style='border-bottom:2px solid #2C3E50;'>{thead}</thead>"
+              f"<tbody>{corpo}</tbody></table>")
+
+    col_tab, col_mapa = st.columns([0.42, 0.58], gap="medium")
+    with col_tab:
+        st.markdown(tabela, unsafe_allow_html=True)
+    with col_mapa:
+        try:
+            st.components.v1.html(_rest_mapa(geom_shp, limiar, cache_id), height=470)
+        except Exception:
+            st.caption("Mapa indisponível no momento.")
+
+    st.caption("Fontes: SRTM (relevo, 30 m) e Sentinel-2 (água/solo, 10 m, últimos "
+               "24 meses). Análise indicativa — ver o guia abaixo.")
+    _guia_restricoes()
