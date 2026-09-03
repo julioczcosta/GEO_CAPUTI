@@ -88,7 +88,7 @@ CORES_MB = {
 # Paleta indexada por código (0..máx) para renderizar o MapBiomas no mapa (ee).
 PALETA_MB_LISTA = [CORES_MB.get(c, "#bdbdbd") for c in range(max(CORES_MB) + 1)]
 
-# Áreas difíceis (índice combinado de restrição). Códigos iguais aos do infer.
+# Restrições de uso (índice combinado). Códigos iguais aos do infer.
 REST_NOMES = {
     0: "Sem restrição detectada",
     1: "Relevo (declividade alta)",
@@ -280,7 +280,7 @@ def render_tab():
     ui.barra_imovel()
 
     tab_classe, tab_mb, tab_ndvi, tab_rest = st.tabs(
-        ["📊 Classificação", "🗂️ MapBiomas", "🌱 NDVI (vigor)", "⛰️ Áreas difíceis"])
+        ["📊 Classificação", "🗂️ MapBiomas", "🌱 NDVI (vigor)", "⛰️ Restrições de uso"])
     with tab_classe:
         _render_classificacao(gdf_imovel)
     with tab_mb:
@@ -989,7 +989,7 @@ def _render_mapbiomas(gdf_imovel):
 
 
 # ==========================================================================
-#  SUB-ABA: Áreas difíceis (índice combinado de restrição)
+#  SUB-ABA: Restrições de uso (índice combinado de restrição)
 # ==========================================================================
 
 # Limiares de declividade (%) oferecidos, alinhados às classes de relevo EMBRAPA.
@@ -1037,7 +1037,7 @@ def _rest_mapa(_geom_shp, limiar, cache_id):
 
 
 def _guia_restricoes():
-    with st.expander("📖 Como ler as 'áreas difíceis'"):
+    with st.expander("📖 Como ler as restrições de uso"):
         st.markdown(
             "Combina três sinais de **dificuldade de uso/valor** do imóvel rural, "
             "cada pixel recebendo o mais restritivo (**água › relevo › solo**):\n\n"
@@ -1099,7 +1099,7 @@ def _render_restricoes(gdf_imovel):
     m1, m2, m3 = st.columns(3)
     m1.metric("Área do perímetro", f"{_br(area_ha, 2)} ha")
     m2.metric("Área com restrição", f"{_br(ha_rest, 2)} ha")
-    m3.metric("% do imóvel difícil", f"{_br(pct_rest, 1)}%")
+    m3.metric("% com restrição", f"{_br(pct_rest, 1)}%")
 
     # Tabela por classe de restrição (1/2/3), maior área primeiro.
     thead = ("<tr><th style='text-align:left;'>Restrição</th>"
