@@ -796,13 +796,27 @@ def _render_ndvi(gdf_imovel):
         _guia_ndvi()
         return
 
+    # Quais pontos entram nos cards e no gráfico (default: todos).
+    pids_todos = list(series.keys())
+    if len(pids_todos) > 1:
+        _lbl = {f"Ponto {p + 1}": p for p in pids_todos}
+        _esc = st.multiselect(
+            "Pontos no gráfico", list(_lbl.keys()), default=list(_lbl.keys()),
+            key="ndvi_pts_sel",
+            help="Escolha quais pontos aparecem nos cards e no gráfico. Na legenda do "
+                 "gráfico, clique para esconder uma linha e dê duplo-clique para isolá-la.")
+        pids_sel = [_lbl[l] for l in _esc] or pids_todos
+    else:
+        pids_sel = pids_todos
+    series_sel = {p: series[p] for p in pids_sel}
+
     st.markdown("##### Vigor no mês de referência")
     mes_ref = st.select_slider("Mês de referência", options=meses, value=meses[-1],
                                key="ndvi_mesref")
     idx_ref = meses.index(mes_ref)
 
-    cols = st.columns(min(len(series), 4) or 1)
-    for i, (pid, serie) in enumerate(series.items()):
+    cols = st.columns(min(len(series_sel), 4) or 1)
+    for i, (pid, serie) in enumerate(series_sel.items()):
         cols[i % len(cols)].markdown(_card_ponto_ndvi(pid, serie[idx_ref]),
                                      unsafe_allow_html=True)
 
@@ -821,7 +835,7 @@ def _render_ndvi(gdf_imovel):
             marker_color="rgba(64,120,200,0.22)", marker_line_width=0,
             hovertemplate="%{y:.0f} mm",
         ))
-    for pid, serie in series.items():
+    for pid, serie in series_sel.items():
         cor = CORES_PONTOS[pid % len(CORES_PONTOS)]
         fig.add_trace(go.Scatter(
             x=meses, y=serie, mode="lines+markers", name=f"Ponto {pid + 1}",
