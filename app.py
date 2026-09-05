@@ -186,7 +186,7 @@ st.markdown("""
         border: 1px solid #e9ecef;
         border-left: 4px solid #27a64a;
         border-radius: 12px;
-        padding: 14px 18px;
+        padding: 14px 14px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     }
     div[data-testid="stMetricLabel"] p {
@@ -199,6 +199,13 @@ st.markdown("""
     div[data-testid="stMetricValue"] {
         color: #2C3E50;
         font-weight: 700;
+        font-size: 1.75rem;
+    }
+    /* Evita o corte com "..." em valores como "26,9 °C" nas colunas estreitas. */
+    div[data-testid="stMetricValue"] > div {
+        overflow: visible !important;
+        text-overflow: clip !important;
+        white-space: nowrap;
     }
 
     </style>
