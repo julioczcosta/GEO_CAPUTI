@@ -115,6 +115,7 @@ def _ano_preliminar(ano):
 # toa. Por isso o corte delas e bem mais alto.
 LIMIAR_PCT = 0.5
 LIMIAR_FRACA_PCT = 5.0
+LIMIAR_URBANO_PCT = 50.0  # >= disso (MapBiomas urbano) -> imovel urbano, nao roda o modelo
 
 
 @st.cache_resource(show_spinner=False)
@@ -176,7 +177,23 @@ def _png_overlay(classe_2d):
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def _mapa_html(geom_outline, resultado):
+# acessos rurais / servidão-tipo (tracejado marrom) x vias públicas (laranja sólido)
+_VIAS_ACESSO = {"track", "service", "path", "footway", "cycleway", "bridleway", "road"}
+
+
+def _estilo_via(tipo):
+    """Estilo folium por tipo de via OSM. Acessos/servidões (track/service/path)
+    saem tracejados em marrom; vias públicas em laranja sólido (maiores mais grossas)."""
+    if tipo in _VIAS_ACESSO:
+        return {"color": "#8c564b", "weight": 2, "dash": "5,6", "acesso": True}
+    if tipo in ("motorway", "trunk", "primary"):
+        return {"color": "#ff7f0e", "weight": 4, "dash": None, "acesso": False}
+    if tipo in ("secondary", "tertiary"):
+        return {"color": "#ff7f0e", "weight": 3, "dash": None, "acesso": False}
+    return {"color": "#ffb74d", "weight": 2, "dash": None, "acesso": False}
+
+
+def _mapa_html(geom_outline, resultado, benf=None, vias=None):
     minx, miny, maxx, maxy = resultado["bounds"]
     m = geemap.Map(
         center=[(miny + maxy) / 2, (minx + maxx) / 2], zoom=13, height=460,
@@ -191,10 +208,39 @@ def _mapa_html(geom_outline, resultado):
         opacity=0.78, name="Uso do solo",
     ).add_to(m)
 
+    # camadas AUTORITATIVAS (não são o modelo): estradas (OSM) e benfeitorias
+    # (Google Open Buildings). Desenhadas por cima, como referência.
+    if vias:
+        fg_pub = folium.FeatureGroup(name="Estradas públicas (OSM)")
+        fg_ac = folium.FeatureGroup(name="Acessos / servidões (OSM)")
+        tem_pub = tem_ac = False
+        for tipo, coords in vias:
+            est = _estilo_via(tipo)
+            pl = folium.PolyLine(coords, color=est["color"], weight=est["weight"],
+                                 opacity=0.9, dash_array=est["dash"], tooltip=tipo)
+            if est["acesso"]:
+                pl.add_to(fg_ac); tem_ac = True
+            else:
+                pl.add_to(fg_pub); tem_pub = True
+        if tem_pub:
+            fg_pub.add_to(m)
+        if tem_ac:
+            fg_ac.add_to(m)
+    if benf:
+        fg = folium.FeatureGroup(name="Benfeitorias (edificações)")
+        for g in benf:
+            folium.GeoJson(g, style_function=lambda _f: {
+                "color": "#d62728", "weight": 1, "fillColor": "#d62728",
+                "fillOpacity": 0.55}).add_to(fg)
+        fg.add_to(m)
+
     folium.GeoJson(
         mapping(geom_outline), name="Perímetro",
         style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
     ).add_to(m)
+
+    if benf or vias:
+        folium.LayerControl(collapsed=True).add_to(m)
 
     m.fit_bounds([[miny, minx], [maxy, maxx]])
     with io.BytesIO() as buffer:
@@ -352,6 +398,26 @@ def _render_classificacao(gdf_imovel):
     else:
         geom_shp, bloco_tag = _selecionar_bloco(gdf_imovel)
 
+    # --- CURTO-CIRCUITO URBANO (fonte autoritativa: MapBiomas) ---
+    # Imóvel predominantemente urbano não deve ser classificado pelo modelo rural.
+    # Mostra o mapa (satélite + MapBiomas) e finaliza, sem rodar o modelo.
+    _nome0 = st.session_state.get("last_code", "imóvel")
+    try:
+        urb_pct, urb_ano = _urbano(ee.Geometry(mapping(geom_shp)), f"{_nome0}|{bloco_tag}")
+    except Exception:
+        urb_pct, urb_ano = 0.0, None
+    if urb_pct >= LIMIAR_URBANO_PCT:
+        st.error(f"🏙️ Imóvel **predominantemente urbano** — {_br(urb_pct, 0)}% marcado como "
+                 f"área urbanizada pelo **MapBiomas** ({urb_ano}). A classificação de uso "
+                 "**rural** não se aplica aqui, então o modelo **não foi executado**. "
+                 "Veja o imóvel no mapa abaixo.")
+        try:
+            st.components.v1.html(_mb_mapa(geom_shp, urb_ano, f"{_nome0}|{bloco_tag}|{urb_ano}"),
+                                  height=470)
+        except Exception:
+            pass
+        return
+
     # --- controles ---
     # default no ULTIMO ano COMPLETO (evita abrir ja num ano preliminar como 2026;
     # vira o ano corrente sozinho depois de 30/set).
@@ -379,8 +445,13 @@ def _render_classificacao(gdf_imovel):
                             .to_crs(5880).area.iloc[0] / 1e4)
             with st.spinner("Baixando imagens e classificando a área..."):
                 resultado = infer.classificar_imovel(geom_ee, geom_shp, ano, pacote)
+                # fontes autoritativas (nao sao o modelo): benfeitorias + estradas
+                bg, bha, bn = _benfeitorias(geom_ee, f"{nome_imovel}|{bloco_tag}")
+                vias = _estradas(resultado["bounds"], f"{nome_imovel}|{bloco_tag}")
             resultado["area_ha"] = area_ha
             resultado["ano"] = ano
+            resultado["benf_geoms"], resultado["benf_ha"], resultado["benf_n"] = bg, bha, bn
+            resultado["vias"] = vias
             st.session_state["uso_result"] = {"chave": chave, "dados": resultado}
         except Exception as e:
             st.error(f"Falha na classificação: {e}")
@@ -501,7 +572,28 @@ def _render_classificacao(gdf_imovel):
         st.markdown(_legenda_html([c for c, _ in linhas]), unsafe_allow_html=True)
     with col_mapa:
         res_map = {**resultado, "classe_2d": classe_limpo}
-        st.components.v1.html(_mapa_html(geom_shp, res_map), height=470)
+        st.components.v1.html(
+            _mapa_html(geom_shp, res_map,
+                       benf=resultado.get("benf_geoms"), vias=resultado.get("vias")),
+            height=470)
+
+    # --- infraestrutura (fontes autoritativas, não o modelo) ---
+    benf_ha = resultado.get("benf_ha", 0.0)
+    benf_n = resultado.get("benf_n", 0)
+    n_vias = len(resultado.get("vias") or [])
+    if benf_n or n_vias:
+        partes = []
+        if benf_n:
+            partes.append(f"🏠 **Benfeitorias**: {_br(benf_ha, 4)} ha em {benf_n} "
+                          "edificações (Google Open Buildings)")
+        if n_vias:
+            n_ac = sum(1 for t, _ in (resultado.get("vias") or []) if _estilo_via(t)["acesso"])
+            n_pub = n_vias - n_ac
+            partes.append(f"🛣️ **Estradas** (OpenStreetMap): {n_pub} públicas, "
+                          f"{n_ac} acessos/servidões")
+        st.caption(" · ".join(partes) +
+                   " — camadas de referência (fontes externas), ative-as no mapa. "
+                   "Não entram no cálculo das classes do modelo.")
 
     # --- rodape / ressalvas ---
     margem = pacote.get("margem_area_pp", {})
@@ -925,6 +1017,31 @@ def _mb_mapa(_geom_shp, ano, cache_id):
 @st.cache_data(show_spinner=False)
 def _mb_series(_geom_ee, anos, cache_id):
     return infer.mapbiomas_series(_geom_ee, anos)
+
+
+# --- fontes autoritativas de infra (urbano, benfeitorias, estradas), cacheadas ---
+@st.cache_data(show_spinner=False)
+def _urbano(_geom_ee, cache_id):
+    try:
+        return infer.frac_urbano(_geom_ee, ANOS[-1])
+    except Exception:
+        return (0.0, None)
+
+
+@st.cache_data(show_spinner=False)
+def _benfeitorias(_geom_ee, cache_id):
+    try:
+        return infer.benfeitorias(_geom_ee)
+    except Exception:
+        return ([], 0.0, 0)
+
+
+@st.cache_data(show_spinner=False)
+def _estradas(bounds, cache_id):
+    try:
+        return infer.estradas_osm(bounds)
+    except Exception:
+        return []
 
 
 def _render_mapbiomas(gdf_imovel):

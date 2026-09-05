@@ -586,3 +586,74 @@ def declividade_classes(geom_ee):
         except Exception:
             continue
     return out
+
+
+# ==========================================================================
+#  Fontes AUTORITATIVAS de infraestrutura (não são o modelo)
+#  Urbano (MapBiomas), benfeitorias (Google Open Buildings), estradas (OSM).
+# ==========================================================================
+
+def frac_urbano(geom_ee, ano):
+    """% do imóvel que o MapBiomas marca como URBANO (classe 24), usando o ano
+    MapBiomas mais próximo <= ano (a mancha urbana é estável ano a ano). Serve
+    para o app não aplicar o modelo rural sobre imóvel urbano.
+
+    Retorna (frac_pct(float), ano_mapbiomas(int)).
+    """
+    anos = mapbiomas_anos()
+    disp = [a for a in anos if a <= int(ano)]
+    amb = max(disp) if disp else anos[-1]
+    cont = mapbiomas_areas(geom_ee, amb)
+    tot = sum(cont.values()) or 1
+    return cont.get(24, 0) / tot * 100.0, amb
+
+
+OPEN_BUILDINGS_ASSET = "GOOGLE/Research/open-buildings/v3/polygons"
+
+
+def benfeitorias(geom_ee, conf=0.70, limite=4000):
+    """Edificações (Google Open Buildings v3) dentro do imóvel, confiança >= conf.
+
+    Fonte autoritativa (não é o modelo) — o modelo não deve classificar telhado.
+    Retorna (geoms_geojson(list), area_ha_total(float), n(int)). A área total vem
+    do EE (todas as edificações), mesmo que só `limite` geometrias sejam baixadas
+    para desenho.
+    """
+    fc = (ee.FeatureCollection(OPEN_BUILDINGS_ASSET).filterBounds(geom_ee)
+          .filter(ee.Filter.gte("confidence", conf)))
+    n = int(fc.size().getInfo())
+    if not n:
+        return [], 0.0, 0
+    area_ha = float(fc.geometry().area(1).getInfo()) / 1e4
+    feats = fc.limit(limite).getInfo().get("features", [])
+    geoms = [f["geometry"] for f in feats]
+    return geoms, area_ha, n
+
+
+def estradas_osm(bounds, timeout=30):
+    """Vias (OpenStreetMap, highway=*) no bbox do imóvel. bounds em EPSG:4326
+    (minx, miny, maxx, maxy). Retorna lista de (tipo, [[lat, lon], ...]).
+
+    Fonte externa (Overpass) — exige User-Agent e pode falhar/limitar; nesse
+    caso devolve [] (falha silenciosa, a camada de estradas apenas some).
+    """
+    minx, miny, maxx, maxy = bounds
+    q = (f"[out:json][timeout:{int(timeout)}];"
+         f'(way["highway"]({miny},{minx},{maxy},{maxx}););out geom;')
+    hdr = {"User-Agent": "GEO-CAPUTI/1.0 (laudos ambientais)"}
+    for ep in ("https://overpass-api.de/api/interpreter",
+               "https://overpass.kumi.systems/api/interpreter"):
+        try:
+            r = requests.post(ep, data={"data": q}, headers=hdr, timeout=timeout + 10)
+            if "json" not in r.headers.get("content-type", ""):
+                continue
+            vias = []
+            for e in r.json().get("elements", []):
+                g = e.get("geometry")
+                if e.get("type") == "way" and g:
+                    tipo = e.get("tags", {}).get("highway", "via")
+                    vias.append((tipo, [[p["lat"], p["lon"]] for p in g]))
+            return vias
+        except Exception:
+            continue
+    return []
