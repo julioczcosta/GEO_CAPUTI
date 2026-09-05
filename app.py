@@ -14,12 +14,17 @@ import hmac
 import base64
 import streamlit.components.v1 as components
 from streamlit_option_menu import option_menu
+from PIL import Image as _PILImage
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
+try:
+    _FAVICON = _PILImage.open("imagem/favicon.png")   # emblema como ícone da aba
+except Exception:
+    _FAVICON = "🌍"
 st.set_page_config(
-    layout="wide", 
-    page_title="GEOCAPUTI", 
-    page_icon="🌍",
+    layout="wide",
+    page_title="GEOCAPUTI",
+    page_icon=_FAVICON,
     initial_sidebar_state="expanded"
 )
 
@@ -215,26 +220,31 @@ with st.sidebar:
 # =========================================================
 
 try:
-    with open("imagem/geocaputi.png", "rb") as f:
-        img_data = base64.b64encode(f.read()).decode()
-    
+    with open("imagem/header_geocaputi.png", "rb") as f:
+        _logo_light = base64.b64encode(f.read()).decode()
+    try:
+        with open("imagem/header_geocaputi_dark.png", "rb") as f:
+            _logo_dark = base64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        _logo_dark = _logo_light
+
+    # Duas versões embutidas; troca automática conforme o tema do navegador (a
+    # versão escura tem o "CAPUTI" claro pra não sumir em fundo escuro).
     st.markdown(
         f"""
-        <div style="
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-            padding-bottom: 15px;
-            position: relative;
-            z-index: 1;
-        ">
-            <img src="data:image/png;base64,{img_data}" 
-                 style="
-                    width: 500px; 
-                    max-width: 90%; 
-                    height: auto; 
-                    object-fit: contain;
-                 ">
+        <style>
+          .gc-logo{{display:flex;justify-content:center;align-items:center;
+                    padding-bottom:15px;position:relative;z-index:1;}}
+          .gc-logo img{{width:520px;max-width:92%;height:auto;object-fit:contain;}}
+          .gc-logo .dark{{display:none;}}
+          @media (prefers-color-scheme: dark){{
+            .gc-logo .light{{display:none;}}
+            .gc-logo .dark{{display:block;}}
+          }}
+        </style>
+        <div class="gc-logo">
+            <img class="light" src="data:image/png;base64,{_logo_light}" alt="GEOCAPUTI">
+            <img class="dark"  src="data:image/png;base64,{_logo_dark}" alt="GEOCAPUTI">
         </div>
         """,
         unsafe_allow_html=True
