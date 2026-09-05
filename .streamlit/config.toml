@@ -1,0 +1,6 @@
+[theme]
+# Verde da marca GEOCAPUTI (do logo) como cor primária: unifica botões, sliders,
+# checkboxes, aba selecionada e links em todo o app.
+base = "light"
+primaryColor = "#27a64a"
+font = "sans serif"

@@ -126,8 +126,8 @@ st.markdown("""
        ============================================================ */
 
     div.stButton > button[kind="primary"] {
-        background-color: #009e60 !important;
-        border-color: #009e60 !important;
+        background-color: #27a64a !important;
+        border-color: #27a64a !important;
         color: white !important;
         font-weight: 600;
         border-radius: 6px;
@@ -163,20 +163,44 @@ st.markdown("""
        ============================================================ */
     
     div[data-baseweb="input"] > div:focus-within {
-        border-color: #009e60 !important;
+        border-color: #27a64a !important;
         box-shadow: none !important;
     }
 
     div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {
-        background-color: #009e60 !important; 
-        border-color: #009e60 !important;
+        background-color: #27a64a !important; 
+        border-color: #27a64a !important;
     }
 
     .stAlert {
         border-radius: 8px;
         border: none;
     }
-    
+
+    /* ============================================================
+       6. MÉTRICAS (CARD PADRÃO EM TODO O APP)
+       ============================================================ */
+
+    div[data-testid="stMetric"] {
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+        border: 1px solid #e9ecef;
+        border-left: 4px solid #27a64a;
+        border-radius: 12px;
+        padding: 14px 18px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+    div[data-testid="stMetricLabel"] p {
+        font-size: 0.78rem !important;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: #6c757d;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #2C3E50;
+        font-weight: 700;
+    }
+
     </style>
     """, unsafe_allow_html=True)
 
@@ -267,7 +291,7 @@ styles_menu = {
         "padding-bottom": "12px",
         "--hover-color": "#eee"
     },
-    "nav-link-selected": {"background-color": "#009e60", "font-weight": "600"},
+    "nav-link-selected": {"background-color": "#27a64a", "font-weight": "600"},
 }
 
 # O componente streamlit-option-menu roda em um iframe e, quando o menu

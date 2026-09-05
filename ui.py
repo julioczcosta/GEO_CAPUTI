@@ -10,7 +10,7 @@ o seu estilo. Importe com `import ui` e use `ui.secao(...)`, `ui.COR_PERIMETRO`,
 import streamlit as st
 
 # ---- Paleta (mesma identidade do app: verde + chumbo) ----
-VERDE = "#009e60"
+VERDE = "#27a64a"
 VERDE_ESCURO = "#007f4d"
 CHUMBO = "#2C3E50"
 
