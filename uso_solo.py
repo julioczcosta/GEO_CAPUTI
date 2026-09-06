@@ -25,7 +25,7 @@ import folium
 import plotly.graph_objects as go
 from streamlit_folium import st_folium
 from shapely.ops import unary_union
-from shapely.geometry import mapping, shape, Point
+from shapely.geometry import mapping, shape, Point, LineString
 from PIL import Image
 
 import joblib
@@ -51,12 +51,17 @@ CORES = {
     6: "#3f9571",  # Area aberta (solo exposto)
     7: "#091d61",  # Area de varzea
     8: "#a05a2c",  # Lavoura perene / cafe (so na Mata Atlantica)
+    30: "#ff7f0e",  # Estrada / acesso (OSM) — infra, entra no calculo
+    31: "#d62728",  # Benfeitoria / edificacao (Open Buildings) — infra
 }
 NOMES_EXIBE = {
     0: "Vegetação Nativa", 1: "Lavoura", 2: "Pastagem", 3: "Pastagem degradada",
     4: "Corpo d'água", 5: "Silvicultura", 6: "Área aberta", 7: "Área de várzea",
     8: "Lavoura perene (café)",
+    30: "Estradas e acessos", 31: "Benfeitorias",
 }
+COD_ESTRADA = 30
+COD_BENFEITORIA = 31
 
 # Cores distintas para os pontos de NDVI coletados (sub-aba NDVI).
 CORES_PONTOS = ["#e6194B", "#4363d8", "#3cb44b", "#f58231",
@@ -191,6 +196,26 @@ def _estilo_via(tipo):
     if tipo in ("secondary", "tertiary"):
         return {"color": "#ff7f0e", "weight": 3, "dash": None, "acesso": False}
     return {"color": "#ffb74d", "weight": 2, "dash": None, "acesso": False}
+
+
+def _area_estradas_ha(vias, geom_shp):
+    """Área (ha) das vias DENTRO do imóvel, aproximando cada linha por uma faixa:
+    acessos/servidões ~4 m de largura, vias públicas ~7 m. Recorta ao polígono
+    (as vias vêm por bbox) e faz o buffer em EPSG:5880 (metros)."""
+    if not vias:
+        return 0.0
+    linhas, larg = [], []
+    for tipo, coords in vias:
+        if len(coords) < 2:
+            continue
+        linhas.append(LineString([(lon, lat) for lat, lon in coords]))
+        larg.append(2.0 if _estilo_via(tipo)["acesso"] else 3.5)  # meia-largura (m)
+    if not linhas:
+        return 0.0
+    gs = gpd.GeoSeries(linhas, crs=4326).to_crs(5880)
+    faixa = unary_union([g.buffer(w) for g, w in zip(gs, larg)])
+    imovel = gpd.GeoSeries([geom_shp], crs=4326).to_crs(5880).iloc[0]
+    return float(faixa.intersection(imovel).area) / 1e4
 
 
 def _mapa_html(geom_outline, resultado, benf=None, vias=None):
@@ -339,8 +364,7 @@ def render_tab():
 
 
 def _render_classificacao(gdf_imovel):
-    st.caption("Classificação automática de uso do solo do imóvel (Sentinel-2 + "
-               "Random Forest), recortada ao perímetro.")
+    st.caption("Uso do solo estimado dentro do imóvel.")
 
     # --- roteamento de BIOMA: escolhe o modelo pelo centroide do imovel ---
     # Cerrado -> v9 (+ modo silvicultura); Mata Atlantica Sudeste -> v8 (piloto,
@@ -355,9 +379,8 @@ def _render_classificacao(gdf_imovel):
     em_ma = (not em_cerrado) and ma is not None and ma.contains(cent)
 
     if em_ma:
-        st.info("🌱 Imóvel na **Mata Atlântica (Sudeste)** — modelo **piloto** da MA "
-                "(inclui **lavoura perene / café**). Erro de área ~5 pp; o café é classe "
-                "de **baixa confiança** (limite do satélite gratuito para café × floresta).")
+        st.info("🌱 Região com **café / lavoura perene** — essas classes ainda estão "
+                "**em ajuste**; use com atenção.")
         modo_silvic = False
         modelo_path = MODELO_MA
     else:
@@ -407,10 +430,8 @@ def _render_classificacao(gdf_imovel):
     except Exception:
         urb_pct, urb_ano = 0.0, None
     if urb_pct >= LIMIAR_URBANO_PCT:
-        st.error(f"🏙️ Imóvel **predominantemente urbano** — {_br(urb_pct, 0)}% marcado como "
-                 f"área urbanizada pelo **MapBiomas** ({urb_ano}). A classificação de uso "
-                 "**rural** não se aplica aqui, então o modelo **não foi executado**. "
-                 "Veja o imóvel no mapa abaixo.")
+        st.warning("🏙️ Este imóvel está em **área urbana** — a classificação de uso "
+                   "rural não se aplica aqui. Veja o imóvel no mapa abaixo.")
         try:
             st.components.v1.html(_mb_mapa(geom_shp, urb_ano, f"{_nome0}|{bloco_tag}|{urb_ano}"),
                                   height=470)
@@ -524,7 +545,25 @@ def _render_classificacao(gdf_imovel):
     cods1, cnts1 = np.unique(classe_limpo[classe_limpo >= 0], return_counts=True)
     contagem = {int(c): int(n) for c, n in zip(cods1, cnts1)}
     n_total = int(cnts1.sum())
-    linhas = sorted(contagem.items(), key=lambda kv: -kv[1])
+
+    # --- infra (benfeitorias/estradas) ENTRA no cálculo de área ---
+    # Estradas e benfeitorias vêm de fontes de referência e ocupam parte do
+    # imóvel; o restante (rural) é repartido entre as classes do modelo. Assim
+    # todas as linhas somam a área do imóvel.
+    benf_ha = float(resultado.get("benf_ha", 0.0) or 0.0)
+    road_ha = _area_estradas_ha(resultado.get("vias"), geom_shp)
+    infra_ha = min(benf_ha + road_ha, area_ha)
+    rural_ha = max(area_ha - infra_ha, 0.0)
+
+    rows = []  # (cod, ha)
+    if n_total:
+        for cod, n in contagem.items():
+            rows.append((cod, rural_ha * n / n_total))
+    if benf_ha > 0:
+        rows.append((COD_BENFEITORIA, benf_ha))
+    if road_ha > 0:
+        rows.append((COD_ESTRADA, road_ha))
+    rows.sort(key=lambda kv: -kv[1])
 
     # --- metricas de area ---
     m1, m2 = st.columns(2)
@@ -542,9 +581,8 @@ def _render_classificacao(gdf_imovel):
              + ("<th style='text-align:right;'>Ha (referência)</th>" if usar_ref else "")
              + "</tr>")
     corpo = ""
-    for cod, n in linhas:
-        pct = n / n_total * 100.0
-        ha = area_ha * pct / 100.0
+    for cod, ha in rows:
+        pct = ha / area_ha * 100.0 if area_ha else 0.0
         ha_ref = area_ref * pct / 100.0
         badge = ("<span style='background:#fff3cd;color:#856404;font-size:0.72rem;"
                  "padding:1px 6px;border-radius:8px;margin-left:6px;'>baixa confiança</span>"
@@ -569,7 +607,7 @@ def _render_classificacao(gdf_imovel):
     with col_tab:
         st.markdown(tabela, unsafe_allow_html=True)
         st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
-        st.markdown(_legenda_html([c for c, _ in linhas]), unsafe_allow_html=True)
+        st.markdown(_legenda_html([c for c, _ in rows]), unsafe_allow_html=True)
     with col_mapa:
         res_map = {**resultado, "classe_2d": classe_limpo}
         st.components.v1.html(
@@ -577,40 +615,26 @@ def _render_classificacao(gdf_imovel):
                        benf=resultado.get("benf_geoms"), vias=resultado.get("vias")),
             height=470)
 
-    # --- infraestrutura (fontes autoritativas, não o modelo) ---
-    benf_ha = resultado.get("benf_ha", 0.0)
-    benf_n = resultado.get("benf_n", 0)
-    n_vias = len(resultado.get("vias") or [])
-    if benf_n or n_vias:
-        partes = []
-        if benf_n:
-            partes.append(f"🏠 **Benfeitorias**: {_br(benf_ha, 4)} ha em {benf_n} "
-                          "edificações (Google Open Buildings)")
-        if n_vias:
-            n_ac = sum(1 for t, _ in (resultado.get("vias") or []) if _estilo_via(t)["acesso"])
-            n_pub = n_vias - n_ac
-            partes.append(f"🛣️ **Estradas** (OpenStreetMap): {n_pub} públicas, "
-                          f"{n_ac} acessos/servidões")
-        st.caption(" · ".join(partes) +
-                   " — camadas de referência (fontes externas), ative-as no mapa. "
-                   "Não entram no cálculo das classes do modelo.")
-
     # --- rodape / ressalvas ---
-    margem = pacote.get("margem_area_pp", {})
-    conf = set(pacote.get("classes_confiaveis", []))
-    if margem:
-        txt = ", ".join(f"{NOMES_EXIBE[[k for k,v in classes.items() if v==nome][0]]} ±{_br(pp,1)}pp"
-                        for nome, pp in margem.items()
-                        if nome in conf)
-        st.caption(f"Margem típica por classe confiável (validação por área, 80 fazendas): {txt}.")
+    st.caption("ℹ️ Estimativa de **apoio** — não substitui a análise do laudo. As classes "
+               "marcadas como *baixa confiança* não devem ser reportadas isoladamente.")
 
-    detalhe = f"Resolução: {resultado['scale_efetiva']} m · {n_total:,} pixels classificados".replace(",", ".")
-    if resultado.get("n_sem_dado"):
-        detalhe += f" · {resultado['n_sem_dado']} pixels sem imagem (nuvem/borda) foram ignorados"
-    st.caption(detalhe)
-    st.caption("⚠️ Estimativa de apoio — as classes marcadas como *baixa confiança* "
-               "(pastagem degradada, várzea, silvicultura, área aberta) ainda não são "
-               "detectadas de forma confiável e não devem ser reportadas isoladamente.")
+    with st.expander("Detalhes técnicos"):
+        margem = pacote.get("margem_area_pp", {})
+        conf = set(pacote.get("classes_confiaveis", []))
+        if margem:
+            txt = ", ".join(f"{NOMES_EXIBE[[k for k,v in classes.items() if v==nome][0]]} ±{_br(pp,1)}pp"
+                            for nome, pp in margem.items() if nome in conf)
+            st.caption(f"Margem típica por classe confiável (validação por área): {txt}.")
+        detalhe = f"Resolução: {resultado['scale_efetiva']} m · {n_total:,} pixels classificados".replace(",", ".")
+        if resultado.get("n_sem_dado"):
+            detalhe += f" · {resultado['n_sem_dado']} pixels sem imagem (nuvem/borda) ignorados"
+        st.caption(detalhe)
+        n_vias = len(resultado.get("vias") or [])
+        if benf_ha > 0 or road_ha > 0:
+            st.caption(f"Benfeitorias: {resultado.get('benf_n', 0)} edificações "
+                       f"({_br(benf_ha, 4)} ha, Google Open Buildings) · Estradas/acessos: "
+                       f"{n_vias} vias ({_br(road_ha, 4)} ha, OpenStreetMap).")
 
 
 # ==========================================================================

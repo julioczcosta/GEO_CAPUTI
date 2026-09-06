@@ -624,7 +624,8 @@ def benfeitorias(geom_ee, conf=0.70, limite=4000):
     n = int(fc.size().getInfo())
     if not n:
         return [], 0.0, 0
-    area_ha = float(fc.geometry().area(1).getInfo()) / 1e4
+    # área recortada ao imóvel (edificações na borda não contam a parte de fora)
+    area_ha = float(fc.geometry().intersection(geom_ee, 1).area(1).getInfo()) / 1e4
     feats = fc.limit(limite).getInfo().get("features", [])
     geoms = [f["geometry"] for f in feats]
     return geoms, area_ha, n
