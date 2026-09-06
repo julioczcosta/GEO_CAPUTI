@@ -10,8 +10,8 @@ o seu estilo. Importe com `import ui` e use `ui.secao(...)`, `ui.COR_PERIMETRO`,
 import streamlit as st
 
 # ---- Paleta (mesma identidade do app: verde + chumbo) ----
-VERDE = "#27a64a"
-VERDE_ESCURO = "#007f4d"
+VERDE = "#008C45"
+VERDE_ESCURO = "#004d25"
 CHUMBO = "#2C3E50"
 
 # Cor do PERÍMETRO do imóvel analisado — uma só em todo o app (lê bem no

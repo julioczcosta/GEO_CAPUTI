@@ -75,12 +75,22 @@ if not check_login():
 # --- CSS GLOBAL REFINADO ---
 st.markdown("""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Montserrat:wght@600;700&display=swap');
+
+    /* ============================================================
+       0. FONTES DA MARCA (Inter no corpo, Montserrat nos títulos)
+       ============================================================ */
+    html, body, .stApp, [data-testid="stAppViewContainer"],
+    [data-testid="stSidebar"], .stMarkdown, div[data-baseweb] {
+        font-family: 'Inter', -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+
     /* ============================================================
        1. LAYOUT E ESPAÇAMENTO
        ============================================================ */
-    
+
     .block-container {
-        padding-top: 3.5rem !important; 
+        padding-top: 3.5rem !important;
         padding-bottom: 3rem;
     }
     
@@ -92,10 +102,11 @@ st.markdown("""
        2. TIPOGRAFIA E CORES
        ============================================================ */
     
-    h1, h2, h3, h4, h5 { 
-        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
-        color: #2C3E50; 
-        font-weight: 600;
+    h1, h2, h3, h4, h5 {
+        font-family: 'Montserrat', 'Helvetica Neue', Arial, sans-serif !important;
+        color: #004d25;
+        font-weight: 700;
+        letter-spacing: -0.01em;
     }
     
     .stCaption {
@@ -126,8 +137,8 @@ st.markdown("""
        ============================================================ */
 
     div.stButton > button[kind="primary"] {
-        background-color: #27a64a !important;
-        border-color: #27a64a !important;
+        background-color: #008C45 !important;
+        border-color: #008C45 !important;
         color: white !important;
         font-weight: 600;
         border-radius: 6px;
@@ -135,8 +146,8 @@ st.markdown("""
     }
     
     div.stButton > button[kind="primary"]:hover {
-        background-color: #007f4d !important;
-        border-color: #007f4d !important;
+        background-color: #004d25 !important;
+        border-color: #004d25 !important;
         box-shadow: 0 4px 8px rgba(0,158,96,0.2);
         transform: translateY(-1px);
     }
@@ -163,13 +174,13 @@ st.markdown("""
        ============================================================ */
     
     div[data-baseweb="input"] > div:focus-within {
-        border-color: #27a64a !important;
+        border-color: #008C45 !important;
         box-shadow: none !important;
     }
 
     div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {
-        background-color: #27a64a !important; 
-        border-color: #27a64a !important;
+        background-color: #008C45 !important; 
+        border-color: #008C45 !important;
     }
 
     .stAlert {
@@ -182,12 +193,12 @@ st.markdown("""
        ============================================================ */
 
     div[data-testid="stMetric"] {
-        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-        border: 1px solid #e9ecef;
-        border-left: 4px solid #27a64a;
-        border-radius: 12px;
+        background: #ffffff;
+        border: 1px solid rgba(0,0,0,0.07);
+        border-left: 4px solid #008C45;
+        border-radius: 14px;
         padding: 14px 14px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
     }
     div[data-testid="stMetricLabel"] p {
         font-size: 0.78rem !important;
@@ -298,7 +309,7 @@ styles_menu = {
         "padding-bottom": "12px",
         "--hover-color": "#eee"
     },
-    "nav-link-selected": {"background-color": "#27a64a", "font-weight": "600"},
+    "nav-link-selected": {"background-color": "#008C45", "font-weight": "600"},
 }
 
 # O componente streamlit-option-menu roda em um iframe e, quando o menu

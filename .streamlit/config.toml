@@ -1,6 +1,9 @@
 [theme]
-# Verde da marca GEOCAPUTI (do logo) como cor primária: unifica botões, sliders,
-# checkboxes, aba selecionada e links em todo o app.
+# Alinhado ao design system do site da Caputi (style.css):
+# verde da marca, fundo cinza-claro, cards brancos, texto quase-preto.
 base = "light"
-primaryColor = "#27a64a"
+primaryColor = "#008C45"
+backgroundColor = "#f4f4f4"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1b1b1b"
 font = "sans serif"

@@ -60,7 +60,7 @@ CSS_CONFRONTANTES = """
     background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
     border-radius: 12px;
     padding: 18px 20px;
-    border-left: 4px solid #27a64a;
+    border-left: 4px solid #008C45;
     box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     margin-bottom: 8px;
 }
@@ -168,7 +168,7 @@ CSS_CONFRONTANTES = """
 .detalhe-codigo {
     font-family: 'SF Mono', Monaco, 'Courier New', monospace;
     font-size: 0.85rem;
-    color: #27a64a;
+    color: #008C45;
     background: #e8f5e9;
     padding: 2px 8px;
     border-radius: 4px;
