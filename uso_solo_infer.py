@@ -631,6 +631,32 @@ def benfeitorias(geom_ee, conf=0.70, limite=4000):
     return geoms, area_ha, n
 
 
+def edificacoes_osm(bounds, timeout=30):
+    """Edificações do OpenStreetMap (building=*) no bbox — complementa o Open
+    Buildings (que para em ~2023, perde construções recentes). bounds em EPSG:4326
+    (minx, miny, maxx, maxy). Retorna lista de anéis [[lat, lon], ...] (polígonos).
+    Falha silenciosa -> []."""
+    minx, miny, maxx, maxy = bounds
+    q = (f"[out:json][timeout:{int(timeout)}];"
+         f'(way["building"]({miny},{minx},{maxy},{maxx}););out geom;')
+    hdr = {"User-Agent": "GEO-CAPUTI/1.0 (laudos ambientais)"}
+    for ep in ("https://overpass-api.de/api/interpreter",
+               "https://overpass.kumi.systems/api/interpreter"):
+        try:
+            r = requests.post(ep, data={"data": q}, headers=hdr, timeout=timeout + 10)
+            if "json" not in r.headers.get("content-type", ""):
+                continue
+            pols = []
+            for e in r.json().get("elements", []):
+                g = e.get("geometry")
+                if e.get("type") == "way" and g and len(g) >= 3:
+                    pols.append([[p["lat"], p["lon"]] for p in g])
+            return pols
+        except Exception:
+            continue
+    return []
+
+
 def estradas_osm(bounds, timeout=30):
     """Vias (OpenStreetMap, highway=*) no bbox do imóvel. bounds em EPSG:4326
     (minx, miny, maxx, maxy). Retorna lista de (tipo, [[lat, lon], ...]).

@@ -25,7 +25,7 @@ import folium
 import plotly.graph_objects as go
 from streamlit_folium import st_folium
 from shapely.ops import unary_union
-from shapely.geometry import mapping, shape, Point, LineString
+from shapely.geometry import mapping, shape, Point, LineString, Polygon
 from PIL import Image
 
 import joblib
@@ -218,7 +218,40 @@ def _area_estradas_ha(vias, geom_shp):
     return float(faixa.intersection(imovel).area) / 1e4
 
 
-def _mapa_html(geom_outline, resultado, benf=None, vias=None):
+def _poligonos_benfeitorias(ob_geoms, osm_rings):
+    """Polígonos de edificação das duas fontes -> lista de shapely (EPSG:4326).
+    Open Buildings vem como GeoJSON; OSM como anéis [[lat,lon],...]."""
+    pols = []
+    for g in (ob_geoms or []):
+        try:
+            p = shape(g)
+            if not p.is_empty:
+                pols.append(p if p.is_valid else p.buffer(0))
+        except Exception:
+            continue
+    for ring in (osm_rings or []):
+        try:
+            p = Polygon([(lon, lat) for lat, lon in ring])
+            if not p.is_empty:
+                pols.append(p if p.is_valid else p.buffer(0))
+        except Exception:
+            continue
+    return pols
+
+
+def _area_benfeitorias_ha(ob_geoms, osm_rings, geom_shp):
+    """Área (ha) das edificações (Open Buildings ∪ OSM) DENTRO do imóvel. A união
+    evita contar em dobro onde as duas fontes se sobrepõem."""
+    pols = _poligonos_benfeitorias(ob_geoms, osm_rings)
+    if not pols:
+        return 0.0
+    gs = gpd.GeoSeries(pols, crs=4326).to_crs(5880)
+    uniao = unary_union(list(gs.values))
+    imovel = gpd.GeoSeries([geom_shp], crs=4326).to_crs(5880).iloc[0]
+    return float(uniao.intersection(imovel).area) / 1e4
+
+
+def _mapa_html(geom_outline, resultado, benf=None, vias=None, benf_osm=None):
     minx, miny, maxx, maxy = resultado["bounds"]
     m = geemap.Map(
         center=[(miny + maxy) / 2, (minx + maxx) / 2], zoom=13, height=460,
@@ -251,12 +284,15 @@ def _mapa_html(geom_outline, resultado, benf=None, vias=None):
             fg_pub.add_to(m)
         if tem_ac:
             fg_ac.add_to(m)
-    if benf:
+    if benf or benf_osm:
         fg = folium.FeatureGroup(name="Benfeitorias (edificações)")
-        for g in benf:
+        for g in (benf or []):
             folium.GeoJson(g, style_function=lambda _f: {
                 "color": "#d62728", "weight": 1, "fillColor": "#d62728",
                 "fillOpacity": 0.55}).add_to(fg)
+        for ring in (benf_osm or []):  # OSM: anéis [[lat,lon],...]
+            folium.Polygon(ring, color="#d62728", weight=1,
+                           fill_color="#d62728", fill_opacity=0.55).add_to(fg)
         fg.add_to(m)
 
     folium.GeoJson(
@@ -465,12 +501,16 @@ def _render_classificacao(gdf_imovel):
                             .to_crs(5880).area.iloc[0] / 1e4)
             with st.spinner("Baixando imagens e classificando a área..."):
                 resultado = infer.classificar_imovel(geom_ee, geom_shp, ano, pacote)
-                # fontes autoritativas (nao sao o modelo): benfeitorias + estradas
-                bg, bha, bn = _benfeitorias(geom_ee, f"{nome_imovel}|{bloco_tag}")
+                # fontes de referência (não o modelo): benfeitorias + estradas.
+                # Benfeitorias = Open Buildings (~2023) + OSM building (pega recentes).
+                bg, _bha, bn = _benfeitorias(geom_ee, f"{nome_imovel}|{bloco_tag}")
+                bosm = _edif_osm(resultado["bounds"], f"{nome_imovel}|{bloco_tag}")
                 vias = _estradas(resultado["bounds"], f"{nome_imovel}|{bloco_tag}")
             resultado["area_ha"] = area_ha
             resultado["ano"] = ano
-            resultado["benf_geoms"], resultado["benf_ha"], resultado["benf_n"] = bg, bha, bn
+            resultado["benf_geoms"] = bg
+            resultado["benf_osm"] = bosm
+            resultado["benf_n_ob"] = bn
             resultado["vias"] = vias
             st.session_state["uso_result"] = {"chave": chave, "dados": resultado}
         except Exception as e:
@@ -549,7 +589,8 @@ def _render_classificacao(gdf_imovel):
     # Estradas e benfeitorias vêm de fontes de referência e ocupam parte do
     # imóvel; o restante (rural) é repartido entre as classes do modelo. Assim
     # todas as linhas somam a área do imóvel.
-    benf_ha = float(resultado.get("benf_ha", 0.0) or 0.0)
+    benf_ha = _area_benfeitorias_ha(resultado.get("benf_geoms"),
+                                    resultado.get("benf_osm"), geom_shp)
     road_ha = _area_estradas_ha(resultado.get("vias"), geom_shp)
     infra_ha = min(benf_ha + road_ha, area_ha)
     rural_ha = max(area_ha - infra_ha, 0.0)
@@ -610,8 +651,8 @@ def _render_classificacao(gdf_imovel):
     with col_mapa:
         res_map = {**resultado, "classe_2d": classe_limpo}
         st.components.v1.html(
-            _mapa_html(geom_shp, res_map,
-                       benf=resultado.get("benf_geoms"), vias=resultado.get("vias")),
+            _mapa_html(geom_shp, res_map, benf=resultado.get("benf_geoms"),
+                       vias=resultado.get("vias"), benf_osm=resultado.get("benf_osm")),
             height=470)
 
     # --- rodape / ressalvas ---
@@ -631,9 +672,11 @@ def _render_classificacao(gdf_imovel):
         st.caption(detalhe)
         n_vias = len(resultado.get("vias") or [])
         if benf_ha > 0 or road_ha > 0:
-            st.caption(f"Benfeitorias: {resultado.get('benf_n', 0)} edificações "
-                       f"({_br(benf_ha, 4)} ha, Google Open Buildings) · Estradas/acessos: "
-                       f"{n_vias} vias ({_br(road_ha, 4)} ha, OpenStreetMap).")
+            n_ob = resultado.get("benf_n_ob", 0)
+            n_osm = len(resultado.get("benf_osm") or [])
+            st.caption(f"Benfeitorias: {n_ob} do Google Open Buildings (~2023) + {n_osm} do "
+                       f"OpenStreetMap = {_br(benf_ha, 4)} ha (união, sem contar em dobro). "
+                       f"Estradas/acessos: {n_vias} vias, {_br(road_ha, 4)} ha (OpenStreetMap).")
 
 
 # ==========================================================================
@@ -1063,6 +1106,14 @@ def _benfeitorias(_geom_ee, cache_id):
 def _estradas(bounds, cache_id):
     try:
         return infer.estradas_osm(bounds)
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner=False)
+def _edif_osm(bounds, cache_id):
+    try:
+        return infer.edificacoes_osm(bounds)
     except Exception:
         return []
 
