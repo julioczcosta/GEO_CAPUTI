@@ -430,8 +430,7 @@ def _render_classificacao(gdf_imovel):
     except Exception:
         urb_pct, urb_ano = 0.0, None
     if urb_pct >= LIMIAR_URBANO_PCT:
-        st.warning("🏙️ Este imóvel está em **área urbana** — a classificação de uso "
-                   "rural não se aplica aqui. Veja o imóvel no mapa abaixo.")
+        st.warning("🏙️ Imóvel em **área urbana**.")
         try:
             st.components.v1.html(_mb_mapa(geom_shp, urb_ano, f"{_nome0}|{bloco_tag}|{urb_ano}"),
                                   height=470)
