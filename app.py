@@ -261,32 +261,33 @@ with st.sidebar:
 # 🖼️ CABEÇALHO COM LOGO
 # =========================================================
 
-try:
-    with open("imagem/header_geocaputi.png", "rb") as f:
-        _logo_light = base64.b64encode(f.read()).decode()
+# Escolhe a versão do logo pelo TEMA REAL do Streamlit (não pelo prefers-color-
+# scheme do SO, que não acompanha o toggle do app). A versão escura tem o
+# "CAPUTI" claro, pra contrastar bem no fundo escuro.
+def _tema_streamlit():
     try:
-        with open("imagem/header_geocaputi_dark.png", "rb") as f:
-            _logo_dark = base64.b64encode(f.read()).decode()
-    except FileNotFoundError:
-        _logo_dark = _logo_light
+        t = st.context.theme
+        tipo = getattr(t, "type", None)
+        if tipo is None and isinstance(t, dict):
+            tipo = t.get("type")
+        return (tipo or "light").lower()
+    except Exception:
+        return "light"
 
-    # Duas versões embutidas; troca automática conforme o tema do navegador (a
-    # versão escura tem o "CAPUTI" claro pra não sumir em fundo escuro).
+_logo_file = ("imagem/header_geocaputi_dark.png"
+              if _tema_streamlit() == "dark" else "imagem/header_geocaputi.png")
+try:
+    with open(_logo_file, "rb") as f:
+        _logo = base64.b64encode(f.read()).decode()
     st.markdown(
         f"""
         <style>
           .gc-logo{{display:flex;justify-content:center;align-items:center;
                     padding-bottom:15px;position:relative;z-index:1;}}
           .gc-logo img{{width:520px;max-width:92%;height:auto;object-fit:contain;}}
-          .gc-logo .dark{{display:none;}}
-          @media (prefers-color-scheme: dark){{
-            .gc-logo .light{{display:none;}}
-            .gc-logo .dark{{display:block;}}
-          }}
         </style>
         <div class="gc-logo">
-            <img class="light" src="data:image/png;base64,{_logo_light}" alt="GEOCAPUTI">
-            <img class="dark"  src="data:image/png;base64,{_logo_dark}" alt="GEOCAPUTI">
+            <img src="data:image/png;base64,{_logo}" alt="GEOCAPUTI">
         </div>
         """,
         unsafe_allow_html=True
