@@ -138,7 +138,7 @@ def limpar_ruido(classe_2d, keep_cods, iteracoes=12):
     return out
 
 
-def peneira(classe_2d, scale_m, mmu_ha=0.2):
+def peneira(classe_2d, scale_m, mmu_ha=0.2, protegidas=()):
     """Filtro de area minima (sieve / MMU): dissolve cada MANCHA conexa menor
     que `mmu_ha` hectares na classe majoritaria da vizinhanca — INDEPENDENTE da
     classe. E o que remove o 'sal e pimenta' que sobra DENTRO das classes
@@ -158,6 +158,7 @@ def peneira(classe_2d, scale_m, mmu_ha=0.2):
     min_pixels = max(2, int(round(mmu_ha * 10000.0 / (scale_m * scale_m))))
     out = classe_2d.copy()
     estrutura = np.ones((3, 3), dtype=bool)  # vizinhanca-8
+    protegidas = set(int(c) for c in protegidas)  # nunca dissolver (ex.: agua)
 
     for _ in range(20):  # itera ate estabilizar (manchas somem em cascata)
         classes = np.array([int(c) for c in np.unique(out) if c >= 0], dtype=out.dtype)
@@ -165,6 +166,8 @@ def peneira(classe_2d, scale_m, mmu_ha=0.2):
             break
         absorver = np.zeros(out.shape, dtype=bool)
         for c in classes:
+            if int(c) in protegidas:  # açude pequeno é real -> não peneirar
+                continue
             lbl, n = ndimage.label(out == c, structure=estrutura)
             if n == 0:
                 continue

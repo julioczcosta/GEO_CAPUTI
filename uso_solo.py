@@ -36,7 +36,7 @@ import uso_solo_infer as infer
 _MODELOS = os.path.join(os.path.dirname(__file__), "modelos")
 MODELO_PADRAO = os.path.join(_MODELOS, "modelo_uso_cerrado_v9.joblib")
 MODELO_SILVIC = os.path.join(_MODELOS, "modelo_uso_cerrado_v9_silvic.joblib")
-MODELO_MA = os.path.join(_MODELOS, "modelo_uso_ma_v2emb.joblib")  # piloto MA-SE (base + Satellite Embedding)
+MODELO_MA = os.path.join(_MODELOS, "modelo_uso_ma_v5cit.joblib")  # piloto MA-SE (v2emb + especialista citros)
 COD_SILVICULTURA = 5
 COD_PERENE = 8  # lavoura perene / cafe (so no modelo da MA)
 
@@ -51,13 +51,15 @@ CORES = {
     6: "#3f9571",  # Area aberta (solo exposto)
     7: "#091d61",  # Area de varzea
     8: "#a05a2c",  # Lavoura perene / cafe (so na Mata Atlantica)
+    9: "#f1c40f",   # Citros (laranja/lima) — so na Mata Atlantica
+    10: "#8e44ad",  # Outros perenes (pomar/frutic/uva...) — so na Mata Atlantica
     30: "#ff7f0e",  # Estrada / acesso (OSM) — infra, entra no calculo
     31: "#d62728",  # Benfeitoria / edificacao (Open Buildings) — infra
 }
 NOMES_EXIBE = {
     0: "Vegetação Nativa", 1: "Lavoura", 2: "Pastagem", 3: "Pastagem degradada",
     4: "Corpo d'água", 5: "Silvicultura", 6: "Área aberta", 7: "Área de várzea",
-    8: "Lavoura perene (café)",
+    8: "Lavoura perene (café)", 9: "Citros", 10: "Outros perenes",
     30: "Estradas e acessos", 31: "Benfeitorias",
 }
 COD_ESTRADA = 30
@@ -120,7 +122,11 @@ def _ano_preliminar(ano):
 # toa. Por isso o corte delas e bem mais alto.
 LIMIAR_PCT = 0.5
 LIMIAR_FRACA_PCT = 5.0
+LIMIAR_AGUA_PCT = 0.03  # agua e alta precisao -> corte baixo p/ acude pequeno nao sumir
+LIMIAR_NATIVA_PCT = 0.15  # nativa (reserva/APP) importa p/ laudo -> corte menor, mas nao zero
 LIMIAR_URBANO_PCT = 50.0  # >= disso (MapBiomas urbano) -> imovel urbano, nao roda o modelo
+COD_AGUA = 4
+COD_NATIVA = 0
 
 
 @st.cache_resource(show_spinner=False)
@@ -415,8 +421,8 @@ def _render_classificacao(gdf_imovel):
     em_ma = (not em_cerrado) and ma is not None and ma.contains(cent)
 
     if em_ma:
-        st.info("🌱 Região com **café / lavoura perene** — essas classes ainda estão "
-                "**em ajuste**; use com atenção.")
+        st.info("🌱 Região com **café / citros / lavoura perene** — essas classes ainda "
+                "estão **em ajuste**; use com atenção.")
         modo_silvic = False
         modelo_path = MODELO_MA
     else:
@@ -554,6 +560,10 @@ def _render_classificacao(gdf_imovel):
     # corte de significancia: classes de erro exigem corte bem maior (o modelo
     # as detecta mal; num imovel grande um % baixo ja vira muitos ha).
     def _limiar(cod):
+        if cod == COD_AGUA:  # açude pequeno é real; não filtrar por significância
+            return LIMIAR_AGUA_PCT
+        if cod == COD_NATIVA:  # fragmento de mata (reserva/APP) importa no laudo
+            return LIMIAR_NATIVA_PCT
         return LIMIAR_FRACA_PCT if cod in fracas_cods else LIMIAR_PCT
     cods0, cnts0 = np.unique(classe_2d[classe_2d >= 0], return_counts=True)
     bruto = {int(c): int(n) for c, n in zip(cods0, cnts0)}
@@ -570,7 +580,8 @@ def _render_classificacao(gdf_imovel):
     # que sobraram DENTRO das classes confiaveis (ex.: pixels de lavoura soltos
     # num pastagem) na classe majoritaria ao redor. Tira o 'sal e pimenta' que
     # o filtro de maioria nao pega. Escala vem do recorte (criterio em ha).
-    classe_limpo = infer.peneira(classe_limpo, resultado["scale_efetiva"])
+    classe_limpo = infer.peneira(classe_limpo, resultado["scale_efetiva"],
+                                 protegidas=(COD_AGUA,))
     # FILTRO CONTEXTUAL DE ILHA: dissolve MANCHAS pequenas de nativa/lavoura/
     # pastagem embutidas em outra dessas classes (ex.: ilha de pastagem no meio
     # de um lavoura, com o pastagem real concentrado noutro lugar) — mancha
