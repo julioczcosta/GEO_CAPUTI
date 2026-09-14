@@ -715,9 +715,10 @@ ANOS_EXEMPLO = 3
 INDICES_INFO = {
     "NDVI": dict(
         label="NDVI — vigor", y=[-0.15, 1.0], precip=True, intuitivo=True, fmt=2,
-        desc=("Vigor da vegetação (infravermelho vs. vermelho), de -1 a 1 — quanto "
-              "mais alto, mais verde ativo. **Satura acima de ~0,8**: pasto denso e "
-              "lavoura no pico ficam iguais."),
+        desc=("**O que é:** vigor da vegetação (infravermelho vs. vermelho), de -1 a 1 "
+              "— quanto mais alto, mais verde ativo. **Satura acima de ~0,8** (pasto "
+              "denso e lavoura no pico ficam iguais). É o índice principal; olhe o "
+              "**formato** ao longo do ano."),
         faixas=[(0.1, "água/sombra"), (0.2, "solo exposto"), (0.4, "veg. rala"),
                 (0.6, "veg. moderada"), (0.8, "veg. densa"), (9, "muito densa/pico")],
         exemplos=[
@@ -731,58 +732,62 @@ INDICES_INFO = {
              "Baixa e plana."),
         ]),
     "NDRE": dict(
-        label="NDRE — red-edge / clorofila", y=[0.0, 0.6], precip=True, intuitivo=False, fmt=2,
-        desc=("Red-edge (clorofila/nitrogênio). **Não satura** no verde alto → separa "
-              "**lavoura adubada** (mais alta) de **pasto denso**, que o NDVI empata."),
-        faixas=[(0.1, "solo/seco"), (0.25, "veg. moderada"), (0.4, "densa/adubada"), (9, "muito alta")],
+        label="NDRE — red-edge / clorofila", y=[0.0, 0.7], precip=True, intuitivo=False, fmt=2,
+        desc=("**O que é:** índice de **clorofila/nitrogênio** pela borda-do-vermelho "
+              "(red-edge). **Não satura** no verde alto como o NDVI — ajuda a **comparar** "
+              "talhões de mesmo NDVI (lavoura adubada costuma ficar acima). Sozinho, "
+              "num ponto muito verde, tende a acompanhar o NDVI."),
+        faixas=[(0.1, "solo/seco"), (0.25, "veg. moderada"), (0.45, "densa/adubada"), (9, "muito alta")],
         exemplos=[
-            ("Lavoura anual", CORES[1], [0.46,0.44,0.30,0.12,0.06,0.05,0.05,0.06,0.12,0.28,0.40,0.46],
+            ("Lavoura anual", CORES[1], [0.45,0.43,0.30,0.15,0.08,0.07,0.07,0.08,0.14,0.28,0.40,0.45],
              "Alta no pico (muita clorofila/N)."),
-            ("Pastagem", CORES[2], [0.24,0.25,0.23,0.20,0.17,0.15,0.13,0.12,0.14,0.18,0.22,0.24],
-             "Moderada — **abaixo da lavoura** no pico, mesmo com NDVI parecido."),
-            ("Vegetação nativa", CORES[0], [0.34,0.35,0.34,0.31,0.29,0.27,0.25,0.24,0.26,0.29,0.32,0.33],
+            ("Pastagem", CORES[2], [0.34,0.35,0.36,0.32,0.27,0.23,0.19,0.18,0.20,0.26,0.32,0.34],
+             "Moderada; segue a chuva."),
+            ("Vegetação nativa", CORES[0], [0.40,0.41,0.40,0.37,0.34,0.31,0.29,0.28,0.30,0.34,0.38,0.40],
              "Alta e estável."),
         ]),
     "NDTI": dict(
-        label="NDTI — palha × solo (SWIR)", y=[-0.05, 0.2], precip=False, intuitivo=False, fmt=2,
-        desc=("Diferença SWIR1–SWIR2. **Palha/capim seco (celulose)** fica mais alto que "
-              "**solo nu** (~0). Diz se a queda do NDVI foi **solo exposto** (lavoura "
-              "colhida) ou **capim seco** (pasto na seca)."),
-        faixas=[(0.03, "solo nu"), (0.08, "misto"), (9, "palha/capim seco")],
+        label="NDTI — material seco / palha (SWIR)", y=[0.0, 0.45], precip=False, intuitivo=False, fmt=2,
+        desc=("**O que é:** diferença **SWIR1–SWIR2**, responde a **palha/material "
+              "vegetal seco** vs solo. **Solo nu tende ao mais baixo**; vegetação e "
+              "palha/capim seco, mais alto. Sinal **sutil** — use junto com o NDVI para "
+              "saber se a queda foi solo exposto (colheita) ou capim seco (pasto na seca)."),
+        faixas=[(0.15, "baixo (solo nu)"), (0.28, "médio"), (9, "alto (veg./palha)")],
         exemplos=[
-            ("Solo exposto / colhido", CORES[6], [0.03,0.03,0.02,0.03,0.02,0.03,0.02,0.03,0.03,0.02,0.03,0.03],
-             "Perto de zero — **solo nu**."),
-            ("Capim seco (pasto na seca)", CORES[2], [0.06,0.06,0.07,0.09,0.11,0.13,0.13,0.12,0.10,0.08,0.06,0.06],
-             "**Sobe na seca** (celulose do capim morto)."),
-            ("Vegetação verde", CORES[0], [0.06,0.06,0.06,0.06,0.05,0.05,0.05,0.05,0.06,0.06,0.06,0.06],
-             "Intermediário e estável."),
+            ("Solo exposto / colhido", CORES[6], [0.14,0.14,0.13,0.13,0.12,0.11,0.10,0.10,0.11,0.11,0.12,0.13],
+             "**Mais baixo** — solo nu."),
+            ("Pasto / palha seca", CORES[2], [0.26,0.27,0.28,0.29,0.28,0.26,0.24,0.23,0.24,0.26,0.27,0.27],
+             "Intermediário-alto (material seco em pé)."),
+            ("Silvicultura / veg. densa", CORES[5], [0.35,0.36,0.37,0.38,0.37,0.34,0.30,0.27,0.29,0.34,0.35,0.36],
+             "**Mais alto** — muita biomassa."),
         ]),
     "NDWI": dict(
-        label="NDWI — umidade da vegetação", y=[-0.25, 0.6], precip=True, intuitivo=False, fmt=2,
-        desc=("Umidade da vegetação (NIR–SWIR). **Cai na seca** em sequeiro; "
-              "**irrigado/úmido segura alto**. Ajuda a flagrar **irrigação** e "
-              "estresse hídrico. Água fica bem alta."),
-        faixas=[(0.0, "seco/solo"), (0.2, "úmido moderado"), (0.4, "muito úmido"), (9, "água")],
+        label="NDWI — umidade da vegetação", y=[-0.3, 0.6], precip=True, intuitivo=False, fmt=2,
+        desc=("**O que é:** **umidade da vegetação** (NIR–SWIR). **Cai (fica negativo) "
+              "na seca** em sequeiro; **irrigado/úmido segura alto**. Bom para flagrar "
+              "**irrigação** e estresse hídrico. Corpo d'água fica bem alto."),
+        faixas=[(0.0, "seco"), (0.2, "úmido moderado"), (0.4, "muito úmido"), (9, "água")],
         exemplos=[
-            ("Sequeiro (seca forte)", CORES[1], [0.32,0.30,0.22,0.10,0.00,-0.08,-0.12,-0.10,-0.02,0.10,0.24,0.32],
-             "**Despenca na seca**."),
-            ("Irrigado / úmido", CORES[5], [0.36,0.37,0.35,0.33,0.32,0.30,0.30,0.31,0.33,0.34,0.36,0.37],
+            ("Sequeiro (seca forte)", CORES[1], [0.12,0.10,0.08,0.02,-0.06,-0.12,-0.16,-0.18,-0.15,-0.08,0.02,0.10],
+             "**Fica negativo na seca**."),
+            ("Irrigado / úmido", CORES[5], [0.30,0.31,0.30,0.28,0.26,0.24,0.22,0.22,0.24,0.26,0.29,0.30],
              "**Segura alto** o ano todo."),
-            ("Água", CORES[4], [0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5],
+            ("Água", CORES[4], [0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48],
              "Muito alta."),
         ]),
     "LST": dict(
-        label="LST — temperatura (°C)", y=[15, 45], precip=False, intuitivo=False, fmt=1,
-        desc=("Temperatura de superfície (Landsat, ~100 m, menos datas). **Frio = "
-              "evapotranspiração** (vegetação/irrigação ativa); **quente = solo/pasto "
-              "seco**. **Verde + FRIO na seca = provável IRRIGAÇÃO.**"),
-        faixas=[(26, "frio (veg/água/irrigado)"), (33, "ameno"), (999, "quente (solo/seco)")],
+        label="LST — temperatura (°C)", y=[15, 50], precip=False, intuitivo=False, fmt=1,
+        desc=("**O que é:** **temperatura de superfície** (Landsat, ~100 m, menos datas). "
+              "**Frio = evapotranspiração** (vegetação/irrigação ativa); **quente = "
+              "solo/pasto seco**. **Verde + FRIO na seca = provável IRRIGAÇÃO.** No auge "
+              "da seca até a mata nativa esquenta."),
+        faixas=[(28, "frio (irrigado/úmido)"), (36, "ameno"), (999, "quente (solo/seco)")],
         exemplos=[
-            ("Solo / pasto seco", CORES[6], [30,31,32,34,36,38,40,41,39,36,32,30],
+            ("Solo / pasto seco", CORES[6], [33,33,34,35,37,38,40,42,45,46,38,34],
              "**Esquenta muito** na seca."),
-            ("Mata / irrigado", CORES[0], [26,27,27,27,28,28,29,29,29,28,27,26],
+            ("Veg. úmida / irrigado", CORES[0], [28,28,29,29,29,28,28,29,30,30,29,28],
              "Ameno e estável (evapotranspira)."),
-            ("Água", CORES[4], [25,25,24,24,24,23,23,23,24,24,25,25],
+            ("Água", CORES[4], [26,26,26,25,25,24,24,24,25,25,26,26],
              "Sempre fria."),
         ]),
 }
@@ -846,10 +851,21 @@ def _mini_grafico_exemplo(cor, valores, yr, key):
     return fig
 
 
+def _explica_indice(ind):
+    """Explicação curta e VISÍVEL do índice (acima do gráfico)."""
+    st.caption(INDICES_INFO[ind]["desc"])
+
+
+def _bloco_guia(ind):
+    """Antes de gerar: nome + explicação visível + exemplos, por índice."""
+    st.markdown(f"**{INDICES_INFO[ind]['label']}**")
+    _explica_indice(ind)
+    _guia_indice(ind)
+
+
 def _guia_indice(ind):
     info = INDICES_INFO[ind]
-    with st.expander(f"📖 Como ler o {info['label']}"):
-        st.markdown(info["desc"])
+    with st.expander(f"📖 Exemplos de curva — {info['label']}"):
         st.caption("Assinaturas ilustrativas (o padrão se repete a cada ano — compare o **formato**):")
         for nome, cor, vals, desc in info["exemplos"]:
             c_graf, c_txt = st.columns([1, 1.25], vertical_alignment="center")
@@ -1012,12 +1028,12 @@ def _render_indices(gdf_imovel):
     if not res:
         st.info("Adicione pontos, escolha os índices e clique em **Gerar gráficos**.")
         for ind in indices:
-            _guia_indice(ind)
+            _bloco_guia(ind)
         return
     if res.get("n") != len(pontos):
         st.info("Os pontos mudaram. Clique em **Gerar gráficos** para atualizar.")
         for ind in res.get("indices", ["NDVI"]):
-            _guia_indice(ind)
+            _bloco_guia(ind)
         return
 
     dados = res["dados"]
@@ -1027,7 +1043,7 @@ def _render_indices(gdf_imovel):
     if not meses or not series_por_ind:
         st.warning("Sem dados no período/pontos selecionados. Tente outro período.")
         for ind in inds:
-            _guia_indice(ind)
+            _bloco_guia(ind)
         return
 
     # pontos no gráfico (aplica a todos os índices)
@@ -1055,6 +1071,7 @@ def _render_indices(gdf_imovel):
         if not series_sel:
             continue
         st.markdown(f"#### {INDICES_INFO[ind]['label']}")
+        _explica_indice(ind)
         cols = st.columns(min(len(series_sel), 4) or 1)
         for i, (pid, serie) in enumerate(series_sel.items()):
             cols[i % len(cols)].markdown(_card_ponto(ind, pid, serie[idx_ref]),

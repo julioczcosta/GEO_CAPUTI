@@ -477,14 +477,23 @@ def indices_serie_mensal(pontos_lonlat, ano_ini, ano_fim, indices=("NDVI",)):
                 col.size().gt(0), col.median().normalizedDifference([a, b]), _vazio))
         return f
 
+    def _lst_scene(i):
+        # mascara nuvem/sombra/nuvem-dilatada (QA_PIXEL) — senao nuvem fria vira
+        # LST negativa e contamina a media. ST_B10 -> Celsius.
+        qa = i.select("QA_PIXEL")
+        boa = (qa.bitwiseAnd(1 << 1).eq(0)
+               .And(qa.bitwiseAnd(1 << 3).eq(0))
+               .And(qa.bitwiseAnd(1 << 4).eq(0)))
+        return (i.select("ST_B10").multiply(0.00341802).add(149.0).subtract(273.15)
+                .updateMask(boa).rename("x"))
+
     def f_lst(d):
         d = ee.Date(d)
         col = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
                .merge(ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"))
                .filterBounds(regiao).filterDate(d, d.advance(1, "month"))
-               .filter(ee.Filter.lt("CLOUD_COVER", 80)))
-        img = col.map(lambda i: i.select("ST_B10").multiply(0.00341802)
-                      .add(149.0).subtract(273.15)).mean().rename("x")
+               .filter(ee.Filter.lt("CLOUD_COVER", 90)).map(_lst_scene))
+        img = col.mean().rename("x")
         return ee.Image(ee.Algorithms.If(col.size().gt(0), img, _vazio))
 
     out = {}
