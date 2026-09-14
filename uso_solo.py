@@ -888,7 +888,7 @@ def _grafico_indice(ind, meses, series_sel, precip_vals, mes_ref):
     fig.add_vline(x=mes_ref, line=dict(color="#8899aa", dash="dot"))
     layout = dict(
         height=340, margin=dict(l=20, r=20, t=20, b=20),
-        yaxis=dict(title=ind, range=info["y"]),
+        yaxis=dict(title=ind, autorange=True),  # auto: nunca corta o pico (ex.: NDRE > 0,6)
         hovermode="x unified", barmode="overlay",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     if tem_precip:
