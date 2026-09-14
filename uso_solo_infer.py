@@ -411,6 +411,92 @@ def ndvi_serie_mensal(pontos_lonlat, ano_ini, ano_fim):
     return {"meses": rotulos, "series": series}
 
 
+# Índices S2 por diferença normalizada (banda_a, banda_b) -> (a-b)/(a+b)
+_S2_ND = {
+    "NDVI": ("B8", "B4"),    # vigor
+    "NDRE": ("B8", "B5"),    # red-edge / clorofila (nao satura)
+    "NDTI": ("B11", "B12"),  # palha/celulose x solo (SWIR)
+    "NDWI": ("B8", "B11"),   # umidade da vegetacao (NDMI)
+}
+
+
+def indices_serie_mensal(pontos_lonlat, ano_ini, ano_fim, indices=("NDVI",)):
+    """Série mensal de VÁRIOS índices por ponto. S2 (NDVI/NDRE/NDTI/NDWI) na mesma
+    máscara de nuvem da classificação; LST via Landsat C2 L2 (térmico, °C).
+
+    Retorna {"meses": ["2019-01", ...], "series": {indice: {pid: [val|None, ...]}}}.
+    Um reduceRegions por índice (poucos getInfo). Mês sem imagem limpa -> None.
+    """
+    from datetime import date
+    pontos_lonlat = list(pontos_lonlat or [])
+    indices = [i for i in indices if i in _S2_ND or i == "LST"]
+    if not pontos_lonlat or not indices:
+        return {"meses": [], "series": {}}
+
+    hoje = date.today()
+    meses = []
+    for y in range(int(ano_ini), int(ano_fim) + 1):
+        for mth in range(1, 13):
+            if y == hoje.year and mth > hoje.month:
+                break
+            meses.append((y, mth))
+    if not meses:
+        return {"meses": [], "series": {}}
+
+    fc = ee.FeatureCollection([
+        ee.Feature(ee.Geometry.Point([float(lon), float(lat)]), {"pid": i})
+        for i, (lon, lat) in enumerate(pontos_lonlat)])
+    regiao = fc.geometry().bounds().buffer(500)
+    datas = ee.List([ee.Date.fromYMD(int(y), int(m), 1) for (y, m) in meses])
+    bandas = [f"m{y:04d}_{m:02d}" for (y, m) in meses]
+    rotulos = [f"{y:04d}-{m:02d}" for (y, m) in meses]
+    _vazio = ee.Image.constant(0).updateMask(ee.Image.constant(0))
+
+    def coleta(por_mes_img, scale):
+        stack = ee.ImageCollection(datas.map(por_mes_img)).toBands().rename(bandas)
+        feats = stack.reduceRegions(collection=fc, reducer=ee.Reducer.mean(),
+                                    scale=scale).getInfo()["features"]
+        ser = {i: [None] * len(rotulos) for i in range(len(pontos_lonlat))}
+        for ft in feats:
+            p = ft.get("properties", {})
+            pid = p.get("pid")
+            if pid is None:
+                continue
+            pid = int(pid)
+            for k, b in enumerate(bandas):
+                v = p.get(b)
+                if v is not None:
+                    ser[pid][k] = round(float(v), 3)
+        return ser
+
+    def mk_s2(a, b):
+        def f(d):
+            d = ee.Date(d)
+            col = _colecao_s2(d, d.advance(1, "month"), regiao)
+            return ee.Image(ee.Algorithms.If(
+                col.size().gt(0), col.median().normalizedDifference([a, b]), _vazio))
+        return f
+
+    def f_lst(d):
+        d = ee.Date(d)
+        col = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+               .merge(ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"))
+               .filterBounds(regiao).filterDate(d, d.advance(1, "month"))
+               .filter(ee.Filter.lt("CLOUD_COVER", 80)))
+        img = col.map(lambda i: i.select("ST_B10").multiply(0.00341802)
+                      .add(149.0).subtract(273.15)).mean().rename("x")
+        return ee.Image(ee.Algorithms.If(col.size().gt(0), img, _vazio))
+
+    out = {}
+    for ind in indices:
+        if ind in _S2_ND:
+            a, b = _S2_ND[ind]
+            out[ind] = coleta(mk_s2(a, b), 10)
+        elif ind == "LST":
+            out["LST"] = coleta(f_lst, 30)
+    return {"meses": rotulos, "series": out}
+
+
 def precip_serie_mensal(geom_ee, ano_ini, ano_fim):
     """Série mensal de precipitação (CHIRPS) média na REGIÃO do imóvel.
 

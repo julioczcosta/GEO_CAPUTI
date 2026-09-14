@@ -394,13 +394,13 @@ def render_tab():
     ui.barra_imovel()
 
     tab_classe, tab_mb, tab_ndvi, tab_rest = st.tabs(
-        ["📊 Classificação", "🗂️ MapBiomas", "🌱 NDVI (vigor)", "⛰️ Relevo (declividade)"])
+        ["📊 Classificação", "🗂️ MapBiomas", "📈 Índices", "⛰️ Relevo (declividade)"])
     with tab_classe:
         _render_classificacao(gdf_imovel)
     with tab_mb:
         _render_mapbiomas(gdf_imovel)
     with tab_ndvi:
-        _render_ndvi(gdf_imovel)
+        _render_indices(gdf_imovel)
     with tab_rest:
         _render_relevo(gdf_imovel)
 
@@ -708,26 +708,106 @@ def _zoom_bounds(minx, miny, maxx, maxy):
     return int(max(4, min(16, round(math.log2(360.0 / larg) - 0.5))))
 
 
-def _ndvi_rotulo(v):
-    """Rótulo curto de interpretação para um valor de NDVI."""
+ANOS_EXEMPLO = 3
+
+# Metadados por índice: rótulo, faixa do eixo, se leva chuva ao fundo, texto-guia
+# e "colas" (curvas ILUSTRATIVAS de 12 meses por classe, para reconhecer o padrão).
+INDICES_INFO = {
+    "NDVI": dict(
+        label="NDVI — vigor", y=[-0.15, 1.0], precip=True, intuitivo=True, fmt=2,
+        desc=("Vigor da vegetação (infravermelho vs. vermelho), de -1 a 1 — quanto "
+              "mais alto, mais verde ativo. **Satura acima de ~0,8**: pasto denso e "
+              "lavoura no pico ficam iguais."),
+        faixas=[(0.1, "água/sombra"), (0.2, "solo exposto"), (0.4, "veg. rala"),
+                (0.6, "veg. moderada"), (0.8, "veg. densa"), (9, "muito densa/pico")],
+        exemplos=[
+            ("Lavoura anual", CORES[1], [0.85,0.80,0.55,0.30,0.20,0.18,0.17,0.18,0.28,0.50,0.72,0.85],
+             "Pico na safra, **cai a solo** na colheita — grande variação."),
+            ("Pastagem", CORES[2], [0.62,0.63,0.60,0.52,0.45,0.40,0.35,0.33,0.35,0.45,0.55,0.60],
+             "Acompanha a chuva, mas **nunca fica exposta**."),
+            ("Vegetação nativa", CORES[0], [0.78,0.80,0.78,0.72,0.68,0.64,0.60,0.58,0.60,0.66,0.72,0.76],
+             "Alta e estável o ano todo."),
+            ("Solo exposto", CORES[6], [0.15,0.16,0.15,0.14,0.15,0.15,0.14,0.15,0.16,0.15,0.15,0.16],
+             "Baixa e plana."),
+        ]),
+    "NDRE": dict(
+        label="NDRE — red-edge / clorofila", y=[0.0, 0.6], precip=True, intuitivo=False, fmt=2,
+        desc=("Red-edge (clorofila/nitrogênio). **Não satura** no verde alto → separa "
+              "**lavoura adubada** (mais alta) de **pasto denso**, que o NDVI empata."),
+        faixas=[(0.1, "solo/seco"), (0.25, "veg. moderada"), (0.4, "densa/adubada"), (9, "muito alta")],
+        exemplos=[
+            ("Lavoura anual", CORES[1], [0.46,0.44,0.30,0.12,0.06,0.05,0.05,0.06,0.12,0.28,0.40,0.46],
+             "Alta no pico (muita clorofila/N)."),
+            ("Pastagem", CORES[2], [0.24,0.25,0.23,0.20,0.17,0.15,0.13,0.12,0.14,0.18,0.22,0.24],
+             "Moderada — **abaixo da lavoura** no pico, mesmo com NDVI parecido."),
+            ("Vegetação nativa", CORES[0], [0.34,0.35,0.34,0.31,0.29,0.27,0.25,0.24,0.26,0.29,0.32,0.33],
+             "Alta e estável."),
+        ]),
+    "NDTI": dict(
+        label="NDTI — palha × solo (SWIR)", y=[-0.05, 0.2], precip=False, intuitivo=False, fmt=2,
+        desc=("Diferença SWIR1–SWIR2. **Palha/capim seco (celulose)** fica mais alto que "
+              "**solo nu** (~0). Diz se a queda do NDVI foi **solo exposto** (lavoura "
+              "colhida) ou **capim seco** (pasto na seca)."),
+        faixas=[(0.03, "solo nu"), (0.08, "misto"), (9, "palha/capim seco")],
+        exemplos=[
+            ("Solo exposto / colhido", CORES[6], [0.03,0.03,0.02,0.03,0.02,0.03,0.02,0.03,0.03,0.02,0.03,0.03],
+             "Perto de zero — **solo nu**."),
+            ("Capim seco (pasto na seca)", CORES[2], [0.06,0.06,0.07,0.09,0.11,0.13,0.13,0.12,0.10,0.08,0.06,0.06],
+             "**Sobe na seca** (celulose do capim morto)."),
+            ("Vegetação verde", CORES[0], [0.06,0.06,0.06,0.06,0.05,0.05,0.05,0.05,0.06,0.06,0.06,0.06],
+             "Intermediário e estável."),
+        ]),
+    "NDWI": dict(
+        label="NDWI — umidade da vegetação", y=[-0.25, 0.6], precip=True, intuitivo=False, fmt=2,
+        desc=("Umidade da vegetação (NIR–SWIR). **Cai na seca** em sequeiro; "
+              "**irrigado/úmido segura alto**. Ajuda a flagrar **irrigação** e "
+              "estresse hídrico. Água fica bem alta."),
+        faixas=[(0.0, "seco/solo"), (0.2, "úmido moderado"), (0.4, "muito úmido"), (9, "água")],
+        exemplos=[
+            ("Sequeiro (seca forte)", CORES[1], [0.32,0.30,0.22,0.10,0.00,-0.08,-0.12,-0.10,-0.02,0.10,0.24,0.32],
+             "**Despenca na seca**."),
+            ("Irrigado / úmido", CORES[5], [0.36,0.37,0.35,0.33,0.32,0.30,0.30,0.31,0.33,0.34,0.36,0.37],
+             "**Segura alto** o ano todo."),
+            ("Água", CORES[4], [0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5],
+             "Muito alta."),
+        ]),
+    "LST": dict(
+        label="LST — temperatura (°C)", y=[15, 45], precip=False, intuitivo=False, fmt=1,
+        desc=("Temperatura de superfície (Landsat, ~100 m, menos datas). **Frio = "
+              "evapotranspiração** (vegetação/irrigação ativa); **quente = solo/pasto "
+              "seco**. **Verde + FRIO na seca = provável IRRIGAÇÃO.**"),
+        faixas=[(26, "frio (veg/água/irrigado)"), (33, "ameno"), (999, "quente (solo/seco)")],
+        exemplos=[
+            ("Solo / pasto seco", CORES[6], [30,31,32,34,36,38,40,41,39,36,32,30],
+             "**Esquenta muito** na seca."),
+            ("Mata / irrigado", CORES[0], [26,27,27,27,28,28,29,29,29,28,27,26],
+             "Ameno e estável (evapotranspira)."),
+            ("Água", CORES[4], [25,25,24,24,24,23,23,23,24,24,25,25],
+             "Sempre fria."),
+        ]),
+}
+
+PRESETS = {
+    "Vigor (NDVI + NDRE)": ["NDVI", "NDRE"],
+    "Umidade (NDWI + LST)": ["NDWI", "LST"],
+    "Solo / palha (NDTI)": ["NDTI"],
+    "Todos": ["NDVI", "NDRE", "NDTI", "NDWI", "LST"],
+}
+
+
+def _rotulo_indice(ind, v):
     if v is None:
         return "sem dado"
-    if v < 0.1:
-        return "água / sombra"
-    if v < 0.2:
-        return "solo exposto"
-    if v < 0.4:
-        return "vegetação rala"
-    if v < 0.6:
-        return "vegetação moderada"
-    if v < 0.8:
-        return "vegetação densa"
-    return "muito densa / pico"
+    for lim, rot in INDICES_INFO[ind]["faixas"]:
+        if v < lim:
+            return rot
+    return INDICES_INFO[ind]["faixas"][-1][1]
 
 
-def _card_ponto_ndvi(pid, v):
+def _card_ponto(ind, pid, v):
     cor = CORES_PONTOS[pid % len(CORES_PONTOS)]
-    val = f"{v:.2f}" if v is not None else "—"
+    fmt = INDICES_INFO[ind]["fmt"]
+    val = (f"{v:.{fmt}f}" if v is not None else "—")
     return (
         "<div style='border:1px solid #e9ecef;border-radius:10px;padding:10px 12px;"
         "background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.04);'>"
@@ -737,57 +817,27 @@ def _card_ponto_ndvi(pid, v):
         f"Ponto {pid + 1}</div>"
         f"<div style='font-size:1.6rem;font-weight:700;color:#2C3E50;line-height:1.1;"
         f"margin-top:2px;'>{val}</div>"
-        f"<div style='font-size:0.76rem;color:#6c757d;'>{_ndvi_rotulo(v)}</div>"
+        f"<div style='font-size:0.76rem;color:#6c757d;'>{_rotulo_indice(ind, v)}</div>"
         "</div>"
     )
 
 
-# Assinaturas de NDVI HIPOTÉTICAS (ilustrativas) de cada classe ao longo do ano,
-# para o usuário reconhecer o padrão. Valores Jan..Dez; cores da classificação.
-# O gráfico de exemplo repete estes 12 meses por alguns anos (o padrão sazonal
-# se repete), pra casar com o gráfico real, que é multianual (2019..atual).
-ANOS_EXEMPLO = 3
-EXEMPLOS_NDVI = [
-    ("Lavoura anual", CORES[1],
-     [0.85, 0.80, 0.55, 0.30, 0.20, 0.18, 0.17, 0.18, 0.28, 0.50, 0.72, 0.85],
-     "Pico forte na safra e queda na colheita — grande variação no ano "
-     "(pode ter um 2º pico menor da safrinha)."),
-    ("Pastagem", CORES[2],
-     [0.62, 0.63, 0.60, 0.52, 0.45, 0.40, 0.35, 0.33, 0.35, 0.45, 0.55, 0.60],
-     "Acompanha a chuva: sobe no verão, cai na seca — mas nunca fica exposta."),
-    ("Vegetação nativa", CORES[0],
-     [0.78, 0.80, 0.78, 0.72, 0.68, 0.64, 0.60, 0.58, 0.60, 0.66, 0.72, 0.76],
-     "Alta e estável o ano todo, com leve queda na seca."),
-    ("Silvicultura", CORES[5],
-     [0.80, 0.81, 0.80, 0.79, 0.80, 0.80, 0.79, 0.80, 0.81, 0.80, 0.80, 0.81],
-     "Alta e quase constante (perene); cai de vez quando é colhida."),
-    ("Solo exposto / área aberta", CORES[6],
-     [0.15, 0.16, 0.15, 0.14, 0.15, 0.15, 0.14, 0.15, 0.16, 0.15, 0.15, 0.16],
-     "Baixa e plana o ano inteiro."),
-    ("Corpo d'água", CORES[4],
-     [-0.05, -0.04, -0.05, -0.05, -0.04, -0.05, -0.05, -0.04, -0.05, -0.05, -0.04, -0.05],
-     "Próxima de zero ou negativa."),
-]
-
-
-def _mini_grafico_exemplo(nome, cor, valores):
+def _mini_grafico_exemplo(cor, valores, yr, key):
     r, g, b = _hex_rgb(cor)
     n = len(valores)                      # 12 meses
     y = valores * ANOS_EXEMPLO            # repete o padrão sazonal por vários anos
     x = list(range(len(y)))
+    fill = "tozeroy" if yr[0] <= 0 else "none"
     fig = go.Figure(go.Scatter(
-        x=x, y=y, mode="lines",
-        line=dict(color=cor, width=2.5),
-        fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.18)", hoverinfo="skip",
+        x=x, y=y, mode="lines", line=dict(color=cor, width=2.5),
+        fill=fill, fillcolor=f"rgba({r},{g},{b},0.18)", hoverinfo="skip",
     ))
-    # separadores pontilhados entre os anos, pra deixar claro que o padrão
-    # se repete a cada ano (como no gráfico real, multianual)
     for k in range(1, ANOS_EXEMPLO):
         fig.add_vline(x=k * n - 0.5, line=dict(color="#ddd", width=1, dash="dot"))
     fig.update_layout(
         height=120, margin=dict(l=6, r=6, t=6, b=4),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
-        yaxis=dict(range=[-0.15, 1.0], showticklabels=False, showgrid=False, zeroline=False),
+        yaxis=dict(range=yr, showticklabels=False, showgrid=False, zeroline=False),
         xaxis=dict(showgrid=False, tickmode="array",
                    tickvals=[k * n + n / 2 - 0.5 for k in range(ANOS_EXEMPLO)],
                    ticktext=[f"ano {k + 1}" for k in range(ANOS_EXEMPLO)],
@@ -796,34 +846,16 @@ def _mini_grafico_exemplo(nome, cor, valores):
     return fig
 
 
-def _guia_ndvi():
-    with st.expander("📖 Guia de interpretação do NDVI"):
-        st.markdown(
-            "**O que é.** O NDVI mede o vigor da vegetação a partir da luz refletida "
-            "(infravermelho vs. vermelho). Vai de **-1 a 1**: quanto mais alto, mais "
-            "vegetação verde e ativa.\n\n"
-            "**Faixas de valor:**\n\n"
-            "| NDVI | Normalmente indica |\n"
-            "|---|---|\n"
-            "| < 0,1 | Água, sombra, nuvem |\n"
-            "| 0,1 – 0,2 | Solo exposto, área construída, rocha |\n"
-            "| 0,2 – 0,4 | Vegetação rala / pastagem seca ou degradada |\n"
-            "| 0,4 – 0,6 | Pastagem em bom estado / vegetação moderada |\n"
-            "| 0,6 – 0,8 | Vegetação densa / cultura vigorosa / cerrado |\n"
-            "| 0,8 – 1,0 | Floresta densa / cultura no pico |\n"
-        )
-
-        st.markdown("**Assinaturas típicas ao longo de vários anos** (curvas "
-                    "ilustrativas — o padrão sazonal **se repete a cada ano**, como "
-                    "no seu gráfico; compare o formato):")
-        # Um exemplo por linha (gráfico à esquerda, texto à direita): legível
-        # mesmo com a janela estreita/lateral, onde 3 colunas ficariam espremidas.
-        for nome, cor, vals, desc in EXEMPLOS_NDVI:
+def _guia_indice(ind):
+    info = INDICES_INFO[ind]
+    with st.expander(f"📖 Como ler o {info['label']}"):
+        st.markdown(info["desc"])
+        st.caption("Assinaturas ilustrativas (o padrão se repete a cada ano — compare o **formato**):")
+        for nome, cor, vals, desc in info["exemplos"]:
             c_graf, c_txt = st.columns([1, 1.25], vertical_alignment="center")
-            c_graf.plotly_chart(_mini_grafico_exemplo(nome, cor, vals),
-                                 use_container_width=True,
-                                 config={"displayModeBar": False},
-                                 key=f"ex_ndvi_{nome}")
+            c_graf.plotly_chart(_mini_grafico_exemplo(cor, vals, info["y"], f"ex_{ind}_{nome}"),
+                                 use_container_width=True, config={"displayModeBar": False},
+                                 key=f"ex_{ind}_{nome}")
             c_txt.markdown(
                 f"<div style='display:flex;align-items:center;gap:6px;font-weight:600;"
                 f"font-size:0.92rem;color:#2C3E50;'>"
@@ -831,22 +863,46 @@ def _guia_ndvi():
                 f"border:1px solid #999;display:inline-block;'></span>{nome}</div>",
                 unsafe_allow_html=True)
             c_txt.caption(desc)
-
-        st.caption("🌎 As curvas seguem o regime do **Cerrado / Centro-Oeste** "
-                   "(seca mai–set). O **formato** vale em boa parte do Brasil agrícola, "
-                   "mas o *timing* e a amplitude deslocam em outros biomas — na "
-                   "**Caatinga**, por exemplo, a vegetação nativa é caducifólia e "
-                   "**cai muito na seca** (não fica alta e estável como acima).")
-
-        st.caption("⚠️ As curvas acima são **ilustrativas** (não são dados reais) — "
-                   "servem só para reconhecer o padrão. Buracos na sua linha = mês sem "
-                   "imagem limpa (nuvem ou sem passagem do satélite).")
+        st.caption("⚠️ Curvas **ilustrativas** (não são dados reais), regime Cerrado/Centro-Oeste "
+                   "(seca mai–set). O *timing* muda em outros biomas. Buracos na sua linha = "
+                   "mês sem imagem limpa.")
 
 
-def _render_ndvi(gdf_imovel):
-    st.caption("Clique no mapa para coletar pontos e ver o vigor da vegetação "
-               "(NDVI) de cada um ao longo do tempo. Pode coletar **fora** do "
-               "perímetro também — útil para comparar com um vizinho.")
+def _grafico_indice(ind, meses, series_sel, precip_vals, mes_ref):
+    info = INDICES_INFO[ind]
+    tem_precip = bool(info["precip"] and precip_vals and len(precip_vals) == len(meses)
+                      and any(v is not None for v in precip_vals))
+    fig = go.Figure()
+    if tem_precip:
+        fig.add_trace(go.Bar(
+            x=meses, y=precip_vals, name="Precipitação (mm)", yaxis="y2",
+            marker_color="rgba(64,120,200,0.22)", marker_line_width=0,
+            hovertemplate="%{y:.0f} mm"))
+    fmt = info["fmt"]
+    for pid, serie in series_sel.items():
+        cor = CORES_PONTOS[pid % len(CORES_PONTOS)]
+        fig.add_trace(go.Scatter(
+            x=meses, y=serie, mode="lines+markers", name=f"Ponto {pid + 1}",
+            line=dict(color=cor, width=2), marker=dict(size=4),
+            connectgaps=False, hovertemplate=f"%{{y:.{fmt}f}}"))
+    fig.add_vline(x=mes_ref, line=dict(color="#8899aa", dash="dot"))
+    layout = dict(
+        height=340, margin=dict(l=20, r=20, t=20, b=20),
+        yaxis=dict(title=ind, range=info["y"]),
+        hovermode="x unified", barmode="overlay",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    if tem_precip:
+        maxp = max(v for v in precip_vals if v is not None) or 1
+        layout["yaxis2"] = dict(title="Precip. (mm)", overlaying="y", side="right",
+                                showgrid=False, rangemode="tozero", range=[0, maxp * 2.2])
+    fig.update_layout(**layout)
+    return fig
+
+
+def _render_indices(gdf_imovel):
+    st.caption("Clique no mapa para coletar pontos e ver **índices** ao longo do tempo "
+               "(vigor, clorofila, umidade, temperatura…). Pode coletar **fora** do "
+               "perímetro para comparar com um vizinho.")
 
     geom = _imovel_wgs(gdf_imovel)
     minx, miny, maxx, maxy = geom.bounds
@@ -865,7 +921,6 @@ def _render_ndvi(gdf_imovel):
         for i, (lon, lat) in enumerate(pontos):
             cor = CORES_PONTOS[i % len(CORES_PONTOS)]
             dentro = geom.contains(Point(lon, lat))
-            # Ponto fora do perímetro: borda âmbar (sinaliza "vizinho/comparação").
             borda = "#ffffff" if dentro else "#ffb300"
             tip = f"Ponto {i + 1}" + ("" if dentro else " (fora do perímetro)")
             folium.CircleMarker(
@@ -874,26 +929,20 @@ def _render_ndvi(gdf_imovel):
             ).add_to(fmap)
             folium.Marker(
                 [lat, lon],
-                # icon_size/icon_anchor centram o número sobre a bolinha
-                # (o DivIcon ancora no canto sup.-esq. por padrão, deslocando-o).
                 icon=folium.DivIcon(
-                    icon_size=(18, 18),
-                    icon_anchor=(9, 9),
-                    html=(
-                        "<div style='font-size:11px;font-weight:700;color:#fff;"
-                        "text-align:center;line-height:18px;width:18px;height:18px;'>"
-                        f"{i + 1}</div>")),
+                    icon_size=(18, 18), icon_anchor=(9, 9),
+                    html=("<div style='font-size:11px;font-weight:700;color:#fff;"
+                          "text-align:center;line-height:18px;width:18px;height:18px;'>"
+                          f"{i + 1}</div>")),
             ).add_to(fmap)
         saida = st_folium(fmap, height=430, use_container_width=True,
                           key="ndvi_map", returned_objects=["last_clicked"])
 
-    # trata o clique fora do bloco (para poder dar rerun com o novo marcador)
     clk = (saida or {}).get("last_clicked")
     if clk:
         novo = (round(clk["lng"], 6), round(clk["lat"], 6))
         if st.session_state.get("ndvi_last_click") != novo:
             st.session_state["ndvi_last_click"] = novo
-            # Aceita pontos dentro OU fora do perímetro (comparação com vizinhos).
             pontos.append(novo)
             st.rerun()
 
@@ -924,6 +973,18 @@ def _render_ndvi(gdf_imovel):
                 st.rerun()
 
         st.divider()
+        # --- escolha de indices (preset ou personalizado) ---
+        grupo = st.selectbox("Índices", ["Personalizado"] + list(PRESETS.keys()),
+                             index=1, key="idx_grupo",
+                             help="Grupos prontos ou escolha livre.")
+        if grupo == "Personalizado":
+            indices = st.multiselect(
+                "Escolha os índices", list(INDICES_INFO.keys()), default=["NDVI"],
+                key="idx_multi") or ["NDVI"]
+        else:
+            indices = PRESETS[grupo]
+            st.caption("Índices: " + ", ".join(indices))
+
         anos = list(range(2019, date.today().year + 1))
         ca, cb = st.columns(2)
         ano_ini = ca.selectbox("De (ano)", anos, index=0, key="ndvi_ano_ini")
@@ -935,108 +996,78 @@ def _render_ndvi(gdf_imovel):
         if ano_fim < ano_ini:
             st.warning("O ano final deve ser maior ou igual ao inicial.")
         else:
-            with st.spinner("Calculando NDVI e precipitação no Earth Engine..."):
-                dados = infer.ndvi_serie_mensal(pontos, ano_ini, ano_fim)
+            with st.spinner("Calculando índices e precipitação no Earth Engine…"):
+                dados = infer.indices_serie_mensal(pontos, ano_ini, ano_fim, indices)
                 try:
                     precip = infer.precip_serie_mensal(
                         ee.Geometry(mapping(geom)), ano_ini, ano_fim)
                 except Exception:
                     precip = {"meses": [], "precip": []}
             st.session_state["ndvi_result"] = {
-                "dados": dados, "precip": precip, "n": len(pontos),
-                "chave": f"{[tuple(p) for p in pontos]}|{ano_ini}|{ano_fim}",
+                "dados": dados, "precip": precip, "n": len(pontos), "indices": indices,
+                "chave": f"{[tuple(p) for p in pontos]}|{ano_ini}|{ano_fim}|{indices}",
             }
 
     res = st.session_state.get("ndvi_result")
     if not res:
-        st.info("Adicione pontos e clique em **Gerar gráficos**.")
-        _guia_ndvi()
+        st.info("Adicione pontos, escolha os índices e clique em **Gerar gráficos**.")
+        for ind in indices:
+            _guia_indice(ind)
         return
     if res.get("n") != len(pontos):
         st.info("Os pontos mudaram. Clique em **Gerar gráficos** para atualizar.")
-        _guia_ndvi()
+        for ind in res.get("indices", ["NDVI"]):
+            _guia_indice(ind)
         return
 
     dados = res["dados"]
     meses = dados["meses"]
-    series = dados["series"]
-    if not meses or not any(any(v is not None for v in s) for s in series.values()):
-        st.warning("Sem dados de NDVI no período/pontos selecionados. Tente outro período.")
-        _guia_ndvi()
+    series_por_ind = dados["series"]
+    inds = res.get("indices", list(series_por_ind.keys()))
+    if not meses or not series_por_ind:
+        st.warning("Sem dados no período/pontos selecionados. Tente outro período.")
+        for ind in inds:
+            _guia_indice(ind)
         return
 
-    # Quais pontos entram nos cards e no gráfico (default: todos).
-    pids_todos = list(series.keys())
+    # pontos no gráfico (aplica a todos os índices)
+    pids_todos = sorted({p for s in series_por_ind.values() for p in s})
     if len(pids_todos) > 1:
         _lbl = {f"Ponto {p + 1}": p for p in pids_todos}
-        _esc = st.multiselect(
-            "Pontos no gráfico", list(_lbl.keys()), default=list(_lbl.keys()),
-            key="ndvi_pts_sel",
-            help="Escolha quais pontos aparecem nos cards e no gráfico. Na legenda do "
-                 "gráfico, clique para esconder uma linha e dê duplo-clique para isolá-la.")
+        _esc = st.multiselect("Pontos no gráfico", list(_lbl.keys()),
+                              default=list(_lbl.keys()), key="ndvi_pts_sel",
+                              help="Na legenda do gráfico, clique para esconder uma linha "
+                                   "e dê duplo-clique para isolá-la.")
         pids_sel = [_lbl[l] for l in _esc] or pids_todos
     else:
         pids_sel = pids_todos
-    series_sel = {p: series[p] for p in pids_sel}
 
-    st.markdown("##### Vigor no mês de referência")
     mes_ref = st.select_slider("Mês de referência", options=meses, value=meses[-1],
                                key="ndvi_mesref")
     idx_ref = meses.index(mes_ref)
-
-    cols = st.columns(min(len(series_sel), 4) or 1)
-    for i, (pid, serie) in enumerate(series_sel.items()):
-        cols[i % len(cols)].markdown(_card_ponto_ndvi(pid, serie[idx_ref]),
-                                     unsafe_allow_html=True)
-
-    st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
-
     precip_vals = (res.get("precip") or {}).get("precip")
-    tem_precip = bool(precip_vals and len(precip_vals) == len(meses)
-                      and any(v is not None for v in precip_vals))
 
-    fig = go.Figure()
-    if tem_precip:
-        # Barras de chuva ao FUNDO (eixo direito), como pano de fundo para
-        # comparar o vigor com a precipitação — média na região do imóvel.
-        fig.add_trace(go.Bar(
-            x=meses, y=precip_vals, name="Precipitação (mm)", yaxis="y2",
-            marker_color="rgba(64,120,200,0.22)", marker_line_width=0,
-            hovertemplate="%{y:.0f} mm",
-        ))
-    for pid, serie in series_sel.items():
-        cor = CORES_PONTOS[pid % len(CORES_PONTOS)]
-        fig.add_trace(go.Scatter(
-            x=meses, y=serie, mode="lines+markers", name=f"Ponto {pid + 1}",
-            line=dict(color=cor, width=2), marker=dict(size=4),
-            connectgaps=False, hovertemplate="%{y:.2f}",
-        ))
-    fig.add_vline(x=mes_ref, line=dict(color="#8899aa", dash="dot"))
-    layout = dict(
-        height=380, margin=dict(l=20, r=20, t=20, b=20),
-        yaxis=dict(title="NDVI", range=[-0.05, 1.0]),
-        hovermode="x unified", barmode="overlay",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    if tem_precip:
-        maxp = max(v for v in precip_vals if v is not None) or 1
-        # eixo da chuva "espremido" (2,2x o máximo) -> as barras ficam na metade
-        # de baixo, como backdrop sutil sem competir com as linhas de NDVI.
-        layout["yaxis2"] = dict(
-            title="Precipitação (mm)", overlaying="y", side="right",
-            showgrid=False, rangemode="tozero", range=[0, maxp * 2.2],
-        )
-    fig.update_layout(**layout)
-    st.plotly_chart(fig, use_container_width=True)
-    fonte = ("Fonte: Sentinel-2 (10 m), nuvens mascaradas (CLOUD_SCORE_PLUS). "
-             "Média mensal de NDVI · buracos na linha = mês sem imagem limpa.")
-    if tem_precip:
-        fonte += " Barras: precipitação CHIRPS (média na região do imóvel)."
-    else:
-        fonte += " (Precipitação CHIRPS indisponível para esta área/período.)"
+    # um bloco por índice: cards + gráfico + guia
+    for ind in inds:
+        serie_ind = series_por_ind.get(ind, {})
+        serie_ind = {int(p): v for p, v in serie_ind.items()}
+        series_sel = {p: serie_ind[p] for p in pids_sel if p in serie_ind}
+        if not series_sel:
+            continue
+        st.markdown(f"#### {INDICES_INFO[ind]['label']}")
+        cols = st.columns(min(len(series_sel), 4) or 1)
+        for i, (pid, serie) in enumerate(series_sel.items()):
+            cols[i % len(cols)].markdown(_card_ponto(ind, pid, serie[idx_ref]),
+                                         unsafe_allow_html=True)
+        st.plotly_chart(_grafico_indice(ind, meses, series_sel, precip_vals, mes_ref),
+                        use_container_width=True, key=f"graf_{ind}")
+        _guia_indice(ind)
+        st.markdown("<div style='margin-top:6px;'></div>", unsafe_allow_html=True)
+
+    fonte = ("Fonte: Sentinel-2 (10 m) para NDVI/NDRE/NDTI/NDWI (nuvens mascaradas), "
+             "Landsat C2 (~100 m) para LST. Média mensal · buracos = mês sem imagem limpa. "
+             "Barras azuis (quando houver): precipitação CHIRPS.")
     st.caption(fonte)
-
-    _guia_ndvi()
 
 
 # ==========================================================================
