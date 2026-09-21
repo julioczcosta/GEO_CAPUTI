@@ -217,11 +217,8 @@ def render_tab():
                 if "erro" in dados_bacia:
                     st.warning(f"{dados_bacia['erro']}")
                 else:
-                    st.markdown(f"**Bacia:** {dados_bacia['nome_bacia']}")
-                    st.markdown(f"*Suprabacia: {dados_bacia['suprabacia']}*")
-                    st.markdown("---")
-                    st.markdown(f"**Curso Principal:** {dados_bacia['curso_prin']}")
-                    st.caption("Fonte: IBGE/CNRH - Bacias Nível 6")
+                    st.markdown(f"**Região Hidrográfica:** {dados_bacia['regiao_hidrografica']}")
+                    st.caption("Fonte: ANA/SNIRH - Regiões Hidrográficas")
 
             # --- ARMAZENAGEM ---
             st.write("")

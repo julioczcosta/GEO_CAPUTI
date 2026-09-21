@@ -660,31 +660,31 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
 
 @st.cache_data
 def get_bacia_info(lat, lon):
+    """Região Hidrográfica (ANA) por ponto.
+
+    Fonte trocada do IBGE (CREN:bacias_nivel_6, Ottobacia) para o ArcGIS REST da
+    ANA (snirh.gov.br) — o geoserver do IBGE caiu atrás do Cloudflare (HTTP 403).
+    A ANA entrega a **Região Hidrográfica** (uma das 12); a sub-bacia/curso
+    principal detalhados do IBGE deixaram de ser acessíveis.
+    """
     try:
-        bbox = f"{lon-0.01},{lat-0.01},{lon+0.01},{lat+0.01}"
-
-        try:
-            resp6 = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_6", "outputFormat": "application/json", "bbox": bbox})
-            r = resp6.json() if resp6 is not None else {}
-            props = r["features"][0]["properties"] if r.get("features") else {}
-        except Exception: props = {}
-
-        if not props:
-            try:
-                resp4 = ibge_wfs_get({"service": "WFS", "version": "1.0.0", "request": "GetFeature", "typeName": "CREN:bacias_nivel_4", "outputFormat": "application/json", "bbox": bbox})
-                r = resp4.json() if resp4 is not None else {}
-                props = r["features"][0]["properties"] if r.get("features") else {}
-            except Exception: pass
-
-        if not props: return {"erro": "Bacia não identificada."}
-
-        return {
-            "suprabacia": props.get("suprabacia", "---"),
-            "nome_bacia": props.get("nome_bacia", "---"),
-            "curso_prin": props.get("curso_prin", "---"),
-            "princ_aflu": props.get("princ_aflu", "---")
+        svc = ("https://www.snirh.gov.br/arcgis/rest/services/DADOSABERTOS/"
+               "Regiões_Hidrográficas/MapServer/0/query")
+        params = {
+            "geometry": f"{lon},{lat}", "geometryType": "esriGeometryPoint",
+            "inSR": "4326", "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "RHI_NM,RHI_CD", "returnGeometry": "false", "f": "json",
         }
-    except Exception as e: return {"erro": str(e)}
+        r = requests.get(svc, params=params, timeout=25,
+                         headers={"User-Agent": "GEOCAPUTI/1.0"})
+        feats = r.json().get("features", []) if r.status_code == 200 else []
+        if not feats:
+            return {"erro": "Bacia não identificada."}
+        attrs = feats[0].get("attributes", {})
+        nome = str(attrs.get("RHI_NM", "")).strip().title()
+        return {"regiao_hidrografica": nome or "---", "codigo": attrs.get("RHI_CD")}
+    except Exception as e:
+        return {"erro": str(e)}
 
 # ==========================================
 # 6. FUNÇÕES DE EXPORTAÇÃO (VETORIAL)
