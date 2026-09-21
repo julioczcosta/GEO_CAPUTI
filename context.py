@@ -1,36 +1,57 @@
+import os
+import json
 import streamlit as st
 import utils
 import ui
 import ee
 import requests
+from shapely.geometry import shape as _shape, Point as _Point
+
+
+@st.cache_resource(show_spinner=False)
+def _biomas_poligonos():
+    """Polígonos dos 6 biomas (IBGE, baixados do geoftp) para detecção LOCAL.
+
+    O geoserver do IBGE (CREN:bioma_vazado) caiu atrás do Cloudflare (HTTP 403),
+    então o bioma passa a ser resolvido por ponto-em-polígono num geojson embutido
+    (dados/biomas_br.geojson). Fonte: IBGE, Biomas 1:5.000.000.
+    """
+    p = os.path.join(os.path.dirname(__file__), "dados", "biomas_br.geojson")
+    out = []
+    try:
+        with open(p, encoding="utf-8") as f:
+            gj = json.load(f)
+        for feat in gj.get("features", []):
+            nome = (feat.get("properties") or {}).get("bioma")
+            geom = _shape(feat["geometry"])
+            if nome and geom is not None and not geom.is_empty:
+                out.append((nome, geom))
+    except Exception:
+        pass
+    return out
+
+
+def _bioma_no_ponto(lat, lon):
+    pt = _Point(lon, lat)
+    for nome, geom in _biomas_poligonos():
+        try:
+            if geom.contains(pt) or geom.intersects(pt):
+                return nome
+        except Exception:
+            continue
+    return "Não identificado"
+
 
 # --- FUNÇÃO LOCAL PARA CONSULTAR CAMADAS EXTRAS DO IBGE ---
 def consultar_camadas_extras(lat, lon):
-    """Consulta Bioma e Amazônia Legal via WFS do IBGE."""
+    """Bioma (geojson local) e Amazônia Legal (WFS do IBGE)."""
     base_url = "https://geoservicos.ibge.gov.br/geoserver/ows"
     headers = {"User-Agent": "Mozilla/5.0"}
-    
+
     resultados = {
-        "bioma": "Não identificado",
+        "bioma": _bioma_no_ponto(lat, lon),
         "amazonia_legal": False
     }
-    colunas_geometria = ['geom', 'the_geom']
-
-    # 1. BIOMA
-    for geom_col in colunas_geometria:
-        try:
-            params_bioma = {
-                "service": "WFS", "version": "1.0.0", "request": "GetFeature",
-                "typeName": "CREN:bioma_vazado", "outputFormat": "application/json",
-                "cql_filter": f"INTERSECTS({geom_col}, POINT({lon} {lat}))"
-            }
-            resp = requests.get(base_url, params=params_bioma, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("features"):
-                    resultados["bioma"] = data["features"][0]["properties"].get("bioma", "Não identificado")
-                    break
-        except Exception: continue
 
     # 2. AMAZÔNIA LEGAL
     try:
