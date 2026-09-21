@@ -413,6 +413,66 @@ def obter_municipios_interseccao(_geom_gee, cache_id):
         return [{"erro": str(e)}]
 
 
+# ==========================================================================
+# Municípios: APIs do IBGE em servicodados (malhas + localidades). Fonte trocada
+# do geoserver (geoservicos.ibge.gov.br), que passou a ficar atrás do Cloudflare
+# e responde com desafio anti-bot (HTTP 403) a requisições automatizadas. As
+# APIs de servicodados NÃO têm esse bloqueio.
+# ==========================================================================
+_IBGE_UA = {"User-Agent": "GEOCAPUTI/1.0 (avaliacao rural)"}
+_IBGE_API = "https://servicodados.ibge.gov.br/api"
+
+
+@st.cache_data(show_spinner=False, ttl=604800)
+def _ibge_malha_uf(uf):
+    """Malha de municípios de uma UF (GeoJSON, EPSG:4674) via API de malhas."""
+    url = (f"{_IBGE_API}/v3/malhas/estados/{uf}"
+           "?formato=application/vnd.geo+json&intrarregiao=municipio")
+    r = requests.get(url, timeout=60, headers=_IBGE_UA)
+    r.raise_for_status()
+    gdf = gpd.GeoDataFrame.from_features(r.json()["features"])
+    if gdf.crs is None:
+        gdf.set_crs("EPSG:4674", inplace=True)
+    return gdf
+
+
+@st.cache_data(show_spinner=False, ttl=604800)
+def _ibge_nomes_uf(uf):
+    """Mapa {cod_ibge(str): nome} dos municípios da UF (API de localidades)."""
+    r = requests.get(f"{_IBGE_API}/v1/localidades/estados/{uf}/municipios",
+                     timeout=30, headers=_IBGE_UA)
+    r.raise_for_status()
+    return {str(m["id"]): m["nome"] for m in r.json()}
+
+
+def _ufs_candidatas(gdf_imovel):
+    """UF(s) do imóvel: Nominatim (preciso) no centroide; se falhar, bbox local
+    (LIMITES_ESTADOS). Evita depender do IBGE/Cloudflare para achar a UF."""
+    ufs = set()
+    try:
+        c = gdf_imovel.to_crs("EPSG:4326").unary_union.centroid
+        r = requests.get(
+            f"https://nominatim.openstreetmap.org/reverse?lat={c.y}&lon={c.x}"
+            "&format=json&addressdetails=1&zoom=8",
+            timeout=10, headers=_IBGE_UA)
+        if r.status_code == 200:
+            iso = r.json().get("address", {}).get("ISO3166-2-lvl4", "")
+            if iso.startswith("BR-"):
+                ufs.add(iso[3:].upper())
+    except Exception:
+        pass
+    if not ufs:  # Nominatim indisponível -> candidatas por bbox de estado
+        try:
+            c = gdf_imovel.to_crs("EPSG:4326").unary_union.centroid
+            lon, lat = c.x, c.y
+            for uf, (x0, y0, x1, y1) in LIMITES_ESTADOS.items():
+                if x0 <= lon <= x1 and y0 <= lat <= y1:
+                    ufs.add(uf.upper())
+        except Exception:
+            pass
+    return sorted(ufs)
+
+
 @st.cache_data(show_spinner=False)
 def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
     geojson = _geom_gee.getInfo()
@@ -426,48 +486,28 @@ def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
     m = 0.05
     bbox = f"{b[0]-m},{b[1]-m},{b[2]+m},{b[3]+m}"
 
-    # Camadas verificadas via GetCapabilities em 2025-06 (CGMAT workspace, série qg_YYYY_030_munic)
-    camadas_mun = [
-        "CGMAT:qg_2025_030_munic",
-        "CGMAT:qg_2024_030_munic",
-        "CGMAT:qg_2023_030_munic",
-    ]
-    gdf_muns = gpd.GeoDataFrame()
-    diag = []
-
-    def _wfs_request(layer, bbox_str, retries=3):
-        params = {
-            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
-            "typeName": layer, "outputFormat": "application/json",
-            "srsName": "EPSG:4674", "BBOX": f"{bbox_str},EPSG:4674",
-        }
-        for attempt in range(retries):
-            resp = requests.get("https://geoservicos.ibge.gov.br/geoserver/ows",
-                                params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-            if resp.status_code in (502, 503, 504):
-                # servidor instável — espera e tenta novamente
-                time.sleep(2 ** attempt)
-                continue
-            return resp
-        return resp  # retorna o último erro após os retries
-
-    for layer in camadas_mun:
+    # Municípios via API de MALHAS do IBGE (servicodados, fora do Cloudflare) +
+    # nomes da API de localidades: baixa a malha da(s) UF(s) candidata(s) e cruza
+    # localmente — mesmo resultado do antigo geoserver (municípios + área).
+    ufs = _ufs_candidatas(gdf_imovel)
+    diag, partes = [], []
+    for uf in ufs:
         try:
-            resp = _wfs_request(layer, bbox)
-            if resp.status_code == 200 and resp.text.strip().startswith("{"):
-                data = resp.json()
-                diag.append(f"{layer}={len(data.get('features',[]))}")
-                if data.get("features"):
-                    gdf_muns = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4674")
-                    break
-            else:
-                diag.append(f"{layer}=HTTP{resp.status_code}")
+            malha = _ibge_malha_uf(uf).copy()
+            nomes = _ibge_nomes_uf(uf)
+            malha["cd_mun"] = malha["codarea"].astype(str)
+            malha["nome"] = malha["cd_mun"].map(nomes)
+            malha["uf"] = uf
+            partes.append(malha)
+            diag.append(f"{uf}={len(malha)}")
         except Exception:
-            diag.append(f"{layer}=ERR")
-            continue
+            diag.append(f"{uf}=ERR")
 
-    if gdf_muns.empty:
-        raise RuntimeError("Camadas IBGE: " + " | ".join(diag))
+    if not partes:
+        raise RuntimeError(
+            "Malhas IBGE (servicodados): "
+            + (" | ".join(diag) if diag else "UF do imóvel não determinada"))
+    gdf_muns = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs="EPSG:4674")
 
     utm_crs = gdf_imovel.estimate_utm_crs()
     gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
