@@ -143,7 +143,9 @@ def render_tab():
         return
 
     # Extração de Coordenadas
+    t_aba = time.time()
     centroide = geometry.centroid(1).coordinates().getInfo()
+    print(f"[contexto] centroide (Earth Engine): {time.time() - t_aba:.1f}s", flush=True)
     lon_dec, lat_dec = centroide[0], centroide[1]
 
     def decimal_to_dms(deg, is_lat):
@@ -194,7 +196,10 @@ def render_tab():
     # ==========================================
     if mun_selecionado:
         with st.spinner("Consultando bases oficiais (IBGE, ANA, OSRM)..."):
+            t_bases = time.time()
             bases = _consultar_bases(mun_selecionado, lat_dec, lon_dec)
+            print(f"[contexto] bases (paralelo): {time.time() - t_bases:.1f}s | "
+                  f"aba até aqui: {time.time() - t_aba:.1f}s", flush=True)
             dados_ibge = bases["ibge"]
             dados_altimetria = bases["altimetria"]
             dados_rota = bases["rota"]
@@ -215,6 +220,8 @@ def render_tab():
                 st.error(f"{dados_ibge['erro']}")
             else:
                 def fmt(num, dec=0):
+                    if num is None:
+                        return "---"  # fonte indisponível (não mostrar "None")
                     try:
                         val = float(num)
                         return f"{val:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")

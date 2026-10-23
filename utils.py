@@ -537,7 +537,17 @@ def _ufs_candidatas(gdf_imovel):
 
 @st.cache_data(show_spinner=False)
 def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
+    # Tempos de cada passo vão para o log ([municipio] ...), para achar gargalos
+    # no Streamlit Cloud, onde as fontes externas respondem bem mais devagar.
+    t0 = t = time.time()
+
+    def marca(passo):
+        nonlocal t
+        print(f"[municipio] {passo}: {time.time() - t:.1f}s", flush=True)
+        t = time.time()
+
     geojson = _geom_gee.getInfo()
+    marca("geometria (Earth Engine)")
     geom_shapely = shape(geojson)
     gdf_imovel = gpd.GeoDataFrame({'geometry': [geom_shapely]}, crs="EPSG:4674")
     gdf_imovel["geometry"] = gdf_imovel.geometry.buffer(0)
@@ -553,6 +563,7 @@ def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
     # Todas são cruzadas localmente com o imóvel (municípios + área).
     diag = []
     ufs = _ufs_candidatas(gdf_imovel)
+    marca(f"UF (Nominatim) -> {ufs}")
     if not ufs:
         diag.append("UF não determinada")
     gdf_muns = _muns_malha_api(ufs, diag) if ufs else None
@@ -560,6 +571,7 @@ def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
         gdf_muns = _muns_wfs(bbox, diag)
     if gdf_muns is None:
         gdf_muns = _muns_local((b[0]-m, b[1]-m, b[2]+m, b[3]+m), diag)
+    marca(f"malha municipal [{' | '.join(diag)}]")
     if gdf_muns is None:
         raise RuntimeError("Fontes de municípios indisponíveis: " + " | ".join(diag))
     gdf_muns = gdf_muns.reset_index(drop=True)
@@ -623,6 +635,8 @@ def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
             except Exception:
                 continue
 
+    marca(f"cruzamento ({len(gdf_muns)} municípios)")
+    print(f"[municipio] TOTAL: {time.time() - t0:.1f}s", flush=True)
     if not resultados:
         raise RuntimeError("Camadas IBGE: " + " | ".join(diag) + " | sem cruzamento")
 
@@ -675,8 +689,41 @@ def get_koppen_class(lat, lon):
     else: code, desc = "Cfa", "Subtropical Úmido"
     return {"Classificacao": code, "Descricao": desc}
 
+@st.cache_resource(show_spinner=False)
+def _municipios_info():
+    """{cod_ibge: dados} do Censo 2022 + regiões geográficas, embutido no app
+    (dados/municipios_info.csv, gerado de SIDRA 4714 + API de localidades).
+    Dados fixos: não há por que depender do SIDRA/geoserver, que a partir do
+    Streamlit Cloud falham ou estouram o prazo com frequência."""
+    p = os.path.join(os.path.dirname(__file__), "dados", "municipios_info.csv")
+    try:
+        df = pd.read_csv(p, dtype={"cd_mun": str})
+        return {r["cd_mun"]: r for r in df.to_dict("records")}
+    except Exception:
+        return {}
+
+
+def _num_ou_none(v):
+    try:
+        v = float(v)
+        return None if v != v else v  # NaN -> None
+    except (TypeError, ValueError):
+        return None
+
+
 @st.cache_data
 def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
+    local = _municipios_info().get(str(cod_ibge))
+    if local and _num_ou_none(local.get("populacao")) is not None:
+        return {
+            "municipio": nome_oficial, "uf": uf, "codigo_ibge": cod_ibge,
+            "populacao": _num_ou_none(local["populacao"]),
+            "area_km2": _num_ou_none(local["area_km2"]),
+            "densidade": _num_ou_none(local["densidade"]),
+            "regiao_intermediaria": local.get("regiao_intermediaria") or "---",
+            "regiao_imediata": local.get("regiao_imediata") or "---",
+        }
+    # Município fora da tabela local (ex.: criado após o Censo 2022): consulta online.
     try:
         session = requests.Session()
         
@@ -715,18 +762,36 @@ def get_ibge_context_by_code(cod_ibge, nome_oficial, uf, lat, lon):
         }
     except Exception as e: return {"erro": str(e)}
 
+@st.cache_resource(show_spinner=False)
+def _regioes_hidrograficas():
+    """As 12 Regiões Hidrográficas da ANA, embutidas no app
+    (dados/regioes_hidrograficas.geojson, de IG/Servicos_Base_IG_v6 camada 8)."""
+    p = os.path.join(os.path.dirname(__file__), "dados", "regioes_hidrograficas.geojson")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            feats = json.load(fh)["features"]
+        return [(shape(f["geometry"]), f["properties"]) for f in feats]
+    except Exception:
+        return []
+
+
 @st.cache_data
 def get_bacia_info(lat, lon):
     """Região Hidrográfica (ANA) por ponto.
 
-    Fonte trocada do IBGE (CREN:bacias_nivel_6, Ottobacia) para o ArcGIS REST da
-    ANA (snirh.gov.br) — o geoserver do IBGE caiu atrás do Cloudflare (HTTP 403).
-    A ANA entrega a **Região Hidrográfica** (uma das 12); a sub-bacia/curso
-    principal detalhados do IBGE deixaram de ser acessíveis.
+    Resolvida por ponto-em-polígono no geojson local (as 12 RHs não mudam); só
+    consulta a ANA online se o ponto cair fora delas (ex.: litoral, por causa
+    da simplificação). O serviço antigo DADOSABERTOS/Regiões_Hidrográficas foi
+    removido da ANA (HTTP 404).
     """
+    ponto = Point(lon, lat)
+    for geom, props in _regioes_hidrograficas():
+        if geom.intersects(ponto):
+            nome = str(props.get("RHI_NM", "")).strip().title().replace(" Do ", " do ")
+            return {"regiao_hidrografica": nome or "---", "codigo": props.get("RHI_CD")}
     try:
-        svc = ("https://www.snirh.gov.br/arcgis/rest/services/DADOSABERTOS/"
-               "Regiões_Hidrográficas/MapServer/0/query")
+        svc = ("https://www.snirh.gov.br/arcgis/rest/services/IG/"
+               "Servicos_Base_IG_v6/MapServer/8/query")
         params = {
             "geometry": f"{lon},{lat}", "geometryType": "esriGeometryPoint",
             "inSR": "4326", "spatialRel": "esriSpatialRelIntersects",
@@ -1032,6 +1097,7 @@ def gerar_texto_resumo_laudo(uf, mun_nome, pop, area_km2, lat_dec, lon_dec, lat_
         def formata_br(numero, decimais=0):
             try:
                 if isinstance(numero, str) and numero == "N/A": return "N/A"
+                if numero is None: return "não disponível"
                 val = float(numero)
                 return f"{val:,.{decimais}f}".replace(",", "X").replace(".", ",").replace("X", ".")
             except Exception:
