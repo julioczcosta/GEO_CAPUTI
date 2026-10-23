@@ -428,9 +428,10 @@ def _ibge_malha_uf(uf):
     """Malha de municípios de uma UF (GeoJSON, EPSG:4674) via API de malhas."""
     url = (f"{_IBGE_API}/v3/malhas/estados/{uf}"
            "?formato=application/vnd.geo+json&intrarregiao=municipio")
-    r = requests.get(url, timeout=60, headers=_IBGE_UA)
-    r.raise_for_status()
-    gdf = gpd.GeoDataFrame.from_features(r.json()["features"])
+    data = ibge_api_json(url, timeout=60)  # com retry: o IBGE tem quedas curtas
+    if not data or not data.get("features"):
+        raise RuntimeError(f"malha {uf} indisponível")
+    gdf = gpd.GeoDataFrame.from_features(data["features"])
     if gdf.crs is None:
         gdf.set_crs("EPSG:4674", inplace=True)
     return gdf
@@ -439,10 +440,70 @@ def _ibge_malha_uf(uf):
 @st.cache_data(show_spinner=False, ttl=604800)
 def _ibge_nomes_uf(uf):
     """Mapa {cod_ibge(str): nome} dos municípios da UF (API de localidades)."""
-    r = requests.get(f"{_IBGE_API}/v1/localidades/estados/{uf}/municipios",
-                     timeout=30, headers=_IBGE_UA)
-    r.raise_for_status()
-    return {str(m["id"]): m["nome"] for m in r.json()}
+    data = ibge_api_json(f"{_IBGE_API}/v1/localidades/estados/{uf}/municipios", timeout=30)
+    if not data:
+        raise RuntimeError(f"nomes {uf} indisponíveis")
+    return {str(m["id"]): m["nome"] for m in data}
+
+
+def _muns_malha_api(ufs, diag):
+    """Fonte 1: API de malhas + localidades do IBGE (servicodados), por UF."""
+    partes = []
+    for uf in ufs:
+        try:
+            malha = _ibge_malha_uf(uf).copy()
+            nomes = _ibge_nomes_uf(uf)
+            malha["cd_mun"] = malha["codarea"].astype(str)
+            malha["nome"] = malha["cd_mun"].map(nomes)
+            malha["uf"] = uf
+            partes.append(malha)
+            diag.append(f"API {uf}={len(malha)}")
+        except Exception:
+            diag.append(f"API {uf}=ERR")
+    if not partes:
+        return None
+    return gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs="EPSG:4674")
+
+
+def _muns_wfs(bbox, diag):
+    """Fonte 2: geoserver WFS do IBGE (camadas CGMAT), filtrado pelo bbox.
+    Independe das APIs de servicodados — cobre as quedas delas."""
+    for layer in ("CGMAT:qg_2025_030_munic", "CGMAT:qg_2024_030_munic"):
+        resp = ibge_wfs_get({
+            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+            "typeName": layer, "outputFormat": "application/json",
+            "srsName": "EPSG:4674", "BBOX": f"{bbox},EPSG:4674"}, timeout=15, retries=2)
+        if resp is None or resp.status_code != 200 or not resp.text.strip().startswith("{"):
+            # mesmo geoserver: se uma camada falhou, as outras também falham
+            diag.append(f"WFS={resp.status_code if resp is not None else 'ERR'}")
+            return None
+        feats = resp.json().get("features", [])
+        if feats:
+            diag.append(f"WFS={len(feats)}")
+            return gpd.GeoDataFrame.from_features(feats, crs="EPSG:4674")
+    diag.append("WFS=vazio")
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def _malha_municipios_local():
+    """Malha municipal do Brasil embutida no app (dados/municipios_br.geojson,
+    IBGE malhas v3 qualidade intermediária, campos cd_mun/nome/uf)."""
+    p = os.path.join(os.path.dirname(__file__), "dados", "municipios_br.geojson")
+    return gpd.read_file(p).set_crs("EPSG:4674", allow_override=True)
+
+
+def _muns_local(bounds, diag):
+    """Fonte 3 (sem rede): arquivo local — nunca cai, mas é um retrato fixo da
+    malha; municípios criados depois da geração do arquivo não aparecem."""
+    try:
+        gdf = _malha_municipios_local()
+        sel = gdf.cx[bounds[0]:bounds[2], bounds[1]:bounds[3]].copy()
+        diag.append(f"local={len(sel)}")
+        return sel if not sel.empty else None
+    except Exception:
+        diag.append("local=ERR")
+        return None
 
 
 def _ufs_candidatas(gdf_imovel):
@@ -486,28 +547,23 @@ def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
     m = 0.05
     bbox = f"{b[0]-m},{b[1]-m},{b[2]+m},{b[3]+m}"
 
-    # Municípios via API de MALHAS do IBGE (servicodados, fora do Cloudflare) +
-    # nomes da API de localidades: baixa a malha da(s) UF(s) candidata(s) e cruza
-    # localmente — mesmo resultado do antigo geoserver (municípios + área).
+    # Fontes em cascata (o IBGE tem quedas frequentes): 1) API de malhas por UF
+    # (servicodados); 2) geoserver WFS do IBGE; 3) malha local embutida no app.
+    # Todas são cruzadas localmente com o imóvel (municípios + área).
+    diag = []
     ufs = _ufs_candidatas(gdf_imovel)
-    diag, partes = [], []
-    for uf in ufs:
-        try:
-            malha = _ibge_malha_uf(uf).copy()
-            nomes = _ibge_nomes_uf(uf)
-            malha["cd_mun"] = malha["codarea"].astype(str)
-            malha["nome"] = malha["cd_mun"].map(nomes)
-            malha["uf"] = uf
-            partes.append(malha)
-            diag.append(f"{uf}={len(malha)}")
-        except Exception:
-            diag.append(f"{uf}=ERR")
-
-    if not partes:
-        raise RuntimeError(
-            "Malhas IBGE (servicodados): "
-            + (" | ".join(diag) if diag else "UF do imóvel não determinada"))
-    gdf_muns = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs="EPSG:4674")
+    if not ufs:
+        diag.append("UF não determinada")
+    gdf_muns = _muns_malha_api(ufs, diag) if ufs else None
+    if gdf_muns is None:
+        gdf_muns = _muns_wfs(bbox, diag)
+    if gdf_muns is None:
+        gdf_muns = _muns_local((b[0]-m, b[1]-m, b[2]+m, b[3]+m), diag)
+    if gdf_muns is None:
+        raise RuntimeError("Fontes de municípios indisponíveis: " + " | ".join(diag))
+    gdf_muns = gdf_muns.reset_index(drop=True)
+    if gdf_muns.crs is None:
+        gdf_muns = gdf_muns.set_crs("EPSG:4674")
 
     utm_crs = gdf_imovel.estimate_utm_crs()
     gdf_imovel_utm = gdf_imovel.to_crs(utm_crs)
@@ -1208,6 +1264,24 @@ def _get_limites_municipio_clima_cached(lon, lat, _geometry_gee=None, cache_id=N
                 }
             except Exception:
                 continue
+    except Exception:
+        pass
+
+    # 3) Sem rede: malha municipal local, município que contém o ponto.
+    try:
+        ponto = Point(float(lon), float(lat))
+        gdf = _malha_municipios_local()
+        cand = gdf.cx[ponto.x:ponto.x, ponto.y:ponto.y]
+        cand = cand[cand.geometry.intersects(ponto)]
+        if not cand.empty:
+            row = cand.iloc[0]
+            return {
+                "geojson": _json_safe_geometry(mapping(row.geometry)),
+                "nome": row["nome"],
+                "uf": row["uf"],
+                "cod_ibge": str(row["cd_mun"]),
+                "metodo": "Malha municipal local (IBGE)"
+            }
     except Exception:
         pass
 
