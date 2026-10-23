@@ -428,7 +428,8 @@ def _ibge_malha_uf(uf):
     """Malha de municípios de uma UF (GeoJSON, EPSG:4674) via API de malhas."""
     url = (f"{_IBGE_API}/v3/malhas/estados/{uf}"
            "?formato=application/vnd.geo+json&intrarregiao=municipio")
-    data = ibge_api_json(url, timeout=60)  # com retry: o IBGE tem quedas curtas
+    # com retry (o IBGE tem quedas curtas), mas sem segurar a tela: 2 x 25s
+    data = ibge_api_json(url, timeout=25, retries=2)
     if not data or not data.get("features"):
         raise RuntimeError(f"malha {uf} indisponível")
     gdf = gpd.GeoDataFrame.from_features(data["features"])

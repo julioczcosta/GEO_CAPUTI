@@ -1,6 +1,10 @@
 import os
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 import utils
 import ui
 import ee
@@ -69,7 +73,66 @@ def consultar_camadas_extras(lat, lon):
         pass
 
     return resultados
-    
+
+
+# --- CONSULTA DAS BASES EM PARALELO, COM PRAZO ---
+LIMITE_CONSULTAS_S = 45
+
+
+def _consultar_bases(mun, lat, lon):
+    """Roda as consultas externas do Contexto em paralelo, com prazo total.
+
+    Rodando em sequência, os tempos se somavam: com o IBGE lento a partir do
+    Streamlit Cloud, a aba passava de 2 minutos. Agora espera no máximo
+    LIMITE_CONSULTAS_S; o que não responder vira "indisponível" e a página
+    segue. O tempo de cada consulta vai para o log ([contexto] ...).
+    """
+    cod, uf, nome = mun['cod_ibge'], mun['uf'], mun['nome_puro']
+    tarefas = {
+        "ibge": (utils.get_ibge_context_by_code, (cod, nome, uf, lat, lon)),
+        "altimetria": (utils.get_altimetria_municipio, (cod, lat, lon)),
+        "rota": (utils.get_distancia_capital, (cod, uf, lat, lon)),
+        "extras": (consultar_camadas_extras, (lat, lon)),
+        "bacia": (utils.get_bacia_info, (lat, lon)),
+        "armazens": (utils.get_armazens_proximos, (lat, lon, 100)),
+    }
+    esgotado = {"erro": f"Fonte não respondeu em {LIMITE_CONSULTAS_S}s."}
+    padroes = {
+        # Sem os dados do IBGE a aba ainda mostra o município já identificado.
+        "ibge": {"municipio": nome, "uf": uf, "codigo_ibge": cod, "populacao": None,
+                 "area_km2": None, "densidade": None,
+                 "regiao_intermediaria": "---", "regiao_imediata": "---"},
+        "extras": {"bioma": _bioma_no_ponto(lat, lon), "amazonia_legal": False},
+    }
+
+    ctx = get_script_run_ctx()
+
+    def rodar(chave, fn, args):
+        add_script_run_ctx(threading.current_thread(), ctx)  # p/ o st.cache_data
+        t0 = time.time()
+        try:
+            return fn(*args)
+        finally:
+            print(f"[contexto] {chave}: {time.time() - t0:.1f}s", flush=True)
+
+    ex = ThreadPoolExecutor(max_workers=len(tarefas))
+    futuros = {k: ex.submit(rodar, k, fn, a) for k, (fn, a) in tarefas.items()}
+    wait(futuros.values(), timeout=LIMITE_CONSULTAS_S)
+    ex.shutdown(wait=False)  # não segura a página pelas que estouraram o prazo
+
+    res = {}
+    for k, f in futuros.items():
+        if not f.done():
+            print(f"[contexto] {k}: SEM RESPOSTA em {LIMITE_CONSULTAS_S}s", flush=True)
+            res[k] = padroes.get(k, esgotado)
+            continue
+        try:
+            res[k] = f.result()
+        except Exception as e:
+            res[k] = padroes.get(k, {"erro": str(e)})
+    return res
+
+
 # --- RENDERIZAÇÃO DA ABA ---
 def render_tab():
     geometry = st.session_state.get('current_geometry')
@@ -131,13 +194,13 @@ def render_tab():
     # ==========================================
     if mun_selecionado:
         with st.spinner("Consultando bases oficiais (IBGE, ANA, OSRM)..."):
-            dados_ibge = utils.get_ibge_context_by_code(
-                mun_selecionado['cod_ibge'], mun_selecionado['nome_puro'], mun_selecionado['uf'], lat_dec, lon_dec
-            )
-            dados_altimetria = utils.get_altimetria_municipio(mun_selecionado['cod_ibge'], lat_dec, lon_dec)
-            dados_rota = utils.get_distancia_capital(mun_selecionado['cod_ibge'], mun_selecionado['uf'], lat_dec, lon_dec)
-            dados_extras = consultar_camadas_extras(lat_dec, lon_dec)
-            dados_bacia = utils.get_bacia_info(lat_dec, lon_dec)
+            bases = _consultar_bases(mun_selecionado, lat_dec, lon_dec)
+            dados_ibge = bases["ibge"]
+            dados_altimetria = bases["altimetria"]
+            dados_rota = bases["rota"]
+            dados_extras = bases["extras"]
+            dados_bacia = bases["bacia"]
+            dados_arm = bases["armazens"]
 
         # Divisão em duas colunas equilibradas
         col1, col2 = st.columns(2, gap="medium")
@@ -245,7 +308,6 @@ def render_tab():
             st.write("")
             ui.secao("🏭 Armazenagem (raio de 100 km)")
             with st.container(border=True):
-                dados_arm = utils.get_armazens_proximos(lat_dec, lon_dec, raio_km=100)
                 if "erro" in dados_arm:
                     st.warning(dados_arm["erro"])
                 else:
