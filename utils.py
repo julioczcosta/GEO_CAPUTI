@@ -487,24 +487,37 @@ def _muns_wfs(bbox, diag):
 
 
 @st.cache_resource(show_spinner=False)
-def _malha_municipios_local():
-    """Malha municipal do Brasil embutida no app (dados/municipios_br.geojson,
-    IBGE malhas v3 qualidade intermediária, campos cd_mun/nome/uf)."""
-    p = os.path.join(os.path.dirname(__file__), "dados", "municipios_br.geojson")
-    return gpd.read_file(p).set_crs("EPSG:4674", allow_override=True)
+def _malha_local_uf(uf):
+    """Malha municipal de uma UF embutida no app (dados/malha_municipios/<UF>.parquet):
+    IBGE malhas v3 em qualidade máxima — a mesma que a API entrega —, com
+    cd_mun/nome/uf. Carregada só para as UFs que o imóvel toca."""
+    p = os.path.join(os.path.dirname(__file__), "dados", "malha_municipios", f"{uf}.parquet")
+    return gpd.read_parquet(p)
+
+
+def _ufs_por_bbox(x0, y0, x1, y1):
+    """UFs cujo retângulo envolvente (LIMITES_ESTADOS) toca o bbox — sem rede."""
+    return [uf for uf, (a0, b0, a1, b1) in LIMITES_ESTADOS.items()
+            if a0 <= x1 and x0 <= a1 and b0 <= y1 and y0 <= b1]
 
 
 def _muns_local(bounds, diag):
-    """Fonte 3 (sem rede): arquivo local — nunca cai, mas é um retrato fixo da
-    malha; municípios criados depois da geração do arquivo não aparecem."""
-    try:
-        gdf = _malha_municipios_local()
-        sel = gdf.cx[bounds[0]:bounds[2], bounds[1]:bounds[3]].copy()
-        diag.append(f"local={len(sel)}")
-        return sel if not sel.empty else None
-    except Exception:
-        diag.append("local=ERR")
+    """Fonte principal (sem rede, instantânea): malha local por UF. É um retrato
+    fixo; município criado depois da geração dos arquivos cai nas fontes online."""
+    partes = []
+    for uf in _ufs_por_bbox(*bounds):
+        try:
+            sel = _malha_local_uf(uf).cx[bounds[0]:bounds[2], bounds[1]:bounds[3]]
+            if not sel.empty:
+                partes.append(sel)
+        except Exception:
+            diag.append(f"local {uf}=ERR")
+    if not partes:
+        diag.append("local=0")
         return None
+    gdf = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs=partes[0].crs)
+    diag.append(f"local={len(gdf)}")
+    return gdf
 
 
 def _ufs_candidatas(gdf_imovel):
@@ -558,19 +571,20 @@ def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
     m = 0.05
     bbox = f"{b[0]-m},{b[1]-m},{b[2]+m},{b[3]+m}"
 
-    # Fontes em cascata (o IBGE tem quedas frequentes): 1) API de malhas por UF
-    # (servicodados); 2) geoserver WFS do IBGE; 3) malha local embutida no app.
-    # Todas são cruzadas localmente com o imóvel (municípios + área).
+    # Fontes em cascata, todas cruzadas localmente com o imóvel (municípios + área):
+    # 1) malha local embutida no app (instantânea, mesma qualidade da API);
+    # 2) geoserver WFS do IBGE; 3) API de malhas por UF (servicodados).
+    # A API fica por último: a partir do Streamlit Cloud ela costuma falhar só
+    # depois de esgotar as tentativas (~50s medidos no log).
     diag = []
-    ufs = _ufs_candidatas(gdf_imovel)
-    marca(f"UF (Nominatim) -> {ufs}")
-    if not ufs:
-        diag.append("UF não determinada")
-    gdf_muns = _muns_malha_api(ufs, diag) if ufs else None
+    gdf_muns = _muns_local((b[0]-m, b[1]-m, b[2]+m, b[3]+m), diag)
     if gdf_muns is None:
         gdf_muns = _muns_wfs(bbox, diag)
     if gdf_muns is None:
-        gdf_muns = _muns_local((b[0]-m, b[1]-m, b[2]+m, b[3]+m), diag)
+        ufs = _ufs_candidatas(gdf_imovel)
+        if not ufs:
+            diag.append("UF não determinada")
+        gdf_muns = _muns_malha_api(ufs, diag) if ufs else None
     marca(f"malha municipal [{' | '.join(diag)}]")
     if gdf_muns is None:
         raise RuntimeError("Fontes de municípios indisponíveis: " + " | ".join(diag))
@@ -1207,6 +1221,30 @@ def _get_limites_municipio_clima_cached(lon, lat, _geometry_gee=None, cache_id=N
         except Exception:
             return geom_mapping
 
+    # 0) Malha local (sem rede): município de maior interseção com o imóvel, ou
+    #    o que contém o ponto. Evita os WFS abaixo, lentos no Streamlit Cloud.
+    try:
+        alvo = Point(float(lon), float(lat))
+        if _geometry_gee is not None:
+            alvo = shape(_geometry_gee.getInfo())
+        cand = _muns_local(alvo.bounds, [])
+        if cand is not None:
+            cand = cand[cand.geometry.intersects(alvo)]
+        if cand is not None and not cand.empty:
+            if alvo.geom_type != "Point" and len(cand) > 1:
+                areas = cand.geometry.intersection(alvo).area  # só p/ ordenar
+                cand = cand.loc[areas.sort_values(ascending=False).index]
+            row = cand.iloc[0]
+            return {
+                "geojson": _json_safe_geometry(mapping(row.geometry)),
+                "nome": row["nome"],
+                "uf": row["uf"],
+                "cod_ibge": str(row["cd_mun"]),
+                "metodo": "Malha municipal local (IBGE)"
+            }
+    except Exception:
+        pass
+
     # 1) WFS IBGE: várias camadas + maior interseção com o imóvel.
     try:
         if gpd is not None and _geometry_gee is not None:
@@ -1331,24 +1369,6 @@ def _get_limites_municipio_clima_cached(lon, lat, _geometry_gee=None, cache_id=N
                 }
             except Exception:
                 continue
-    except Exception:
-        pass
-
-    # 3) Sem rede: malha municipal local, município que contém o ponto.
-    try:
-        ponto = Point(float(lon), float(lat))
-        gdf = _malha_municipios_local()
-        cand = gdf.cx[ponto.x:ponto.x, ponto.y:ponto.y]
-        cand = cand[cand.geometry.intersects(ponto)]
-        if not cand.empty:
-            row = cand.iloc[0]
-            return {
-                "geojson": _json_safe_geometry(mapping(row.geometry)),
-                "nome": row["nome"],
-                "uf": row["uf"],
-                "cod_ibge": str(row["cd_mun"]),
-                "metodo": "Malha municipal local (IBGE)"
-            }
     except Exception:
         pass
 
