@@ -10,7 +10,7 @@ import impedimentos
 import aptidao
 import confrontantes
 import uso_solo
-import hmac
+import auth
 import base64
 import streamlit.components.v1 as components
 from streamlit_option_menu import option_menu
@@ -30,38 +30,27 @@ st.set_page_config(
 
 # --- 2. SISTEMA DE LOGIN (Bloqueio de Segurança) ---
 def check_login():
-    """Verifica se o usuário está logado via Secrets"""
+    """Verifica se o usuário está logado (Supabase Auth ou lista dos Secrets; ver auth.py)."""
     if st.session_state.get("logged_in", False):
         return True
 
     col1, col2, col3 = st.columns([1,1,1])
     with col2:
         st.markdown("## 🔐 Acesso - GEOCAPUTI")
-        
+
         with st.form("login_form"):
             email = st.text_input("E-mail").strip().lower()
             password = st.text_input("Senha", type="password")
             submit = st.form_submit_button("Entrar", use_container_width=True)
-            
+
             if submit:
-                if "users" not in st.secrets:
-                    st.error("⚠️ Configuração de usuários não encontrada nos Secrets.")
-                    return False
-                
-                known_users = st.secrets["users"]
-
-                # Compara sempre (mesmo com e-mail inexistente) usando um valor
-                # placeholder, para não vazar quais e-mails existem — nem pelo
-                # texto da mensagem nem pelo tempo de resposta.
-                senha_esperada = known_users.get(email, "")
-                senha_valida = bool(senha_esperada) and hmac.compare_digest(password, senha_esperada)
-
-                if senha_valida:
+                ok, erro = auth.entrar(email, password)
+                if ok:
                     st.session_state["logged_in"] = True
                     st.session_state["user_email"] = email
                     st.rerun()
                 else:
-                    st.error("❌ E-mail ou senha incorretos.")
+                    st.error(erro)
     return False
 
 # --- TRAVA DE SEGURANÇA ---
@@ -253,8 +242,22 @@ with st.sidebar:
         """, unsafe_allow_html=True)
         
     st.write("")
+    if auth.modo() == "supabase":
+        with st.expander("🔑 Trocar minha senha"):
+            with st.form("form_trocar_senha", clear_on_submit=True):
+                nova = st.text_input("Nova senha", type="password")
+                confirma = st.text_input("Repita a nova senha", type="password")
+                if st.form_submit_button("Salvar nova senha", use_container_width=True):
+                    if len(nova) < 8:
+                        st.warning("Use pelo menos 8 caracteres.")
+                    elif nova != confirma:
+                        st.warning("As duas senhas não conferem.")
+                    else:
+                        ok, msg = auth.trocar_senha(nova)
+                        (st.success if ok else st.error)(msg)
+
     if st.button("Sair / Logout", use_container_width=True):
-        st.session_state["logged_in"] = False
+        auth.sair()
         st.rerun()
 
 # =========================================================
