@@ -30,6 +30,7 @@ from PIL import Image
 
 import joblib
 import ui
+import coordenadas as coord
 import classificador_consolidado  # noqa: F401 - necessario para o joblib desserializar
 import uso_solo_infer as infer
 
@@ -387,22 +388,21 @@ def render_tab():
                "— não use em laudo. A técnica ainda está em ajuste.")
 
     gdf_imovel = st.session_state.get("gdf_imovel")
-    if gdf_imovel is None or gdf_imovel.empty:
-        ui.vazio()
-        return
-
-    ui.barra_imovel()
+    tem_imovel = gdf_imovel is not None and not gdf_imovel.empty
+    if tem_imovel:
+        ui.barra_imovel()
 
     tab_classe, tab_mb, tab_ndvi, tab_rest = st.tabs(
         ["📊 Classificação", "🗂️ MapBiomas", "📈 Índices", "⛰️ Relevo (declividade)"])
+    # sem imovel so os Indices funcionam (pontos por coordenada); o resto pede o perimetro
     with tab_classe:
-        _render_classificacao(gdf_imovel)
+        _render_classificacao(gdf_imovel) if tem_imovel else ui.vazio()
     with tab_mb:
-        _render_mapbiomas(gdf_imovel)
+        _render_mapbiomas(gdf_imovel) if tem_imovel else ui.vazio()
     with tab_ndvi:
-        _render_indices(gdf_imovel)
+        _render_indices(gdf_imovel if tem_imovel else None)
     with tab_rest:
-        _render_relevo(gdf_imovel)
+        _render_relevo(gdf_imovel) if tem_imovel else ui.vazio()
 
 
 def _render_classificacao(gdf_imovel):
@@ -915,28 +915,71 @@ def _grafico_indice(ind, meses, series_sel, precip_vals, mes_ref):
     return fig
 
 
-def _render_indices(gdf_imovel):
-    st.caption("Clique no mapa para coletar pontos e ver **índices** ao longo do tempo "
-               "(vigor, clorofila, umidade, temperatura…). Pode coletar **fora** do "
-               "perímetro para comparar com um vizinho.")
+ZOOM_PONTO = 16  # zoom ao ir até um ponto digitado (escala de talhão)
 
-    geom = _imovel_wgs(gdf_imovel)
-    minx, miny, maxx, maxy = geom.bounds
+
+def _add_coordenadas():
+    """Callback do campo de coordenadas: interpreta o texto, adiciona os pontos e
+    leva o mapa até o último. Em erro guarda a mensagem e mantém o texto."""
+    try:
+        novos = coord.interpretar(st.session_state.get("ndvi_coord_txt", ""))
+    except ValueError as e:
+        st.session_state["ndvi_coord_msg"] = ("erro", f"Não entendi a coordenada: {e}.")
+        return
     pontos = st.session_state.setdefault("ndvi_pontos", [])
+    pontos.extend(p for p in novos if p not in pontos)
+    st.session_state["ndvi_foco"] = novos[-1]
+    st.session_state["ndvi_coord_txt"] = ""
+    txt = "; ".join(f"{lat:.5f} / {lon:.5f}".replace(".", ",") for lon, lat in novos)
+    st.session_state["ndvi_coord_msg"] = (
+        "ok", f"{len(novos)} ponto(s) adicionado(s): {txt}")
+
+
+def _geom_precip(geom, pontos):
+    """Área da precipitação ao fundo: o imóvel, se os pontos estão perto dele;
+    senão a vizinhança dos pontos (CHIRPS ~5 km, então um buffer de 2,5 km basta)."""
+    if geom is not None:
+        minx, miny, maxx, maxy = geom.buffer(0.1).bounds  # ~10 km de folga
+        if all(minx <= lon <= maxx and miny <= lat <= maxy for lon, lat in pontos):
+            return ee.Geometry(mapping(geom))
+    return ee.Geometry.MultiPoint([list(p) for p in pontos]).buffer(2500)
+
+
+def _render_indices(gdf_imovel):
+    st.caption("Clique no mapa ou **digite uma coordenada** para coletar pontos e ver "
+               "**índices** ao longo do tempo (vigor, clorofila, umidade, temperatura…). "
+               "Pode coletar **fora** do perímetro — ou sem imóvel nenhum.")
+
+    geom = _imovel_wgs(gdf_imovel) if gdf_imovel is not None else None
+    pontos = st.session_state.setdefault("ndvi_pontos", [])
+    foco = st.session_state.get("ndvi_foco")
+
+    # vista do mapa: ponto em foco (digitado/selecionado) > imóvel > 1º ponto > Brasil
+    if foco:
+        centro, zoom = [foco[1], foco[0]], ZOOM_PONTO
+    elif geom is not None:
+        minx, miny, maxx, maxy = geom.bounds
+        centro = [(miny + maxy) / 2, (minx + maxx) / 2]
+        zoom = _zoom_bounds(minx, miny, maxx, maxy)
+    elif pontos:
+        centro, zoom = [pontos[0][1], pontos[0][0]], ZOOM_PONTO
+    else:
+        centro, zoom = [-14.5, -51.5], 4
 
     col_mapa, col_pts = st.columns([0.6, 0.4], gap="medium")
 
     with col_mapa:
-        fmap = folium.Map(location=[(miny + maxy) / 2, (minx + maxx) / 2],
-                          zoom_start=_zoom_bounds(minx, miny, maxx, maxy),
+        fmap = folium.Map(location=centro, zoom_start=zoom,
                           tiles="Esri World Imagery", control_scale=True)
-        folium.GeoJson(
-            mapping(geom), name="Perímetro",
-            style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2, "fillOpacity": 0},
-        ).add_to(fmap)
+        if geom is not None:
+            folium.GeoJson(
+                mapping(geom), name="Perímetro",
+                style_function=lambda _f: {"color": ui.COR_PERIMETRO, "weight": 2,
+                                           "fillOpacity": 0},
+            ).add_to(fmap)
         for i, (lon, lat) in enumerate(pontos):
             cor = CORES_PONTOS[i % len(CORES_PONTOS)]
-            dentro = geom.contains(Point(lon, lat))
+            dentro = geom is None or geom.contains(Point(lon, lat))
             borda = "#ffffff" if dentro else "#ffb300"
             tip = f"Ponto {i + 1}" + ("" if dentro else " (fora do perímetro)")
             folium.CircleMarker(
@@ -960,32 +1003,58 @@ def _render_indices(gdf_imovel):
         if st.session_state.get("ndvi_last_click") != novo:
             st.session_state["ndvi_last_click"] = novo
             pontos.append(novo)
+            # longe do imóvel (vista num ponto), a vista acompanha o clique
+            if foco:
+                st.session_state["ndvi_foco"] = novo
             st.rerun()
 
     with col_pts:
+        with st.form("ndvi_coord_form", border=False):
+            st.text_area(
+                "Adicionar coordenada", key="ndvi_coord_txt", height=68,
+                placeholder="-15,7942 -47,8822  ·  15°47'39\"S 47°52'56\"W  ·  "
+                            "23L 191204 8251714  ·  link do Google Maps",
+                help="Aceita decimal (ponto ou vírgula), graus/minutos/segundos, "
+                     "UTM SIRGAS 2000 com o fuso (ex.: 23K) e link do Google Maps. "
+                     "Vários pontos: um por linha. Sem sinal, assume Sul/Oeste; "
+                     "ordem latitude/longitude invertida é corrigida.")
+            st.form_submit_button("📍 Adicionar e ir até lá", on_click=_add_coordenadas,
+                                  use_container_width=True)
+        msg = st.session_state.pop("ndvi_coord_msg", None)
+        if msg:
+            (st.success if msg[0] == "ok" else st.error)(msg[1])
+
         st.markdown("**Pontos coletados**")
         if not pontos:
-            st.caption("Clique no mapa para adicionar pontos (dentro ou fora).")
+            st.caption("Clique no mapa ou digite uma coordenada acima.")
         for i, (lon, lat) in enumerate(pontos):
             cor = CORES_PONTOS[i % len(CORES_PONTOS)]
-            fora = not geom.contains(Point(lon, lat))
+            fora = geom is not None and not geom.contains(Point(lon, lat))
             tag_fora = (" · <span style='color:#b8860b;font-weight:600;'>fora</span>"
                         if fora else "")
-            c1, c2 = st.columns([0.85, 0.15], vertical_alignment="center")
+            c1, c2, c3 = st.columns([0.72, 0.14, 0.14], vertical_alignment="center")
             c1.markdown(
                 f"<span style='width:11px;height:11px;border-radius:50%;background:{cor};"
                 f"display:inline-block;margin-right:7px;'></span>"
                 f"<b>Ponto {i + 1}</b> · {lat:.4f}, {lon:.4f}{tag_fora}",
                 unsafe_allow_html=True)
-            if c2.button("✕", key=f"ndvi_rm_{i}", help="Remover ponto"):
+            if c2.button("🎯", key=f"ndvi_ir_{i}", help="Ir até o ponto no mapa"):
+                st.session_state["ndvi_foco"] = (lon, lat)
+                st.rerun()
+            if c3.button("✕", key=f"ndvi_rm_{i}", help="Remover ponto"):
                 pontos.pop(i)
                 st.session_state.pop("ndvi_result", None)
                 st.rerun()
         if pontos:
-            if st.button("🗑️ Limpar todos", key="ndvi_clear", use_container_width=True):
+            cv, cl = st.columns(2)
+            if geom is not None and foco and cv.button(
+                    "🏠 Ver imóvel", key="ndvi_ver_imovel", use_container_width=True):
+                st.session_state.pop("ndvi_foco", None)
+                st.rerun()
+            if cl.button("🗑️ Limpar todos", key="ndvi_clear", use_container_width=True):
                 pontos.clear()
-                st.session_state.pop("ndvi_result", None)
-                st.session_state.pop("ndvi_last_click", None)
+                for k in ("ndvi_result", "ndvi_last_click", "ndvi_foco"):
+                    st.session_state.pop(k, None)
                 st.rerun()
 
         st.divider()
@@ -1016,7 +1085,7 @@ def _render_indices(gdf_imovel):
                 dados = infer.indices_serie_mensal(pontos, ano_ini, ano_fim, indices)
                 try:
                     precip = infer.precip_serie_mensal(
-                        ee.Geometry(mapping(geom)), ano_ini, ano_fim)
+                        _geom_precip(geom, pontos), ano_ini, ano_fim)
                 except Exception:
                     precip = {"meses": [], "precip": []}
             st.session_state["ndvi_result"] = {
