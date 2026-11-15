@@ -17,7 +17,9 @@ Resultado em st.cache_data por 7 dias; falha vira exceção (não é cacheada).
 
 import asyncio
 import logging
+import re
 import time
+import unicodedata
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -45,6 +47,33 @@ UNIDADES = {
     "Toneladas": "t",
     "Hectares": "ha",
 }
+
+# ---- Fase 2: preço (CEPEA) + custo (CONAB) -> renda por hectare ----
+TTL_PRECO = 24 * 3600
+# kg contidos em cada unidade de preço do CEPEA
+KG_UNIDADE = {"BRL/sc60kg": 60, "BRL/sc50kg": 50, "BRL/ton": 1000, "BRL/t": 1000}
+ROTULO_UN = {"BRL/sc60kg": "sc 60 kg", "BRL/sc50kg": "sc 50 kg", "BRL/ton": "t", "BRL/t": "t"}
+# Cultura da PAM -> indicadores CEPEA possíveis (produto, praça, rótulo) e custo CONAB.
+# Feijão não tem indicador CEPEA: o preço é informado pelo avaliador.
+# Algodão fica de fora: a PAM mede caroço e o CEPEA/CONAB, pluma.
+RENDA = {
+    "Soja (em grão)": {"cepea": [("soja", "paranagua", "Paranaguá/PR (porto)"),
+                                 ("soja_parana", "parana", "Paraná (média do estado)")],
+                       "conab": "soja"},
+    "Milho (em grão)": {"cepea": [("milho", "campinas", "Campinas/SP")], "conab": "milho"},
+    "Trigo (em grão)": {"cepea": [("trigo", "parana", "Paraná"),
+                                  ("trigo", "rio_grande_do_sul", "Rio Grande do Sul")],
+                        "conab": "trigo"},
+    "Arroz (em casca)": {"cepea": [("arroz", "rio_grande_do_sul", "Rio Grande do Sul")],
+                         "conab": "arroz"},
+    "Feijão (em grão)": {"cepea": [], "conab": "feijao", "unidade": "BRL/sc60kg"},
+    "Café (em grão) Arábica": {"cepea": [("cafe", "sao_paulo", "São Paulo (arábica)")],
+                               "conab": "cafe_arabica"},
+    "Café (em grão) Canephora": {"cepea": [("cafe_robusta", "espirito_santo", "Espírito Santo (conilon)")],
+                                 "conab": "cafe_conilon"},
+}
+AVISO_CEPEA = ("Fonte: CEPEA/ESALQ-USP. Dados sob licença CC BY-NC 4.0: cite sempre a fonte; "
+               "a série não é exportada, só o valor usado na conta.")
 
 
 # =========================================================================
@@ -135,6 +164,109 @@ def bovinos_regiao(muns_regiao, ufs):
     return df[["nivel", "cod", "local", "ano", "valor"]]
 
 
+@st.cache_data(ttl=TTL_PRECO, show_spinner=False)
+def cepea_serie(produto, praca):
+    """Indicador diário CEPEA dos últimos ~14 meses."""
+    import agrobr.cepea as cepea
+    inicio = (pd.Timestamp.today().normalize() - pd.Timedelta(days=430)).date()
+    df = asyncio.run(cepea.indicador(produto, praca=praca, inicio=inicio))
+    if df is None or len(df) == 0:
+        raise RuntimeError(f"CEPEA sem dados para {produto}/{praca}")
+    df = df[["data", "valor", "unidade", "praca"]].copy()
+    df["data"] = pd.to_datetime(df["data"])
+    df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+    return df.dropna(subset=["valor"]).sort_values("data")
+
+
+def _mensal_12(serie):
+    """Médias mensais dos 12 últimos meses FECHADOS (o mês corrente fica de fora)."""
+    m = serie.set_index("data")["valor"].resample("MS").mean().dropna()
+    m = m[m.index < pd.Timestamp.today().normalize().replace(day=1)]
+    return m.tail(12)
+
+
+def _sem_acento(s):
+    return unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().upper()
+
+
+def _rotulo_planilha(nome):
+    n = nome.lower()
+    for padrao, rot in [(r"1a?_safra", "1ª safra"), (r"2a?_(e_3_)?safra", "2ª safra"),
+                        ("irrigado", "irrigado"), ("sequeiro", "sequeiro")]:
+        if re.search(padrao, n):
+            return rot
+    return ""
+
+
+@st.cache_data(ttl=TTL_PRECO, show_spinner=False)
+def conab_polos(cultura):
+    """Polos da CONAB do ano mais recente de cada planilha da cultura.
+    Lê só os NOMES das abas (rápido); o custo de uma aba é lido depois."""
+    from agrobr.conab._custo_producao._acquisition import Acquisition
+    from agrobr.conab._custo_producao._workbook import Workbook
+
+    async def _todas():
+        acq = Acquisition()
+        saida = []
+        for r in await acq.catalog(cultura):
+            wb = Workbook(await acq.workbook(r))
+            try:
+                saida.append((r.planilha, list(wb.names)))
+            finally:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+        return saida
+
+    t0 = time.time()
+    linhas = []
+    for planilha, abas in asyncio.run(_todas()):
+        regs = []
+        for aba in abas:
+            m_ano = re.search(r"(\d{4})\s*$", aba)
+            m_uf = re.search(r"(?:^|-)([A-Z]{2})(?:-|\s)", aba)
+            if not (m_ano and m_uf):
+                continue
+            local = aba[:m_ano.start()].strip(" -")
+            local = re.sub(rf"(?:^|-){m_uf.group(1)}(?:-|\s|$)", "-", local).strip(" -")
+            local = re.sub(r"^(OGM-|\d+ª\s*)", "", local).strip(" -")
+            regs.append({"planilha": planilha, "aba": aba, "local": local, "uf": m_uf.group(1),
+                         "ano": int(m_ano.group(1)), "ogm": aba.upper().startswith("OGM"),
+                         "sistema": _rotulo_planilha(planilha)})
+        if regs:
+            ult = max(r["ano"] for r in regs)
+            linhas += [r for r in regs if r["ano"] == ult]
+    print(f"[mercado] CONAB polos {cultura}: {time.time() - t0:.1f}s", flush=True)
+    if not linhas:
+        raise RuntimeError(f"CONAB sem planilhas de custo para {cultura}")
+    return pd.DataFrame(linhas)
+
+
+@st.cache_data(ttl=TTL_IBGE, show_spinner=False)
+def conab_custo(cultura, planilha, aba):
+    """Totais por hectare de uma aba de custo da CONAB."""
+    import agrobr.conab as conab
+    t0 = time.time()
+    d = asyncio.run(conab.custo_producao(cultura, planilha=planilha, aba=aba))
+    tot = {}
+    for _, r in d[d["tipo_linha"] != "item"].iterrows():
+        it = _sem_acento(r["item"])
+        for chave, prefixo in [("variavel", "CUSTO VARIAVEL"), ("fixo", "CUSTO FIXO"),
+                               ("operacional", "CUSTO OPERACIONAL"),
+                               ("fatores", "TOTAL DE RENDA DE FATORES"), ("total", "CUSTO TOTAL")]:
+            if it.startswith(prefixo):
+                tot[chave] = float(r["valor_ha"])
+    if "operacional" not in tot:
+        raise RuntimeError(f"CONAB: custo operacional não encontrado em {aba}")
+    p = d.iloc[0]
+    tot.update({"safra": str(p.get("safra", "")), "referencia": str(p.get("referencia", "")),
+                "local": str(p.get("local", "")), "uf": str(p.get("uf", "")),
+                "tecnologia": str(p.get("tecnologia", ""))})
+    print(f"[mercado] CONAB custo {aba}: {time.time() - t0:.1f}s", flush=True)
+    return tot
+
+
 # =========================================================================
 # Escopo geográfico
 # =========================================================================
@@ -213,18 +345,23 @@ def _bloco_escopo(muns, nomes_reg, n_reg):
     return modo
 
 
+def _rend_escalas(pam, item, ano, pesos, regiao, uf_ref):
+    """(imóvel, região, UF, unidade, área colhida por município) de uma cultura num ano."""
+    d = pam[(pam["ano"] == ano) & (pam["item"] == item)]
+    mun = d[d["nivel"] == "6"].set_index("cod")
+    imovel = _media_ponderada(mun["rendimento"].to_dict(), pesos)
+    reg = _rend_regiao(d[(d["nivel"] == "6") & d["cod"].isin(regiao)])
+    ufv = d[(d["nivel"] == "3") & (d["cod"] == uf_ref)]["rendimento"]
+    ufv = ufv.iloc[0] if len(ufv) else float("nan")
+    un = d["un_rend"].dropna().iloc[0] if d["un_rend"].notna().any() else ""
+    return imovel, reg, ufv, un, mun["area_colhida"]
+
+
 def _tabela_producao(pam, muns, pesos, regiao, uf_ref, ano, culturas):
-    d_ano = pam[pam["ano"] == ano]
     linhas = []
     for item in culturas:
-        d = d_ano[d_ano["item"] == item]
-        mun = d[d["nivel"] == "6"].set_index("cod")
-        rend_m = mun["rendimento"].to_dict()
-        imovel = _media_ponderada(rend_m, pesos)
-        reg = _rend_regiao(d[(d["nivel"] == "6") & d["cod"].isin(regiao)])
-        ufv = d[(d["nivel"] == "3") & (d["cod"] == uf_ref)]["rendimento"]
-        ufv = ufv.iloc[0] if len(ufv) else float("nan")
-        un = d["un_rend"].dropna().iloc[0] if d["un_rend"].notna().any() else ""
+        imovel, reg, ufv, un, area = _rend_escalas(pam, item, ano, pesos, regiao, uf_ref)
+        mun = pd.DataFrame({"area_colhida": area})
         linha = {"Cultura": item}
         for m in muns:
             linha[f"Área colhida {m['nome_puro']} (ha)"] = _br(mun["area_colhida"].get(m["cod_ibge"]))
@@ -274,9 +411,163 @@ def _bloco_pecuaria(muns, regiao, uf_ref, ufs):
     linhas.append({"Local": f"Região ({len(regiao)} municípios)", "Cabeças": _br(mun[mun.index.isin(regiao)].sum())})
     u = df[(df["nivel"] == "3") & (df["cod"] == uf_ref)]["valor"]
     linhas.append({"Local": utils.UF_POR_CODIGO.get(uf_ref, "UF"), "Cabeças": _br(u.iloc[0] if len(u) else None)})
-    st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
     st.caption(f"Fonte: IBGE, Pesquisa da Pecuária Municipal (tabela {TAB_PPM}), {ano}. "
                "Totais não se ponderam: cada município aparece com o seu número.")
+    # Preço de referência do gado (CEPEA)
+    cols = st.columns(2)
+    for col, (prod, praca, nome) in zip(cols, [("boi", "sao_paulo", "Boi gordo"),
+                                              ("bezerro", None, "Bezerro")]):
+        try:
+            s = cepea_serie(prod, praca)
+            m12 = _mensal_12(s)
+            un = s["unidade"].iloc[-1].replace("BRL/", "R$/").replace("cabeca", "cabeça")
+            col.metric(f"{nome} · {s['praca'].iloc[-1]} · média 12 meses",
+                       f"R$ {_br(m12.mean(), 2)}",
+                       help=f"Último: R$ {_br(s['valor'].iloc[-1], 2)} {un} em "
+                            f"{s['data'].iloc[-1]:%d/%m/%Y}. Unidade: {un}.")
+        except Exception as e:
+            col.caption(f"{nome}: CEPEA indisponível agora ({str(e)[:80]}).")
+    st.caption(AVISO_CEPEA)
+
+
+def _grafico_preco(m12, unidade):
+    fig = go.Figure()
+    fig.add_scatter(x=m12.index, y=m12.values, mode="lines+markers", name="Média mensal",
+                    line=dict(color=ui.VERDE, width=2.5), fill="tozeroy",
+                    fillcolor="rgba(0,140,69,0.08)")
+    fig.add_hline(y=m12.mean(), line=dict(color=ui.CHUMBO, dash="dash", width=1),
+                  annotation_text=f"média {_br(m12.mean(), 2)}", annotation_position="top left")
+    lo, hi = m12.min(), m12.max()
+    fig.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10), separators=",.",
+                      showlegend=False, yaxis_title=unidade, yaxis_range=[lo * 0.92, hi * 1.05],
+                      xaxis=dict(tickformat="%m/%Y", dtick="M2"))
+    return fig
+
+
+def _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave):
+    """Preço (CEPEA) + custo (CONAB) -> renda estimada por hectare de uma cultura."""
+    ui.secao("Preço, custo e renda por hectare")
+    opcoes = [c for c in culturas if c in RENDA]
+    if not opcoes:
+        st.info("Nenhuma das culturas escolhidas tem preço e custo de referência (soja, milho, "
+                "trigo, arroz, feijão e café). Acrescente uma delas na lista acima.")
+        return
+    cultura = st.selectbox("Cultura:", opcoes, key=f"{chave}::renda_cultura")
+    cfg = RENDA[cultura]
+    k = f"{chave}::{cultura}"
+    uf_sigla = utils.UF_POR_CODIGO.get(uf_ref, "")
+
+    imovel, reg, _, _, _ = _rend_escalas(pam, cultura, ano, pesos, regiao, uf_ref)
+    topo = st.container()   # números-resumo, preenchidos no fim
+
+    c1, c2 = st.columns(2)
+    # ---------------- preço ----------------
+    with c1:
+        st.markdown("**Preço**")
+        serie, m12, unidade = None, None, cfg.get("unidade", "BRL/sc60kg")
+        if cfg["cepea"]:
+            rotulos = [r for _, _, r in cfg["cepea"]]
+            padrao = 0
+            if cultura.startswith("Soja") and uf_ref == "41":
+                padrao = 1
+            if cultura.startswith("Trigo") and uf_ref == "43":
+                padrao = 1
+            escolha = st.selectbox("Indicador CEPEA (praça):", rotulos, index=padrao, key=f"{k}::praca")
+            prod, praca, _ = cfg["cepea"][rotulos.index(escolha)]
+            try:
+                with st.spinner("Consultando CEPEA..."):
+                    serie = cepea_serie(prod, praca)
+                m12 = _mensal_12(serie)
+                unidade = serie["unidade"].iloc[-1]
+            except Exception as e:
+                ui.erro("O CEPEA não respondeu agora. Informe o preço manualmente.", str(e)[:200])
+        else:
+            st.caption("Não há indicador CEPEA para esta cultura: informe o preço praticado na região.")
+        un_txt = ROTULO_UN.get(unidade, unidade)
+        kg_un = KG_UNIDADE.get(unidade, 60)
+        media = float(m12.mean()) if m12 is not None and len(m12) else 0.0
+        preco = st.number_input(f"Preço de referência (R$/{un_txt})", min_value=0.0, value=round(media, 2),
+                                step=1.0, format="%.2f", key=f"{k}::preco::{round(media, 2)}",
+                                help="Vem preenchido com a média dos últimos 12 meses fechados do indicador.")
+        desconto = st.number_input(f"Desconto até a fazenda: frete e base (R$/{un_txt})", min_value=0.0,
+                                   value=0.0, step=1.0, format="%.2f", key=f"{k}::desconto",
+                                   help="O indicador é o preço na praça (porto, bolsa). Na fazenda o "
+                                        "produtor recebe menos: informe a diferença usada na região.")
+        if serie is not None and m12 is not None and len(m12):
+            st.plotly_chart(_grafico_preco(m12, f"R$/{un_txt}"), width="stretch")
+            st.caption(f"Indicador {escolha}: último R$ {_br(serie['valor'].iloc[-1], 2)}/{un_txt} em "
+                       f"{serie['data'].iloc[-1]:%d/%m/%Y}; média mensal de "
+                       f"{m12.index[0]:%m/%Y} a {m12.index[-1]:%m/%Y}. {AVISO_CEPEA}")
+
+    # ---------------- custo ----------------
+    with c2:
+        st.markdown("**Custo de produção (CONAB)**")
+        custo = None
+        try:
+            with st.spinner("Consultando CONAB... na primeira vez leva uns 20 segundos."):
+                polos = conab_polos(cfg["conab"])
+            polos = polos.copy()
+            polos["rot"] = polos.apply(
+                lambda r: f"{r['local']}/{r['uf']}" + (f" · {r['sistema']}" if r["sistema"] else "")
+                          + (" · OGM" if r["ogm"] else "") + f" · {r['ano']}", axis=1)
+            mesma_uf = polos[polos["uf"] == uf_sigla]
+            ordem = pd.concat([mesma_uf, polos[polos["uf"] != uf_sigla]])
+            if cultura.startswith("Milho"):   # 2ª safra primeiro (soja + milho no mesmo ano)
+                ordem = pd.concat([ordem[ordem["sistema"] == "2ª safra"], ordem[ordem["sistema"] != "2ª safra"]])
+                ordem = pd.concat([ordem[ordem["uf"] == uf_sigla], ordem[ordem["uf"] != uf_sigla]])
+            rot = st.selectbox("Polo de referência:", ordem["rot"].tolist(), key=f"{k}::polo")
+            if mesma_uf.empty:
+                st.caption(f"A CONAB não tem polo de {cultura.split(' (')[0].lower()} em {uf_sigla}; "
+                           "escolha o mais parecido com a região.")
+            sel = ordem[ordem["rot"] == rot].iloc[0]
+            with st.spinner("Lendo a planilha de custo..."):
+                custo = conab_custo(cfg["conab"], sel["planilha"], sel["aba"])
+        except Exception as e:
+            ui.erro("A CONAB não respondeu agora. Informe o custo manualmente.", str(e)[:200])
+        operacional = st.number_input("Custo operacional (R$/ha)", min_value=0.0,
+                                      value=round(custo["operacional"], 2) if custo else 0.0,
+                                      step=50.0, format="%.2f",
+                                      key=f"{k}::custo::{custo['operacional'] if custo else 0}",
+                                      help="Custo variável + custo fixo, sem a remuneração da terra.")
+        if custo:
+            st.caption(f"CONAB, polo {custo['local']}/{custo['uf']}, safra {custo['safra']}, "
+                       f"tecnologia {custo['tecnologia']}, referência {custo['referencia']}.")
+
+    # ---------------- renda ----------------
+    prod_un = imovel / kg_un if pd.notna(imovel) else float("nan")
+    liquido = max(preco - desconto, 0.0)
+    receita = prod_un * liquido if pd.notna(prod_un) else float("nan")
+    margem_op = receita - operacional if pd.notna(receita) else float("nan")
+    linhas = [
+        ("Produtividade do imóvel", f"{_br(prod_un, 1)} {un_txt}/ha", f"IBGE PAM {ano} ({_br(imovel)} kg/ha)"),
+        ("× Preço líquido na fazenda", f"R$ {_br(liquido, 2)}/{un_txt}", "preço − desconto"),
+        ("= Receita bruta", f"R$ {_br(receita, 2)}", "por hectare"),
+    ]
+    if custo:
+        linhas += [("− Custo variável", f"R$ {_br(custo.get('variavel'), 2)}", "CONAB"),
+                   ("− Custo fixo (depreciações etc.)", f"R$ {_br(custo.get('fixo'), 2)}", "CONAB")]
+    linhas += [("= Margem operacional", f"R$ {_br(margem_op, 2)}", "receita − custo operacional")]
+    if custo and custo.get("fatores") is not None:
+        linhas += [("Renda de fatores (inclui remuneração da terra)", f"R$ {_br(custo['fatores'], 2)}",
+                    "CONAB · referência"),
+                   ("= Margem sobre o custo total", f"R$ {_br(receita - operacional - custo['fatores'], 2)}",
+                    "receita − custo operacional − renda de fatores")]
+    st.dataframe(pd.DataFrame(linhas, columns=["", "R$ por hectare", "Origem"]),
+                 hide_index=True, width="stretch")
+    st.caption("A renda de fatores da CONAB já embute uma remuneração da terra; para avaliar a terra "
+               "pela renda, a margem operacional é a base mais limpa. Todos os valores acima podem "
+               "ser alterados nos campos.")
+
+    with topo:
+        a, b, c, d = st.columns(4)
+        dif = (imovel / reg - 1) * 100 if pd.notna(imovel) and pd.notna(reg) and reg else None
+        a.metric(f"Produtividade · {cultura.split(' (')[0]}", f"{_br(prod_un, 1)} {un_txt}/ha",
+                 delta=(_pct(dif) + " vs região") if dif is not None else None)
+        b.metric("Preço · média 12 meses", f"R$ {_br(preco, 2)}", help=f"por {un_txt}")
+        c.metric("Custo operacional", f"R$ {_br(operacional, 2)}", help="por hectare")
+        d.metric("Margem operacional", f"R$ {_br(margem_op, 2)}",
+                 help="por hectare" + ("" if desconto else " · sem desconto de frete"))
 
 
 def render_tab():
@@ -330,7 +621,8 @@ def render_tab():
     cods_imovel = [m["cod_ibge"] for m in muns]
     ranking = (mun6[(mun6["ano"] == ano) & mun6["cod"].isin(cods_imovel) & (mun6["area_colhida"] > 0)]
                .groupby("item")["area_colhida"].sum().sort_values(ascending=False))
-    todas = ranking.index.tolist()
+    # "Café (em grão) Total" soma arábica + canephora: fica fora para não contar duas vezes.
+    todas = [i for i in ranking.index if not i.endswith(" Total")]
     with st.container(border=True):
         ui.secao("O que a região produz")
         culturas = st.multiselect(
@@ -340,15 +632,19 @@ def render_tab():
             st.caption("Escolha ao menos uma cultura.")
         else:
             tab = _tabela_producao(pam, muns, pesos, regiao, uf_ref, ano, culturas)
-            st.dataframe(tab, hide_index=True, use_container_width=True)
+            st.dataframe(tab, hide_index=True, width="stretch")
             st.caption(f"Produtividade em {ano}. Imóvel = {rotulo_imovel.split('(')[1].rstrip(')')}; "
                        "região = Σ produção ÷ Σ área colhida dos municípios da região.")
 
             foco = st.selectbox("Série de 10 anos da cultura:", culturas, key="mercado_foco")
             st.plotly_chart(_grafico(pam, foco, pesos, regiao, uf_ref, rotulo_imovel),
-                            use_container_width=True)
+                            width="stretch")
         st.caption(f"Fonte: IBGE, Produção Agrícola Municipal (tabela {TAB_PAM}), {int(pam['ano'].min())}–{ano}. "
                    f"Consultado em {consultado}.")
+
+    if culturas:
+        with st.container(border=True):
+            _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, f"mercado::{source_name}")
 
     with st.container(border=True):
         _bloco_pecuaria(muns, regiao, uf_ref, ufs)
