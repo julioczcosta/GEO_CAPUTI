@@ -164,6 +164,184 @@ def bovinos_regiao(muns_regiao, ufs):
     return df[["nivel", "cod", "local", "ano", "valor"]]
 
 
+def _col_classe(df, codigo):
+    """Nome da coluna DnC (SIDRA) que contém a categoria `codigo` (ex.: '110087')."""
+    for c in df.columns:
+        if re.fullmatch(r"D\dC", c) and codigo in set(df[c].astype(str)):
+            return c
+    raise RuntimeError(f"classificação com a categoria {codigo} não encontrada")
+
+
+@st.cache_data(ttl=30 * 24 * 3600, show_spinner=False)
+def censo_perfil(muns_regiao, ufs):
+    """Censo Agro 2017: uso das terras (tab. 6881) e grupos de área total (tab. 6754),
+    para os municípios da região e as UFs. Devolve (uso, tamanho) em formato longo."""
+    t0 = time.time()
+    uso_cls = {"829": "46302", "222": "all", "218": "46502", "12517": "113601", "12567": "41151"}
+    tam_cls = {"829": "46302", "221": "111195", "12517": "113601", "220": "all"}
+    a6, a3, b6, b3 = _sidra(
+        ("6881", "6", ",".join(muns_regiao), "184", "2017", uso_cls),
+        ("6881", "3", ",".join(ufs), "184", "2017", uso_cls),
+        ("6754", "6", ",".join(muns_regiao), "183,184", "2017", tam_cls),
+        ("6754", "3", ",".join(ufs), "183,184", "2017", tam_cls),
+    )
+
+    def longo(df, cod_total):
+        col = _col_classe(df, cod_total)
+        out = pd.DataFrame({"nivel": df["NC"].astype(str), "cod": df["D1C"].astype(str),
+                            "var": df["D3C"].astype(str), "cat_cod": df[col].astype(str),
+                            "cat": df[col.replace("C", "N")].astype(str),
+                            "valor": df["V"].map(_num_sidra)})
+        return out
+
+    uso = longo(pd.concat([a6, a3], ignore_index=True), "110087")
+    tam = longo(pd.concat([b6, b3], ignore_index=True), "110085")
+    print(f"[mercado] Censo {len(muns_regiao)} muns: {time.time() - t0:.1f}s", flush=True)
+    if uso.empty:
+        raise RuntimeError("IBGE devolveu o Censo Agro vazio")
+    return uso, tam
+
+
+def _grupo_uso(cat):
+    c = _sem_acento(cat)
+    if c.startswith("TOTAL"):
+        return "Total"
+    if c.startswith("LAVOURAS"):
+        return "Lavouras"
+    if c.startswith("PASTAGENS"):
+        return "Pastagens"
+    if c.startswith("MATAS") and "PLANTADAS" in c:
+        return "Florestas plantadas"
+    if c.startswith("MATAS"):
+        return "Matas e florestas naturais"
+    if c.startswith("SISTEMAS AGROFLORESTAIS"):
+        return "Sistemas agroflorestais"
+    return "Outros usos"
+
+
+FAIXAS_AREA = [(0, 50, "Menos de 50 ha"), (50, 200, "50 a 200 ha"), (200, 1000, "200 a 1.000 ha"),
+               (1000, 2500, "1.000 a 2.500 ha"), (2500, float("inf"), "2.500 ha ou mais")]
+
+
+def _faixa_area(cat):
+    """Faixa a partir do limite inferior do grupo do IBGE ('De 1.000 a menos de 2.500 ha')."""
+    c = _sem_acento(cat)
+    if c.startswith("TOTAL") or "SEM AREA" in c:
+        return None
+    m = re.search(r"\d[\d.]*(?:,\d+)?", cat)
+    if not m:
+        return None
+    lo = float(m.group(0).replace(".", "").replace(",", "."))
+    if c.startswith("MAIS DE 0"):
+        lo = 0.0
+    for a, b, rot in FAIXAS_AREA:
+        if a <= lo < b:
+            return rot
+    return None
+
+
+# ---- ZARC (MAPA) ----
+# O agrobr carrega a tábua nacional inteira na memória (~2 GB, ~100 s): inviável no
+# Streamlit Cloud. Aqui o CSV oficial (o mesmo que o agrobr usa) é lido EM PEDAÇOS,
+# só com as colunas necessárias, e gravado num parquet temporário (~8 MB):
+# ~10 s e ~300 MB de pico, uma vez por safra enquanto o servidor estiver de pé.
+ZARC_CKAN = ("https://dados.agricultura.gov.br/api/3/action/package_show"
+             "?id=tabua-de-risco-zoneamento-agricola-de-risco-climatico")
+ZARC_DEC = [f"dec{i}" for i in range(1, 37)]
+ZARC_COLS = ["Nome_cultura", "Cod_Ciclo", "Cod_Solo", "geocodigo", "Nome_Clima",
+             "Nome_Outros_Manejos", "Portaria"] + ZARC_DEC
+
+
+def _zarc_recursos():
+    import requests
+    r = requests.get(ZARC_CKAN, timeout=60, headers={"User-Agent": "GEOCAPUTI/1.0"})
+    r.raise_for_status()
+    rec = [x for x in r.json()["result"]["resources"] if str(x.get("format", "")).upper() == "CSV"]
+    safras = [(re.search(r"(\d{4})/(\d{4})", x["name"]), x) for x in rec]
+    safras = [(int(m.group(1)), x) for m, x in safras if m]
+    if not safras:
+        raise RuntimeError("catálogo do ZARC sem tábuas por safra")
+    safras.sort(key=lambda s: s[0], reverse=True)
+    anual = safras[0][1]
+    anterior = safras[1][1] if len(safras) > 1 else anual
+    perene = next((x for x in rec if "PERENE" in _sem_acento(x["name"])), None)
+    return {"anual": (anual["name"], anual["url"]), "anterior": (anterior["name"], anterior["url"]),
+            "perene": (perene["name"], perene["url"]) if perene else None}
+
+
+@st.cache_resource(ttl=7 * 24 * 3600, show_spinner=False)
+def zarc_tabua(tipo):
+    """Baixa e compacta a tábua de risco ('anual' = safra mais recente, 'perene').
+    Devolve (caminho do parquet, nome da tábua). Fica no disco temporário do servidor."""
+    import os
+    import tempfile
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import requests
+
+    t0 = time.time()
+    nome, url = _zarc_recursos()[tipo]
+    destino = os.path.join(tempfile.gettempdir(), f"geocaputi_zarc_{tipo}_{re.sub(r'[^0-9]', '', nome) or 'x'}.parquet")
+    # Tábuas antigas têm células vazias: lê como float e converte depois.
+    dt = {c: "float32" for c in ZARC_DEC + ["Cod_Ciclo", "Cod_Solo", "geocodigo"]}
+    escritor, n = None, 0
+    with requests.get(url, stream=True, timeout=300, headers={"User-Agent": "GEOCAPUTI/1.0"}) as r:
+        r.raise_for_status()
+        r.raw.decode_content = True
+        for ch in pd.read_csv(r.raw, sep=";", encoding="utf-8-sig", usecols=ZARC_COLS, dtype=dt,
+                              chunksize=300_000):
+            ch = ch.dropna(subset=["geocodigo"])
+            ch[ZARC_DEC] = ch[ZARC_DEC].fillna(0).astype("int8")
+            ch[["Cod_Ciclo", "Cod_Solo"]] = ch[["Cod_Ciclo", "Cod_Solo"]].fillna(0).astype("int16")
+            ch["geocodigo"] = ch["geocodigo"].astype("int32")
+            for c in ["Nome_cultura", "Nome_Clima", "Nome_Outros_Manejos", "Portaria"]:
+                ch[c] = ch[c].astype(str)
+            tb = pa.Table.from_pandas(ch, preserve_index=False)
+            if escritor is None:
+                escritor = pq.ParquetWriter(destino, tb.schema, compression="zstd")
+            escritor.write_table(tb)
+            n += len(ch)
+    if escritor is None:
+        raise RuntimeError(f"tábua do ZARC vazia: {nome}")
+    escritor.close()
+    print(f"[mercado] ZARC {tipo} ({nome}): {n} linhas em {time.time() - t0:.1f}s", flush=True)
+    return destino, nome
+
+
+def zarc_municipios(cods, tipo):
+    import pyarrow.parquet as pq
+    caminho, nome = zarc_tabua(tipo)
+    d = pq.read_table(caminho, filters=[("geocodigo", "in", [int(c) for c in cods])]).to_pandas()
+    return d, nome
+
+
+def _zarc_variantes(nomes_csv, item_pam):
+    """Nomes de cultura do ZARC que correspondem a uma cultura da PAM."""
+    alvo = _sem_acento(item_pam.split(" (")[0]).split()[0]   # SOJA, MILHO, CAFE...
+    sub = _sem_acento(item_pam)
+    out = []
+    for n in nomes_csv:
+        nn = _sem_acento(n)
+        if not nn.startswith(alvo):
+            continue
+        if alvo == "CAFE":
+            if "ARABICA" in sub and "ARABICA" not in nn:
+                continue
+            if "CANEPHORA" in sub and not any(k in nn for k in ("CANEF", "CONILON", "ROBUSTA")):
+                continue
+        if alvo == "SORGO" and "FORRAG" in nn and "FORRAG" not in sub:
+            continue
+        out.append(n)
+    return sorted(out)
+
+
+def _rotulo_solo(c):
+    c = int(c)
+    if 11 <= c <= 16:
+        return f"AD{c - 10} (código {c})"
+    return f"Tipo {c}"
+
+
 @st.cache_data(ttl=TTL_PRECO, show_spinner=False)
 def cepea_serie(produto, praca):
     """Indicador diário CEPEA dos últimos ~14 meses."""
@@ -431,6 +609,162 @@ def _bloco_pecuaria(muns, regiao, uf_ref, ufs):
     st.caption(AVISO_CEPEA)
 
 
+CORES_RISCO = {0: "#e3e8e5", 20: "#008C45", 30: "#8fbf3a", 40: "#e0a020"}
+MESES_PT = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
+
+
+def _faixa_zarc(decs, rotulo):
+    """Faixa HTML de 36 decêndios, de julho a junho (safra contínua)."""
+    ordem = [(k + 18) % 36 for k in range(36)]
+    meses = "".join(f"<span style='grid-column:span 3;font-size:.68rem;color:#5a6b62;"
+                    f"border-left:1px solid #dfe5e1;padding-left:2px'>{MESES_PT[(k + 6) % 12]}</span>"
+                    for k in range(12))
+    cel = "".join(
+        f"<i title='{['1–10', '11–20', '21–fim'][ix % 3]} {MESES_PT[ix // 3]}: "
+        f"{('risco ' + str(int(decs[ix])) + '%') if decs[ix] else 'não indicado'}' "
+        f"style='display:block;height:20px;border-radius:2px;background:{CORES_RISCO.get(int(decs[ix]), '#e3e8e5')}'></i>"
+        for ix in ordem)
+    return (f"<div style='font-size:.82rem;font-weight:600;margin:6px 0 2px'>{rotulo}</div>"
+            f"<div style='display:grid;grid-template-columns:repeat(36,minmax(0,1fr));gap:2px'>{meses}{cel}</div>")
+
+
+def _janela_texto(decs):
+    ind = [(k + 18) % 36 for k in range(36) if decs[(k + 18) % 36] > 0]
+    if not ind:
+        return "sem decêndio indicado para plantio"
+    d = lambda ix: f"{['1º', '11', '21'][ix % 3]} de {MESES_PT[ix // 3]}"
+    fim = lambda ix: f"{['10', '20', 'fim'][ix % 3]} de {MESES_PT[ix // 3]}"
+    baixos = sum(1 for ix in ind if decs[ix] == 20)
+    return (f"de {d(ind[0])} a {fim(ind[-1])} ({len(ind)} decêndios, "
+            f"{baixos} com risco de 20%)")
+
+
+def _bloco_zarc(muns, culturas, chave):
+    ui.secao("Risco climático e janela de plantio · ZARC")
+    cods = [m["cod_ibge"] for m in muns]
+    perenes = any(_sem_acento(c).startswith(("CAFE", "CANA", "LARANJA", "BANANA", "CACAU")) for c in culturas)
+    try:
+        with st.spinner("Carregando o zoneamento do MAPA... na primeira vez leva uns 10 segundos."):
+            partes, nomes_tab = [], []
+            for tipo in ["anual"] + (["perene"] if perenes else []):
+                d, nome = zarc_municipios(cods, tipo)
+                partes.append(d)
+                nomes_tab.append(nome)
+            z = pd.concat(partes, ignore_index=True)
+            # Culturas de inverno (trigo, aveia...) às vezes só estão na tábua da safra anterior.
+            nomes_csv = sorted(z["Nome_cultura"].unique())
+            faltam = [c for c in culturas if not _zarc_variantes(nomes_csv, c)]
+            if faltam:
+                d, nome = zarc_municipios(cods, "anterior")
+                d = d[d["Nome_cultura"].isin([v for c in faltam for v in
+                                              _zarc_variantes(sorted(d["Nome_cultura"].unique()), c)])]
+                if not d.empty:
+                    z = pd.concat([z, d], ignore_index=True)
+                    nomes_tab.append(nome)
+    except Exception as e:
+        ui.erro("Não foi possível carregar o zoneamento (ZARC) agora.", str(e)[:300])
+        return
+    nomes_csv = sorted(z["Nome_cultura"].unique())
+    opcoes = {c: _zarc_variantes(nomes_csv, c) for c in culturas}
+    opcoes = {c: v for c, v in opcoes.items() if v}
+    if not opcoes:
+        st.info("O ZARC não tem zoneamento para as culturas escolhidas neste município.")
+        return
+    c1, c2 = st.columns(2)
+    cultura = c1.selectbox("Cultura:", list(opcoes), key=f"{chave}::zarc_cultura")
+    vs = opcoes[cultura]
+    padrao = next((i for i, v in enumerate(vs) if "PRODUC" in _sem_acento(v)), 0)  # perene: produção
+    variante = c2.selectbox("Zoneamento:", vs, index=padrao, key=f"{chave}::zarc_var::{cultura}")
+    d = z[z["Nome_cultura"] == variante]
+    combos = d[["Nome_Clima", "Nome_Outros_Manejos"]].drop_duplicates()
+    filtro = d
+    if len(combos) > 1:
+        rot = combos.apply(lambda r: " · ".join(x for x in r if x and x.lower() not in ("nan", "não se aplica")) or "padrão", axis=1)
+        esc = st.selectbox("Condição:", rot.tolist(), key=f"{chave}::zarc_cond::{variante}")
+        sel = combos.iloc[rot.tolist().index(esc)]
+        filtro = d[(d["Nome_Clima"] == sel["Nome_Clima"]) & (d["Nome_Outros_Manejos"] == sel["Nome_Outros_Manejos"])]
+    c3, c4 = st.columns(2)
+    solos = sorted(filtro["Cod_Solo"].unique())
+    solo = c3.selectbox("Tipo de solo (água disponível):", solos, format_func=_rotulo_solo,
+                        index=len(solos) // 2, key=f"{chave}::zarc_solo::{variante}",
+                        help="Classes de capacidade de reter água: AD1 (arenoso, retém pouca) a AD6 (retém mais).")
+    ciclos = sorted(filtro[filtro["Cod_Solo"] == solo]["Cod_Ciclo"].unique())
+    ciclo = c4.selectbox("Ciclo da cultivar (código ZARC):", ciclos, index=len(ciclos) // 2,
+                         key=f"{chave}::zarc_ciclo::{variante}")
+    linhas = filtro[(filtro["Cod_Solo"] == solo) & (filtro["Cod_Ciclo"] == ciclo)]
+    html, janelas = "", {}
+    for m in muns:
+        lm = linhas[linhas["geocodigo"] == int(m["cod_ibge"])]
+        if lm.empty:
+            html += f"<div style='font-size:.82rem;margin:6px 0'>{m['municipio']}: sem indicação para esta combinação.</div>"
+            continue
+        decs = lm[ZARC_DEC].max().astype(int).tolist()
+        janelas[m["municipio"]] = decs
+        html += _faixa_zarc(decs, m["municipio"])
+    legenda = "".join(f"<span style='margin-right:12px'><i style='display:inline-block;width:11px;height:11px;"
+                      f"border-radius:2px;background:{cor};vertical-align:-1px;margin-right:4px'></i>{rot}</span>"
+                      for cor, rot in [(CORES_RISCO[20], "risco 20%"), (CORES_RISCO[30], "30%"),
+                                       (CORES_RISCO[40], "40%"), (CORES_RISCO[0], "não indicado")])
+    st.markdown(html + f"<div style='font-size:.75rem;color:#5a6b62;margin-top:6px'>{legenda}"
+                       f"<span style='float:right'>eixo de julho a junho</span></div>",
+                unsafe_allow_html=True)
+    for mun, decs in janelas.items():
+        st.caption(f"{mun}: janela {_janela_texto(decs)}.")
+    if len(janelas) > 1 and len({tuple(v) for v in janelas.values()}) > 1:
+        st.warning("Os municípios do imóvel têm janelas diferentes. O zoneamento não se pondera: "
+                   "vale o do município onde fica cada talhão.")
+    port = ", ".join(sorted(linhas["Portaria"].unique())[:3]).replace("_", " ").replace("Port.", "Portaria ")
+    st.caption(f"Fonte: MAPA, Zoneamento Agrícola de Risco Climático ({'; '.join(nomes_tab)}). {port}. "
+               "Risco = chance de perda por evento climático; crédito rural, Proagro e seguro "
+               "subvencionado exigem plantio dentro da janela.")
+
+
+def _bloco_censo(muns, regiao, uf_ref, ufs):
+    ui.secao("Perfil do campo no município · Censo Agro 2017")
+    try:
+        with st.spinner("Consultando IBGE (Censo Agro)..."):
+            uso, tam = censo_perfil(tuple(regiao), tuple(ufs))
+    except Exception as e:
+        ui.erro("Não foi possível consultar o Censo Agro no IBGE agora.", str(e)[:300])
+        return
+    uf_nome = utils.UF_POR_CODIGO.get(uf_ref, "UF")
+    colunas = [(m["nome_puro"], [m["cod_ibge"]], "6") for m in muns]
+    colunas += [(f"Região ({len(regiao)} mun.)", list(regiao), "6"), (uf_nome, [uf_ref], "3")]
+
+    # --- uso das terras: % da área dos estabelecimentos ---
+    u = uso[uso["var"] == "184"].copy()
+    u["grupo"] = u["cat"].map(_grupo_uso)
+    ordem = ["Lavouras", "Pastagens", "Matas e florestas naturais", "Florestas plantadas",
+             "Sistemas agroflorestais", "Outros usos"]
+    tab_uso = {"Uso das terras": ordem + ["Área total dos estabelecimentos"]}
+    for nome, cods, nivel in colunas:
+        d = u[(u["nivel"] == nivel) & u["cod"].isin(cods)]
+        total = d[d["grupo"] == "Total"]["valor"].sum()
+        vals = [(_br(d[d["grupo"] == g]["valor"].sum() / total * 100, 1) + "%") if total else "–" for g in ordem]
+        tab_uso[nome] = vals + [_br(total) + " ha" if total else "–"]
+    st.markdown("**Uso das terras** (% da área dos estabelecimentos agropecuários)")
+    st.dataframe(pd.DataFrame(tab_uso), hide_index=True, width="stretch")
+
+    # --- tamanho: % dos estabelecimentos e da área por faixa ---
+    t = tam.copy()
+    t["faixa"] = t["cat"].map(_faixa_area)
+    t = t.dropna(subset=["faixa"])
+    faixas = [r for _, _, r in FAIXAS_AREA]
+    linhas = {"Tamanho do estabelecimento": faixas}
+    for nome, cods, nivel in colunas:
+        d = t[(t["nivel"] == nivel) & t["cod"].isin(cods)]
+        n, a = d[d["var"] == "183"], d[d["var"] == "184"]
+        nt, at = n["valor"].sum(), a["valor"].sum()
+        linhas[nome] = [
+            (f"{_br(n[n['faixa'] == f]['valor'].sum() / nt * 100, 0)}% · "
+             f"{_br(a[a['faixa'] == f]['valor'].sum() / at * 100, 0)}% da área") if nt and at else "–"
+            for f in faixas]
+    st.markdown("**Tamanho dos estabelecimentos** (% do número · % da área)")
+    st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
+    st.caption("Fonte: IBGE, Censo Agropecuário 2017 (tabelas 6881 e 6754). É o retrato mais recente "
+               "e completo do campo, mas é de 2017. Totais por município e região, sem ponderação.")
+
+
 def _grafico_preco(m12, unidade):
     fig = go.Figure()
     fig.add_scatter(x=m12.index, y=m12.values, mode="lines+markers", name="Média mensal",
@@ -645,6 +979,11 @@ def render_tab():
     if culturas:
         with st.container(border=True):
             _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, f"mercado::{source_name}")
+        with st.container(border=True):
+            _bloco_zarc(muns, culturas, f"mercado::{source_name}")
 
     with st.container(border=True):
         _bloco_pecuaria(muns, regiao, uf_ref, ufs)
+
+    with st.container(border=True):
+        _bloco_censo(muns, regiao, uf_ref, ufs)
