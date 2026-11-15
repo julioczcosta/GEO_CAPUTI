@@ -1,10 +1,11 @@
 # Estrategia de pin: teto de MAJOR version para impedir que um rebuild puxe
 # uma major nova e quebre o app. Tetos calibrados para INCLUIR as versoes que
-# o Streamlit Cloud (Python 3.10) realmente resolve hoje. geemap e python-box
+# o Streamlit Cloud realmente resolve hoje. geemap e python-box
 # ficam em versao exata (sensiveis, ja eram pinados).
 #
-# IMPORTANTE: o Streamlit Cloud roda Python 3.10 -> pandas fica em 2.x
-# (pandas 3.x exige Python >=3.11). Nao subir o piso de pandas para >=3.
+# IMPORTANTE: o app exige Python >= 3.11 no Streamlit Cloud (por causa do
+# agrobr). pandas continua em 2.x: o modelo e o resto do app foram validados
+# nela; nao subir o piso de pandas para >=3 sem testar tudo.
 
 streamlit>=1.30,<2
 geopandas>=1.0,<2
@@ -35,3 +36,7 @@ scikit-learn>=1.5,<1.6
 joblib>=1.4,<2
 numpy>=2.0,<2.3
 pillow>=10.0,<12
+
+# Aba "Mercado": dados agricolas ao vivo (IBGE/SIDRA, depois CEPEA e CONAB).
+# Exige Python >= 3.11. Versao exata: a 2.x ainda muda API entre releases.
+agrobr==2.0.1
