@@ -582,14 +582,16 @@ def _bloco_pecuaria(muns, regiao, uf_ref, ufs):
             df = bovinos_regiao(tuple(regiao), tuple(ufs))
     except Exception as e:
         ui.erro("Não foi possível consultar a pecuária no IBGE agora.", str(e)[:300])
-        return
+        return None
     ano = int(df["ano"].max())
     mun = df[df["nivel"] == "6"].set_index("cod")["valor"]
-    linhas = [{"Local": m["municipio"], "Cabeças": _br(mun.get(m["cod_ibge"]))} for m in muns]
-    linhas.append({"Local": f"Região ({len(regiao)} municípios)", "Cabeças": _br(mun[mun.index.isin(regiao)].sum())})
     u = df[(df["nivel"] == "3") & (df["cod"] == uf_ref)]["valor"]
-    linhas.append({"Local": utils.UF_POR_CODIGO.get(uf_ref, "UF"), "Cabeças": _br(u.iloc[0] if len(u) else None)})
-    st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
+    num = [(m["municipio"], mun.get(m["cod_ibge"])) for m in muns]
+    num += [(f"Região ({len(regiao)} municípios)", mun[mun.index.isin(regiao)].sum()),
+            (utils.UF_POR_CODIGO.get(uf_ref, "UF"), u.iloc[0] if len(u) else None)]
+    res = {"ano": ano, "bovinos": num, "precos": []}
+    st.dataframe(pd.DataFrame([{"Local": l, "Cabeças": _br(v)} for l, v in num]),
+                 hide_index=True, width="stretch")
     st.caption(f"Fonte: IBGE, Pesquisa da Pecuária Municipal (tabela {TAB_PPM}), {ano}. "
                "Totais não se ponderam: cada município aparece com o seu número.")
     # Preço de referência do gado (CEPEA)
@@ -604,9 +606,13 @@ def _bloco_pecuaria(muns, regiao, uf_ref, ufs):
                        f"R$ {_br(m12.mean(), 2)}",
                        help=f"Último: R$ {_br(s['valor'].iloc[-1], 2)} {un} em "
                             f"{s['data'].iloc[-1]:%d/%m/%Y}. Unidade: {un}.")
+            res["precos"].append({"nome": nome, "praca": s["praca"].iloc[-1], "unidade": un,
+                                  "media": float(m12.mean()), "periodo": f"{m12.index[0]:%m/%Y} a {m12.index[-1]:%m/%Y}",
+                                  "ultimo": float(s["valor"].iloc[-1]), "data": f"{s['data'].iloc[-1]:%d/%m/%Y}"})
         except Exception as e:
             col.caption(f"{nome}: CEPEA indisponível agora ({str(e)[:80]}).")
     st.caption(AVISO_CEPEA)
+    return res
 
 
 CORES_RISCO = {0: "#e3e8e5", 20: "#008C45", 30: "#8fbf3a", 40: "#e0a020"}
@@ -628,12 +634,19 @@ def _faixa_zarc(decs, rotulo):
             f"<div style='display:grid;grid-template-columns:repeat(36,minmax(0,1fr));gap:2px'>{meses}{cel}</div>")
 
 
-def _janela_texto(decs):
+MESES_LONGOS = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto",
+                "setembro", "outubro", "novembro", "dezembro"]
+_ULTIMO_DIA = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+
+def _janela_texto(decs, longo=False):
     ind = [(k + 18) % 36 for k in range(36) if decs[(k + 18) % 36] > 0]
     if not ind:
         return "sem decêndio indicado para plantio"
-    d = lambda ix: f"{['1º', '11', '21'][ix % 3]} de {MESES_PT[ix // 3]}"
-    fim = lambda ix: f"{['10', '20', 'fim'][ix % 3]} de {MESES_PT[ix // 3]}"
+    meses = MESES_LONGOS if longo else MESES_PT
+    d = lambda ix: f"{['1º', '11', '21'][ix % 3]} de {meses[ix // 3]}"
+    fim = lambda ix: (f"{['10', '20', str(_ULTIMO_DIA[ix // 3])][ix % 3]} de {meses[ix // 3]}" if longo
+                      else f"{['10', '20', 'fim'][ix % 3]} de {meses[ix // 3]}")
     baixos = sum(1 for ix in ind if decs[ix] == 20)
     return (f"de {d(ind[0])} a {fim(ind[-1])} ({len(ind)} decêndios, "
             f"{baixos} com risco de 20%)")
@@ -663,13 +676,13 @@ def _bloco_zarc(muns, culturas, chave):
                     nomes_tab.append(nome)
     except Exception as e:
         ui.erro("Não foi possível carregar o zoneamento (ZARC) agora.", str(e)[:300])
-        return
+        return None
     nomes_csv = sorted(z["Nome_cultura"].unique())
     opcoes = {c: _zarc_variantes(nomes_csv, c) for c in culturas}
     opcoes = {c: v for c, v in opcoes.items() if v}
     if not opcoes:
         st.info("O ZARC não tem zoneamento para as culturas escolhidas neste município.")
-        return
+        return None
     c1, c2 = st.columns(2)
     cultura = c1.selectbox("Cultura:", list(opcoes), key=f"{chave}::zarc_cultura")
     vs = opcoes[cultura]
@@ -717,6 +730,8 @@ def _bloco_zarc(muns, culturas, chave):
     st.caption(f"Fonte: MAPA, Zoneamento Agrícola de Risco Climático ({'; '.join(nomes_tab)}). {port}. "
                "Risco = chance de perda por evento climático; crédito rural, Proagro e seguro "
                "subvencionado exigem plantio dentro da janela.")
+    return {"cultura": cultura, "variante": variante, "solo": _rotulo_solo(solo), "ciclo": int(ciclo),
+            "janelas": janelas, "portaria": port, "tabuas": "; ".join(nomes_tab)}
 
 
 def _bloco_censo(muns, regiao, uf_ref, ufs):
@@ -726,8 +741,9 @@ def _bloco_censo(muns, regiao, uf_ref, ufs):
             uso, tam = censo_perfil(tuple(regiao), tuple(ufs))
     except Exception as e:
         ui.erro("Não foi possível consultar o Censo Agro no IBGE agora.", str(e)[:300])
-        return
+        return None
     uf_nome = utils.UF_POR_CODIGO.get(uf_ref, "UF")
+    res = {"uso": {}, "tamanho": {}}
     colunas = [(m["nome_puro"], [m["cod_ibge"]], "6") for m in muns]
     colunas += [(f"Região ({len(regiao)} mun.)", list(regiao), "6"), (uf_nome, [uf_ref], "3")]
 
@@ -740,8 +756,10 @@ def _bloco_censo(muns, regiao, uf_ref, ufs):
     for nome, cods, nivel in colunas:
         d = u[(u["nivel"] == nivel) & u["cod"].isin(cods)]
         total = d[d["grupo"] == "Total"]["valor"].sum()
-        vals = [(_br(d[d["grupo"] == g]["valor"].sum() / total * 100, 1) + "%") if total else "–" for g in ordem]
-        tab_uso[nome] = vals + [_br(total) + " ha" if total else "–"]
+        pcts = [d[d["grupo"] == g]["valor"].sum() / total * 100 if total else None for g in ordem]
+        res["uso"][nome] = {**dict(zip(ordem, pcts)), "area_total_ha": total or None}
+        tab_uso[nome] = [(_br(p, 1) + "%") if p is not None else "–" for p in pcts] + \
+                        [_br(total) + " ha" if total else "–"]
     st.markdown("**Uso das terras** (% da área dos estabelecimentos agropecuários)")
     st.dataframe(pd.DataFrame(tab_uso), hide_index=True, width="stretch")
 
@@ -755,6 +773,9 @@ def _bloco_censo(muns, regiao, uf_ref, ufs):
         d = t[(t["nivel"] == nivel) & t["cod"].isin(cods)]
         n, a = d[d["var"] == "183"], d[d["var"] == "184"]
         nt, at = n["valor"].sum(), a["valor"].sum()
+        res["tamanho"][nome] = {f: (n[n["faixa"] == f]["valor"].sum() / nt * 100 if nt else None,
+                                    a[a["faixa"] == f]["valor"].sum() / at * 100 if at else None)
+                                for f in faixas}
         linhas[nome] = [
             (f"{_br(n[n['faixa'] == f]['valor'].sum() / nt * 100, 0)}% · "
              f"{_br(a[a['faixa'] == f]['valor'].sum() / at * 100, 0)}% da área") if nt and at else "–"
@@ -763,6 +784,7 @@ def _bloco_censo(muns, regiao, uf_ref, ufs):
     st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
     st.caption("Fonte: IBGE, Censo Agropecuário 2017 (tabelas 6881 e 6754). É o retrato mais recente "
                "e completo do campo, mas é de 2017. Totais por município e região, sem ponderação.")
+    return res
 
 
 def _grafico_preco(m12, unidade):
@@ -786,7 +808,7 @@ def _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave):
     if not opcoes:
         st.info("Nenhuma das culturas escolhidas tem preço e custo de referência (soja, milho, "
                 "trigo, arroz, feijão e café). Acrescente uma delas na lista acima.")
-        return
+        return None
     cultura = st.selectbox("Cultura:", opcoes, key=f"{chave}::renda_cultura")
     cfg = RENDA[cultura]
     k = f"{chave}::{cultura}"
@@ -903,6 +925,233 @@ def _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave):
         d.metric("Margem operacional", f"R$ {_br(margem_op, 2)}",
                  help="por hectare" + ("" if desconto else " · sem desconto de frete"))
 
+    fonte_preco = None
+    if serie is not None and m12 is not None and len(m12):
+        fonte_preco = {"indicador": escolha, "media": media, "periodo": f"{m12.index[0]:%m/%Y} a {m12.index[-1]:%m/%Y}",
+                       "ultimo": float(serie["valor"].iloc[-1]), "data": f"{serie['data'].iloc[-1]:%d/%m/%Y}"}
+    return {"cultura": cultura, "unidade": un_txt, "rend_kg": imovel, "rend_regiao_kg": reg, "dif_regiao": dif,
+            "prod_un": prod_un, "preco": preco, "preco_editado": fonte_preco is None or abs(preco - media) > 0.005,
+            "fonte_preco": fonte_preco, "desconto": desconto, "liquido": liquido, "receita": receita,
+            "operacional": operacional, "custo": custo,
+            "custo_editado": custo is None or abs(operacional - custo["operacional"]) > 0.005,
+            "margem_op": margem_op,
+            "margem_total": (receita - operacional - custo["fatores"]) if custo and custo.get("fatores") is not None else None}
+
+
+# =========================================================================
+# Fase 4: texto para o laudo e Excel com os valores usados e as fontes
+# =========================================================================
+def _sinal(v, ref):
+    if v is None or ref is None or pd.isna(v) or pd.isna(ref) or not ref:
+        return None
+    return (v / ref - 1) * 100
+
+
+def _acima(p):
+    return f"{_br(abs(p), 1)}% {'acima' if p >= 0 else 'abaixo'}"
+
+
+def _lista_pt(itens):
+    itens = [i for i in itens if i]
+    return itens[0] if len(itens) == 1 else ", ".join(itens[:-1]) + " e " + itens[-1] if itens else ""
+
+
+def _texto_laudo(res):
+    muns = res["muns"]
+    par = []
+    if len(muns) == 1:
+        onde = f"integralmente no município de {muns[0]['municipio'].replace(' - ', '/')}"
+    else:
+        onde = "nos municípios de " + _lista_pt(
+            [f"{m['municipio'].replace(' - ', '/')} ({_br(m['porcentagem'], 1)}% da área)" for m in muns])
+    reg = _lista_pt(res["nomes_reg"])
+    par.append(f"O imóvel {res['imovel']}, com {_br(res['area_ha'], 2)} ha, localiza-se {onde}, "
+               f"{'nas regiões geográficas imediatas' if len(res['nomes_reg']) > 1 else 'na região geográfica imediata'} "
+               f"de {reg} (IBGE, 2017), que {'reúnem' if len(res['nomes_reg']) > 1 else 'reúne'} {res['n_reg']} municípios.")
+
+    if res["producao"]:
+        base = "dos municípios onde se insere o imóvel" if len(muns) > 1 else "do município"
+        principais = _lista_pt([p["cultura"].split(" (")[0].lower() for p in res["producao"][:4]])
+        varias = len(res["producao"]) > 1
+        frases = [f"Segundo a Produção Agrícola Municipal do IBGE ({res['ano_pam']}), "
+                  f"{'as principais lavouras' if varias else 'a principal lavoura'} {base} "
+                  f"{'são' if varias else 'é'} {principais}."]
+        for p in res["producao"][:3]:
+            if pd.isna(p["imovel"]):
+                continue
+            d = _sinal(p["imovel"], p["regiao"])
+            pond = " (média ponderada pela área do imóvel em cada município)" if res["modo"] == "ponderado" else ""
+            frases.append(f"A produtividade média de {p['cultura'].split(' (')[0].lower()} foi de "
+                          f"{_br(p['imovel'])} {p['unidade']}{pond}"
+                          + (f", {_acima(d)} da média da região imediata ({_br(p['regiao'])} {p['unidade']})" if d is not None else "")
+                          + (f"; no estado ({res['uf']}), a média foi de {_br(p['uf'])} {p['unidade']}" if pd.notna(p['uf']) else "")
+                          + ".")
+        par.append(" ".join(frases))
+
+    r = res.get("renda")
+    if r:
+        un = r["unidade"]
+        fp = r["fonte_preco"]
+        if fp and not r["preco_editado"]:
+            praca = re.sub(r"\s*\(.*?\)", "", fp["indicador"])
+            preco = (f"o preço de R$ {_br(r['preco'], 2)} por {un}, correspondente à média mensal do indicador "
+                     f"CEPEA/ESALQ de {r['cultura'].split(' (')[0].lower()} ({praca}) no período de "
+                     f"{fp['periodo']} (Fonte: CEPEA/ESALQ)")
+        else:
+            preco = f"o preço de R$ {_br(r['preco'], 2)} por {un}, informado pelo avaliador"
+        desc = (f", deduzidos R$ {_br(r['desconto'], 2)} por {un} referentes a frete e base até a propriedade, "
+                f"resultando em R$ {_br(r['liquido'], 2)} por {un}") if r["desconto"] else ""
+        c = r["custo"]
+        if c and not r["custo_editado"]:
+            custo = (f"O custo operacional de referência é de R$ {_br(r['operacional'], 2)} por hectare, conforme a "
+                     f"CONAB para o polo de {c['local']}/{c['uf']}, safra {c['safra']} "
+                     f"(tecnologia {c['tecnologia']}, referência {c['referencia']})")
+        else:
+            custo = f"O custo operacional adotado é de R$ {_br(r['operacional'], 2)} por hectare, informado pelo avaliador"
+        par.append(f"Para a {r['cultura'].split(' (')[0].lower()}, adotou-se {preco}{desc}. {custo}. "
+                   f"Com produtividade de {_br(r['prod_un'], 1)} {un} por hectare, a receita bruta estimada é de "
+                   f"R$ {_br(r['receita'], 2)} por hectare e a margem operacional, de R$ {_br(r['margem_op'], 2)} por hectare.")
+
+    z = res.get("zarc")
+    if z and z["janelas"]:
+        js = list(z["janelas"].items())
+        abre = (f"De acordo com o Zoneamento Agrícola de Risco Climático do MAPA ({z['portaria']}), para "
+                f"{z['variante'].lower()} em solo {z['solo'].split(' (')[0]} e ciclo {z['ciclo']}, ")
+        if len(js) == 1:
+            par.append(abre + f"a janela de plantio indicada em {js[0][0].replace(' - ', '/')} vai "
+                              f"{_janela_texto(js[0][1], longo=True)}.")
+        else:
+            par.append(abre + "as janelas de plantio indicadas são: " + "; ".join(
+                f"em {m.replace(' - ', '/')}, {_janela_texto(d, longo=True)}" for m, d in js) + ".")
+
+    pc = res.get("pecuaria")
+    if pc:
+        muns_b = [(l, v) for l, v in pc["bovinos"][:len(muns)] if v is not None and pd.notna(v)]
+        reg_b = pc["bovinos"][len(muns)][1] if len(pc["bovinos"]) > len(muns) else None
+        reb = _lista_pt([f"{_br(v)} cabeças em {l.replace(' - ', '/')}" for l, v in muns_b])
+        txt = f"Segundo a Pesquisa da Pecuária Municipal do IBGE ({pc['ano']}), o rebanho bovino era de {reb}"
+        na_reg = "nas regiões imediatas" if len(res["nomes_reg"]) > 1 else "na região imediata"
+        txt += (f", e de {_br(reg_b)} cabeças {na_reg} ({res['n_reg']} municípios)." if reg_b else ".")
+        boi = next((p for p in pc["precos"] if p["nome"] == "Boi gordo"), None)
+        if boi:
+            txt += (f" O Indicador do Boi Gordo CEPEA/ESALQ ({boi['praca']}) teve média de R$ {_br(boi['media'], 2)} "
+                    f"por arroba no período de {boi['periodo']} (Fonte: CEPEA/ESALQ).")
+        par.append(txt)
+
+    cs = res.get("censo")
+    if cs and cs["uso"]:
+        m0 = muns[0]["nome_puro"]
+        u = cs["uso"].get(m0)
+        t = cs["tamanho"].get(m0)
+        if u and u.get("Lavouras") is not None:
+            txt = (f"Segundo o Censo Agropecuário 2017 (IBGE), em {m0} as lavouras ocupavam {_br(u['Lavouras'], 1)}% "
+                   f"da área dos estabelecimentos agropecuários, as pastagens {_br(u['Pastagens'], 1)}% e as matas e "
+                   f"florestas naturais {_br(u['Matas e florestas naturais'], 1)}%.")
+            if t:
+                grandes = [t[f] for f in ("1.000 a 2.500 ha", "2.500 ha ou mais") if t.get(f) and t[f][0] is not None]
+                if grandes:
+                    txt += (f" Os estabelecimentos com 1.000 ha ou mais eram {_br(sum(g[0] for g in grandes), 1)}% do total "
+                            f"e detinham {_br(sum(g[1] for g in grandes), 1)}% da área.")
+            par.append(txt)
+    return "\n\n".join(par)
+
+
+def _excel_laudo(res, texto):
+    import io
+    buf = io.BytesIO()
+    hoje = pd.Timestamp.today().strftime("%d/%m/%Y")
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+        resumo = [("Imóvel", res["imovel"], "", "GEOCAPUTI", hoje),
+                  ("Área do imóvel", round(res["area_ha"], 2), "ha", "GEOCAPUTI", hoje)]
+        for m in res["muns"]:
+            resumo.append((f"Parte em {m['municipio']}", round(m["porcentagem"], 2), "% da área", "IBGE malha municipal", ""))
+        resumo.append(("Região imediata de comparação", ", ".join(res["nomes_reg"]), f"{res['n_reg']} municípios", "IBGE 2017", ""))
+        r = res.get("renda")
+        if r:
+            fp = r["fonte_preco"] or {}
+            c = r["custo"] or {}
+            resumo += [
+                (f"Produtividade do imóvel · {r['cultura']}", round(r["prod_un"], 2), f"{r['unidade']}/ha", f"IBGE PAM {res['ano_pam']}", res["consultado"]),
+                ("Preço de referência", round(r["preco"], 2), f"R$/{r['unidade']}",
+                 "Avaliador" if r["preco_editado"] else f"CEPEA/ESALQ · {fp.get('indicador', '')} · média {fp.get('periodo', '')}", fp.get("data", "")),
+                ("Desconto até a fazenda (frete e base)", round(r["desconto"], 2), f"R$/{r['unidade']}", "Avaliador", hoje),
+                ("Receita bruta", round(r["receita"], 2), "R$/ha", "Cálculo", hoje),
+                ("Custo operacional", round(r["operacional"], 2), "R$/ha",
+                 "Avaliador" if r["custo_editado"] else f"CONAB · polo {c.get('local', '')}/{c.get('uf', '')} · safra {c.get('safra', '')}", c.get("referencia", "")),
+                ("Margem operacional", round(r["margem_op"], 2), "R$/ha", "Cálculo", hoje)]
+            if c:
+                resumo += [("Custo variável (CONAB)", c.get("variavel"), "R$/ha", "CONAB", c.get("referencia", "")),
+                           ("Custo fixo (CONAB)", c.get("fixo"), "R$/ha", "CONAB", c.get("referencia", "")),
+                           ("Renda de fatores (CONAB)", c.get("fatores"), "R$/ha", "CONAB", c.get("referencia", ""))]
+        pd.DataFrame(resumo, columns=["Item", "Valor", "Unidade", "Fonte", "Referência/consulta"]).to_excel(xw, sheet_name="Resumo", index=False)
+
+        if res["producao"]:
+            linhas = []
+            for p in res["producao"]:
+                l = {"Cultura": p["cultura"], "Ano": res["ano_pam"]}
+                for mun, a in p["area"].items():
+                    l[f"Área colhida {mun} (ha)"] = a
+                l.update({"Produtividade imóvel": p["imovel"], "Produtividade região": p["regiao"],
+                          f"Produtividade {res['uf']}": p["uf"], "Unidade": p["unidade"]})
+                linhas.append(l)
+            pd.DataFrame(linhas).to_excel(xw, sheet_name="Produção", index=False)
+
+        z = res.get("zarc")
+        if z and z["janelas"]:
+            rot = [f"{['1-10', '11-20', '21-fim'][i % 3]} {MESES_PT[i // 3]}" for i in range(36)]
+            zl = [{"Município": m, "Zoneamento": z["variante"], "Solo": z["solo"], "Ciclo": z["ciclo"],
+                   **{rot[i]: d[i] for i in range(36)}} for m, d in z["janelas"].items()]
+            pd.DataFrame(zl).to_excel(xw, sheet_name="ZARC (risco %)", index=False)
+
+        pc = res.get("pecuaria")
+        if pc:
+            pd.DataFrame(pc["bovinos"], columns=["Local", f"Bovinos {pc['ano']} (cabeças)"]).to_excel(xw, sheet_name="Pecuária", index=False)
+
+        cs = res.get("censo")
+        if cs and cs["uso"]:
+            pd.DataFrame(cs["uso"]).T.reset_index(names="Local").to_excel(xw, sheet_name="Censo · uso das terras", index=False)
+            tl = [{"Local": loc, "Faixa": f, "% dos estabelecimentos": v[0], "% da área": v[1]}
+                  for loc, faixas in cs["tamanho"].items() for f, v in faixas.items()]
+            pd.DataFrame(tl).to_excel(xw, sheet_name="Censo · tamanho", index=False)
+
+        fontes = [
+            ("IBGE · Produção Agrícola Municipal", f"SIDRA tabela {TAB_PAM}", f"{res['ano_pam']}", "Livre, citar a fonte"),
+            ("IBGE · Pesquisa da Pecuária Municipal", f"SIDRA tabela {TAB_PPM}", str(pc["ano"]) if pc else "", "Livre, citar a fonte"),
+            ("IBGE · Censo Agropecuário 2017", "SIDRA tabelas 6881 e 6754", "2017", "Livre, citar a fonte"),
+            ("CEPEA/ESALQ-USP · indicadores de preço", "cepea.esalq.usp.br", "média 12 meses fechados",
+             "CC BY-NC 4.0: atribuição obrigatória; uso interno de análise"),
+            ("CONAB · custos de produção", "conab.gov.br", (r["custo"] or {}).get("safra", "") if r else "", "Livre, citar a fonte"),
+            ("MAPA · ZARC (tábua de risco)", "dados.agricultura.gov.br", z["tabuas"] if z else "", "Livre, citar a portaria"),
+        ]
+        pd.DataFrame(fontes, columns=["Fonte", "Origem", "Período/edição", "Uso"]).to_excel(xw, sheet_name="Fontes", index=False)
+        pd.DataFrame({"Texto para o laudo": texto.split("\n\n")}).to_excel(xw, sheet_name="Texto", index=False)
+        for ws in xw.sheets.values():
+            ws.set_column(0, 0, 38)
+            ws.set_column(1, 60, 16)
+    return buf.getvalue()
+
+
+def _bloco_laudo(res):
+    ui.secao("Levar para o laudo")
+    texto = _texto_laudo(res)
+    if not texto:
+        st.caption("Sem dados suficientes para montar o texto.")
+        return
+    st.caption("Texto gerado com os mesmos números da tela, já com as fontes. Use o ícone de copiar "
+               "no canto da caixa e ajuste no laudo como preferir.")
+    st.code(texto, language=None, wrap_lines=True)
+    nome = re.sub(r"[^\w.-]+", "_", str(res["imovel"]))[:40]
+    try:
+        dados = _excel_laudo(res, texto)
+        st.download_button("⬇ Excel com valores usados e fontes", data=dados,
+                           file_name=f"mercado_{nome}_{pd.Timestamp.today():%Y%m%d}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           type="primary")
+        st.caption("A planilha traz só os números usados na análise, com fonte e data de cada um. "
+                   "As séries de preço do CEPEA não são exportadas.")
+    except Exception as e:
+        ui.erro("Não foi possível gerar o Excel.", str(e)[:200])
+
 
 def render_tab():
     geometry = st.session_state.get("current_geometry")
@@ -976,14 +1225,35 @@ def render_tab():
         st.caption(f"Fonte: IBGE, Produção Agrícola Municipal (tabela {TAB_PAM}), {int(pam['ano'].min())}–{ano}. "
                    f"Consultado em {consultado}.")
 
+    # Mesma área da faixa do imóvel (ui.barra_imovel): calculada do perímetro em EPSG:5880.
+    area_ha = sum(m["area_ha"] for m in muns)
+    gdf = st.session_state.get("gdf_imovel")
+    if gdf is not None and getattr(gdf, "empty", True) is False:
+        try:
+            g = gdf if gdf.crs is not None else gdf.set_crs(4326)
+            area_ha = float(g.to_crs(5880).area.sum() / 1e4)
+        except Exception:
+            pass
+    res = {"imovel": source_name, "area_ha": area_ha, "muns": muns,
+           "modo": "ponderado" if len(pesos) > 1 else "unico", "nomes_reg": nomes_reg, "n_reg": len(regiao),
+           "uf": utils.UF_POR_CODIGO.get(uf_ref, ""), "consultado": consultado, "ano_pam": ano,
+           "producao": [], "renda": None, "zarc": None, "pecuaria": None, "censo": None}
+    for c in culturas:
+        im, rg, uv, un, area = _rend_escalas(pam, c, ano, pesos, regiao, uf_ref)
+        res["producao"].append({"cultura": c, "imovel": im, "regiao": rg, "uf": uv, "unidade": un,
+                                "area": {m["municipio"]: area.get(m["cod_ibge"]) for m in muns}})
+
     if culturas:
         with st.container(border=True):
-            _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, f"mercado::{source_name}")
+            res["renda"] = _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, f"mercado::{source_name}")
         with st.container(border=True):
-            _bloco_zarc(muns, culturas, f"mercado::{source_name}")
+            res["zarc"] = _bloco_zarc(muns, culturas, f"mercado::{source_name}")
 
     with st.container(border=True):
-        _bloco_pecuaria(muns, regiao, uf_ref, ufs)
+        res["pecuaria"] = _bloco_pecuaria(muns, regiao, uf_ref, ufs)
 
     with st.container(border=True):
-        _bloco_censo(muns, regiao, uf_ref, ufs)
+        res["censo"] = _bloco_censo(muns, regiao, uf_ref, ufs)
+
+    with st.container(border=True):
+        _bloco_laudo(res)
