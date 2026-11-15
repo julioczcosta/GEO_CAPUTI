@@ -13,6 +13,11 @@ Dados ao vivo do IBGE/SIDRA pela biblioteca agrobr (Python >= 3.11). Uma consult
 traz TODAS as culturas dos municípios da região e outra as da UF (~5 s), com
 fallback automático para a API de agregados do IBGE quando o SIDRA recusa.
 Resultado em st.cache_data por 7 dias; falha vira exceção (não é cacheada).
+
+A aba é dividida em sub-abas preguiçosas (só a aberta roda): Produção (IBGE +
+crédito de custeio do Banco Central), Renda e juros (CEPEA, CONAB, Selic/IPCA/
+Focus e valor de referência pela renda), Risco (ZARC + seguro rural do MAPA),
+Pecuária e Censo. O texto do laudo/Excel está guardado atrás de MOSTRAR_LAUDO.
 """
 
 import asyncio
@@ -20,8 +25,11 @@ import logging
 import re
 import time
 import unicodedata
+import warnings
+from urllib.parse import quote
 
 import pandas as pd
+import requests
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -74,6 +82,23 @@ RENDA = {
 }
 AVISO_CEPEA = ("Fonte: CEPEA/ESALQ-USP. Dados sob licença CC BY-NC 4.0: cite sempre a fonte; "
                "a série não é exportada, só o valor usado na conta.")
+
+# ---- Juros (Banco Central), crédito rural (SICOR) e seguro rural (MAPA/PSR) ----
+TTL_BCB = 24 * 3600
+TTL_SEGURO = 30 * 24 * 3600
+OLINDA = "https://olinda.bcb.gov.br/olinda/servico"
+SGS_SELIC_META = 432        # meta Selic, % a.a.
+SGS_IPCA_12M = 13522        # IPCA acumulado em 12 meses
+ANOS_CREDITO = 3            # anos fechados de crédito de custeio
+ANOS_SEGURO = 5             # anos de apólices do seguro rural
+N_PRODUTOS_CREDITO = 8
+# Custeio pecuário traz "área", mas R$/ha não faz sentido para rebanho.
+SEM_POR_HA = {"BOVINOS", "BUBALINOS", "SUINOS", "AVES", "FRANGOS", "OVINOS", "CAPRINOS", "EQUINOS",
+              "PEIXES", "LEITE", "AQUISICAO"}
+
+# O texto do laudo e o Excel (fase 4) ficam guardados, fora da tela, até a equipe
+# decidir como vai usá-los. Para religar: MOSTRAR_LAUDO = True.
+MOSTRAR_LAUDO = False
 
 
 # =========================================================================
@@ -801,8 +826,9 @@ def _grafico_preco(m12, unidade):
     return fig
 
 
-def _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave):
-    """Preço (CEPEA) + custo (CONAB) -> renda estimada por hectare de uma cultura."""
+def _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave, credito=None):
+    """Preço (CEPEA) + custo (CONAB) -> renda estimada por hectare de uma cultura.
+    `credito`: {chave da cultura: (R$/ha financiado, ano)} para a linha de referência."""
     ui.secao("Preço, custo e renda por hectare")
     opcoes = [c for c in culturas if c in RENDA]
     if not opcoes:
@@ -901,8 +927,13 @@ def _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave):
         ("= Receita bruta", f"R$ {_br(receita, 2)}", "por hectare"),
     ]
     if custo:
-        linhas += [("− Custo variável", f"R$ {_br(custo.get('variavel'), 2)}", "CONAB"),
-                   ("− Custo fixo (depreciações etc.)", f"R$ {_br(custo.get('fixo'), 2)}", "CONAB")]
+        linhas += [("− Custo variável", f"R$ {_br(custo.get('variavel'), 2)}", "CONAB")]
+    ref_cred = (credito or {}).get(_chave_produto(cultura))
+    if ref_cred:
+        linhas += [("   Referência: custeio financiado por ha no município", f"R$ {_br(ref_cred[0], 2)}",
+                    f"Banco Central · SICOR {ref_cred[1]} · compare com o custo variável")]
+    if custo:
+        linhas += [("− Custo fixo (depreciações etc.)", f"R$ {_br(custo.get('fixo'), 2)}", "CONAB")]
     linhas += [("= Margem operacional", f"R$ {_br(margem_op, 2)}", "receita − custo operacional")]
     if custo and custo.get("fatores") is not None:
         linhas += [("Renda de fatores (inclui remuneração da terra)", f"R$ {_br(custo['fatores'], 2)}",
@@ -936,6 +967,343 @@ def _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave):
             "custo_editado": custo is None or abs(operacional - custo["operacional"]) > 0.005,
             "margem_op": margem_op,
             "margem_total": (receita - operacional - custo["fatores"]) if custo and custo.get("fatores") is not None else None}
+
+
+# =========================================================================
+# Juros, crédito rural e seguro rural
+# =========================================================================
+def _juro_real(nominal, inflacao):
+    return ((1 + nominal / 100) / (1 + inflacao / 100) - 1) * 100
+
+
+def _chave_produto(nome):
+    """'Soja (em grão)' / 'SOJA' / 'Café (em grão) Arábica' / 'CAFÉ' -> 'SOJA' / 'CAFE'."""
+    s = _sem_acento(str(nome)).upper().replace('"', "").strip()
+    return s.split()[0] if s else ""
+
+
+def _olinda(caminho, params):
+    """Consulta OData do Banco Central (Olinda), com novas tentativas.
+
+    O Olinda às vezes devolve um erro 500 passageiro ("Erro desconhecido") e só
+    aceita espaço codificado como %20 (com '+' a consulta vira erro de tipo)."""
+    q = "&".join(f"{k}={quote(str(v), safe=chr(39) + '(),')}" for k, v in params.items())
+    url = f"{OLINDA}/{caminho}?{q}"
+    erro = ""
+    for tentativa in range(6):
+        try:
+            r = requests.get(url, timeout=120)
+            txt = r.text.lstrip()
+            if r.ok and txt.startswith("{"):
+                return r.json()["value"]
+            erro = re.sub(r"\s+", " ", txt[:200])
+        except requests.RequestException as e:
+            erro = str(e)[:200]
+        time.sleep(min(2 * (tentativa + 1), 6))
+    raise RuntimeError(f"Banco Central não respondeu: {erro}")
+
+
+@st.cache_data(ttl=TTL_BCB, show_spinner=False)
+def juros_bcb():
+    """Selic meta e IPCA 12 meses (SGS) + medianas do Focus (Selic e IPCA anuais)."""
+    from agrobr import bcb
+
+    async def _sgs():
+        return await asyncio.gather(bcb.sgs(SGS_SELIC_META, ultimos=1), bcb.sgs(SGS_IPCA_12M, ultimos=1))
+
+    selic, ipca = asyncio.run(_sgs())
+    # O Focus pelo agrobr baixa o histórico desde 2000 (40+ min): vai direto ao Olinda.
+    foc = _olinda("Expectativas/versao/v1/odata/ExpectativasMercadoAnuais", {
+        "$format": "json", "$top": "60", "$orderby": "Data desc",
+        "$filter": "(Indicador eq 'Selic' or Indicador eq 'IPCA') and baseCalculo eq 0",
+        "$select": "Indicador,Data,DataReferencia,Mediana"})
+    ultima = {}
+    for x in foc:
+        ultima.setdefault(x["Indicador"], x["Data"])
+    focus = {}
+    for x in foc:
+        if x["Data"] == ultima.get(x["Indicador"]):
+            focus.setdefault(int(x["DataReferencia"]), {})[x["Indicador"]] = float(x["Mediana"])
+    focus = {a: v for a, v in sorted(focus.items()) if "Selic" in v and "IPCA" in v}
+    return {"selic": float(selic["valor"].iloc[-1]), "selic_data": pd.Timestamp(selic["data"].iloc[-1]),
+            "ipca12": float(ipca["valor"].iloc[-1]), "ipca_ref": pd.Timestamp(ipca["data"].iloc[-1]),
+            "focus": focus, "focus_data": pd.Timestamp(max(ultima.values())) if ultima else None}
+
+
+@st.cache_data(ttl=TTL_IBGE, show_spinner=False)
+def credito_custeio(cod_ibge, anos):
+    """Crédito rural de custeio contratado no município (SICOR), por produto e ano.
+
+    O agrobr só traz o SICOR por UF; por município a consulta vai direto ao Olinda
+    (CusteioMunicipioProduto filtrado por codIbge), um ano por requisição."""
+    def _ano(a):
+        return _olinda("SICOR/versao/v2/odata/CusteioMunicipioProduto", {
+            "$format": "json", "$top": "100000",
+            "$filter": f"codIbge eq '{cod_ibge}' and AnoEmissao eq '{a}'",
+            "$select": "nomeProduto,AnoEmissao,VlCusteio,AreaCusteio"})
+
+    # Um ano por vez: requisições simultâneas aumentam os 500 passageiros do Olinda.
+    blocos = [_ano(a) for a in anos]
+    linhas = [{"ano": int(x["AnoEmissao"]), "produto": str(x["nomeProduto"]).strip('"').strip().capitalize(),
+               "valor": float(x.get("VlCusteio") or 0), "area": float(x.get("AreaCusteio") or 0)}
+              for b in blocos for x in b]
+    df = pd.DataFrame(linhas, columns=["ano", "produto", "valor", "area"])
+    return df.groupby(["ano", "produto"], as_index=False)[["valor", "area"]].sum()
+
+
+@st.cache_data(ttl=TTL_SEGURO, show_spinner=False)
+def seguro_uf(uf, ano_inicio):
+    """Apólices do seguro rural subvencionado (MAPA/PSR) de uma UF, já resumidas.
+
+    O agrobr baixa o arquivo nacional de cada período (~45 s, ~60 MB de pico) e
+    filtra a UF; aqui guarda só os agregados por município, ano e cultura."""
+    from agrobr.alt import mapa_psr
+
+    t0 = time.time()
+    with warnings.catch_warnings(record=True) as avisos:
+        warnings.simplefilter("always")
+        d = asyncio.run(mapa_psr.apolices(uf=uf, ano_inicio=ano_inicio))
+    d = d.copy()
+    d["cd_ibge"] = d["cd_ibge"].astype(str).str.replace(r"\.0$", "", regex=True)
+    d["cultura"] = d["cultura"].astype(str).str.strip().str.capitalize()
+    d["indenizacao"] = pd.to_numeric(d["valor_indenizacao"], errors="coerce").fillna(0.0)
+    d["sinistro"] = d["indenizacao"] > 0
+    resumo = (d.groupby(["cd_ibge", "ano_apolice", "cultura"])
+              .agg(apolices=("nr_apolice", "count"), area=("area_total", "sum"), premio=("valor_premio", "sum"),
+                   indenizacao=("indenizacao", "sum"), sinistros=("sinistro", "sum"))
+              .reset_index())
+    causas = (d[d["sinistro"]].groupby(["cd_ibge", "cultura", "evento"])
+              .agg(n=("nr_apolice", "count"), indenizacao=("indenizacao", "sum")).reset_index())
+    ultima = pd.to_datetime(d["data_apolice"], errors="coerce").max() if len(d) else None
+    parcial = [str(a.message) for a in avisos if "incompleto" in str(a.message)]
+    print(f"[mercado] seguro PSR {uf} desde {ano_inicio}: {time.time() - t0:.1f}s, {len(d)} apólices", flush=True)
+    return resumo, causas, ultima, parcial
+
+
+def _credito_imovel(muns, pesos):
+    """Crédito de custeio dos municípios do imóvel + R$/ha financiado (ponderado pela área)."""
+    hoje = pd.Timestamp.today()
+    anos = tuple(range(hoje.year - ANOS_CREDITO, hoje.year))
+    dados, erros = {}, []
+    for m in muns:
+        try:
+            dados[m["cod_ibge"]] = credito_custeio(m["cod_ibge"], anos)
+        except Exception as e:
+            erros.append(f"{m['municipio']}: {str(e)[:160]}")
+    ult = anos[-1]
+    por_ha = {}
+    for cod, df in dados.items():
+        d = df[(df["ano"] == ult) & (df["area"] > 0)]
+        for _, r in d.iterrows():
+            k = _chave_produto(r["produto"])
+            if k in SEM_POR_HA or r["valor"] / r["area"] > 50000:   # pecuária: "área" não é lavoura
+                continue
+            por_ha.setdefault(k, {})[cod] = r["valor"] / r["area"]
+    ref = {}
+    for k, vals in por_ha.items():
+        v = _media_ponderada(vals, pesos) if any(c in pesos for c in vals) else float("nan")
+        if pd.notna(v):
+            ref[k] = (v, ult)
+    return dados, ref, anos, erros
+
+
+def _bloco_credito(muns, pesos):
+    ui.secao("Crédito rural de custeio")
+    with st.spinner("Consultando o crédito rural no Banco Central..."):
+        dados, ref, anos, erros = _credito_imovel(muns, pesos)
+    for e in erros:
+        ui.erro("O Banco Central não respondeu para um dos municípios. Tente de novo em instantes.", e)
+    if erros and st.button("Tentar de novo", key="mercado_credito_retry"):
+        st.rerun()
+    if not dados:
+        return None
+    a0, a1 = anos[0], anos[-1]
+    tudo = pd.concat([df.assign(cod=c) for c, df in dados.items()], ignore_index=True)
+    if tudo.empty:
+        st.info(f"Não há contratos de custeio registrados no SICOR para {'os municípios' if len(muns) > 1 else 'o município'} "
+                f"do imóvel entre {a0} e {a1}.")
+        return None
+    rank = tudo[tudo["ano"] == a1].groupby("produto")["valor"].sum().sort_values(ascending=False)
+    produtos = list(rank.index[:N_PRODUTOS_CREDITO])
+    linhas = []
+    for p in produtos:
+        linha = {"Atividade": p}
+        for m in muns:
+            if m["cod_ibge"] in dados:
+                df = dados[m["cod_ibge"]]
+                v = df[(df["ano"] == a1) & (df["produto"] == p)]["valor"].sum()
+                linha[f"{m['nome_puro']} {a1} (R$ mi)"] = _br(v / 1e6, 1) if v else "–"
+        t0 = tudo[(tudo["ano"] == a0) & (tudo["produto"] == p)]["valor"].sum()
+        t1 = tudo[(tudo["ano"] == a1) & (tudo["produto"] == p)]["valor"].sum()
+        linha[f"{a0} → {a1}"] = _pct((t1 / t0 - 1) * 100) if t0 else "–"
+        r = ref.get(_chave_produto(p))
+        linha["Financiado por ha (R$)" + (" · ponderado" if len(pesos) > 1 else "")] = _br(r[0]) if r else "–"
+        linhas.append(linha)
+    st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
+    st.caption(f"Valor dos contratos de custeio emitidos em {a1} no município. Mostra quanto dinheiro de "
+               f"banco roda em cada atividade e se está crescendo ou caindo desde {a0}. Totais aparecem por "
+               "município; só o valor por hectare é ponderado pela área do imóvel. Fonte: Banco Central, "
+               "SICOR (Matriz de Dados do Crédito Rural).")
+    return {"anos": anos, "ref": ref}
+
+
+def _bloco_juros():
+    ui.secao("Juros e inflação")
+    try:
+        with st.spinner("Consultando o Banco Central..."):
+            j = juros_bcb()
+    except Exception as e:
+        ui.erro("O Banco Central não respondeu agora. Informe a taxa de desconto manualmente.", str(e)[:200])
+        return None
+    anos = list(j["focus"])[:5]
+    longo = next((a for a in anos if a >= pd.Timestamp.today().year + 2), anos[-1] if anos else None)
+    real_hoje = _juro_real(j["selic"], j["ipca12"])
+    a, b, c, d = st.columns(4)
+    a.metric("Selic hoje", f"{_br(j['selic'], 2)}%", help="meta ao ano")
+    b.metric("IPCA 12 meses", f"{_br(j['ipca12'], 2)}%", help=f"até {j['ipca_ref']:%m/%Y}")
+    c.metric("Juro real hoje", f"{_br(real_hoje, 1)}%", help="Selic descontada a inflação")
+    sug = None
+    if longo:
+        f = j["focus"][longo]
+        sug = round(_juro_real(f["Selic"], f["IPCA"]), 1)
+        d.metric(f"Juro real esperado {longo}", f"{_br(sug, 1)}%",
+                 help=f"Mercado (Focus): Selic {_br(f['Selic'], 2)}% e IPCA {_br(f['IPCA'], 2)}%")
+        tab = pd.DataFrame(
+            [["Selic (fim do ano)"] + [f"{_br(j['focus'][x]['Selic'], 2)}%" for x in anos],
+             ["IPCA"] + [f"{_br(j['focus'][x]['IPCA'], 2)}%" for x in anos],
+             ["Juro real"] + [f"{_br(_juro_real(j['focus'][x]['Selic'], j['focus'][x]['IPCA']), 1)}%" for x in anos]],
+            columns=["Expectativa do mercado"] + [str(x) for x in anos])
+        st.dataframe(tab, hide_index=True, width="stretch")
+        st.caption(f"O juro real esperado para {longo} é a sugestão de taxa de desconto do bloco abaixo: um "
+                   "prazo longo, sem o pico de juros do momento.")
+    st.caption(f"Fonte: Banco Central do Brasil, SGS (séries {SGS_SELIC_META} e {SGS_IPCA_12M}) e boletim Focus"
+               + (f" de {j['focus_data']:%d/%m/%Y}" if j["focus_data"] is not None else "") + ".")
+    return {**j, "real_hoje": real_hoje, "ano_longo": longo, "taxa_sugerida": sug}
+
+
+def _bloco_valor(renda, juros, area_ha, chave):
+    ui.secao("Valor de referência pela renda")
+    st.caption("Opcional · NBR 14653-3, método da capitalização da renda.")
+    if not renda or pd.isna(renda.get("margem_op")):
+        st.info("Monte a renda por hectare no bloco acima para usar esta conta.")
+        return None
+    st.warning("**Não é o valor do imóvel.** É uma conta de conferência: quanto vale um hectare que gera "
+               "essa renda todo ano, à taxa escolhida. O valor de mercado continua vindo das amostras.")
+    sug = (juros or {}).get("taxa_sugerida") or 6.0
+    cultura = renda["cultura"].split(" (")[0]
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"Margem operacional · {cultura}: **R$ {_br(renda['margem_op'], 2)}/ha**")
+        extra = st.number_input("+ Margem de outra safra no mesmo ano (R$/ha)", value=0.0, step=50.0,
+                                format="%.2f", key=f"{chave}::valor_extra",
+                                help="Ex.: milho 2ª safra depois da soja. Deixe 0 se o imóvel não faz.")
+        taxa = st.number_input("Taxa de desconto (% ao ano, real)", min_value=0.5, max_value=30.0,
+                               value=float(sug), step=0.1, format="%.1f", key=f"{chave}::taxa::{sug}",
+                               help=("Sugestão: juro real esperado pelo mercado (Focus) para "
+                                     f"{juros['ano_longo']}." if juros and juros.get("ano_longo")
+                                     else "Informe a taxa usada pela equipe."))
+    renda_ano = renda["margem_op"] + extra
+    with c2:
+        if renda_ano <= 0:
+            st.info("Com renda líquida zero ou negativa, a conta pela renda não se aplica.")
+            return {"renda_ano": renda_ano, "taxa": taxa, "valor_ha": None}
+        valor_ha = renda_ano / (taxa / 100)
+        st.metric("Valor de referência por hectare", f"R$ {_br(valor_ha, 0)}",
+                  help=f"R$ {_br(renda_ano, 2)}/ha ao ano ÷ {_br(taxa, 1)}%")
+        st.caption(f"× {_br(area_ha, 2)} ha do imóvel = R$ {_br(valor_ha * area_ha / 1e6, 2)} milhões")
+        sens = [(t, renda_ano / (t / 100)) for t in (taxa - 1, taxa, taxa + 1) if t > 0]
+        st.dataframe(pd.DataFrame({"Taxa": [f"{_br(t, 1)}%" for t, _ in sens],
+                                   "R$ por ha": [_br(v, 0) for _, v in sens]}),
+                     hide_index=True, width="stretch")
+        st.caption("Quanto o valor muda se a taxa variar 1 ponto.")
+    return {"renda_ano": renda_ano, "taxa": taxa, "valor_ha": valor_ha}
+
+
+def _bloco_seguro(muns, ufs):
+    ui.secao("O que deu errado de fato · seguro rural")
+    hoje = pd.Timestamp.today()
+    ano0 = hoje.year - ANOS_SEGURO
+    cods = {m["cod_ibge"] for m in muns}
+    resumos, causas, parciais, ultima = [], [], [], None
+    for uf in ufs:
+        sigla = utils.UF_POR_CODIGO.get(uf, uf)
+        try:
+            with st.spinner(f"Consultando o seguro rural (MAPA) de {sigla}... a primeira consulta do estado "
+                            "leva cerca de 1 minuto e depois fica guardada por 30 dias."):
+                r, c, u, p = seguro_uf(sigla, ano0)
+        except Exception as e:
+            ui.erro(f"O MAPA não respondeu agora para {sigla}. Tente de novo em instantes.", str(e)[:200])
+            continue
+        resumos.append(r[r["cd_ibge"].isin(cods)])
+        causas.append(c[c["cd_ibge"].isin(cods)])
+        parciais += p
+        ultima = u if ultima is None or (u is not None and u > ultima) else ultima
+    if not resumos:
+        return None
+    r = pd.concat(resumos, ignore_index=True)
+    if r.empty:
+        st.info(f"Nenhuma apólice de seguro rural subvencionado nos municípios do imóvel desde {ano0}.")
+        return None
+    nomes = {m["cod_ibge"]: m["nome_puro"] for m in muns}
+    tot = r[["apolices", "area", "premio", "indenizacao", "sinistros"]].sum()
+    sinistralidade = tot["indenizacao"] / tot["premio"] * 100 if tot["premio"] else float("nan")
+    a, b, c_, d = st.columns(4)
+    a.metric("Apólices", _br(tot["apolices"]), help=f"{_br(tot['area'])} ha segurados")
+    b.metric("Com sinistro", _br(tot["sinistros"]),
+             help=f"{_br(tot['sinistros'] / tot['apolices'] * 100, 0)}% das apólices")
+    c_.metric("Indenizações pagas", f"R$ {_br(tot['indenizacao'] / 1e6, 1)} mi",
+              help=f"prêmios pagos: R$ {_br(tot['premio'] / 1e6, 1)} mi")
+    d.metric("Sinistralidade", f"{_br(sinistralidade, 0)}%",
+             help="indenização ÷ prêmio. Abaixo de 100%: as seguradoras pagaram menos do que receberam.")
+
+    if len(muns) > 1:
+        pm = r.groupby("cd_ibge")[["apolices", "sinistros", "indenizacao", "premio"]].sum()
+        st.dataframe(pd.DataFrame([{
+            "Município": nomes.get(cod, cod), "Apólices": _br(x["apolices"]), "Com sinistro": _br(x["sinistros"]),
+            "Indenização (R$ mi)": _br(x["indenizacao"] / 1e6, 1),
+            "Sinistralidade": f"{_br(x['indenizacao'] / x['premio'] * 100, 0)}%" if x["premio"] else "–"}
+            for cod, x in pm.iterrows()]), hide_index=True, width="stretch")
+
+    c1, c2 = st.container(), st.container()   # tabela e, abaixo, o gráfico de causas
+    with c1:
+        pc = r.groupby("cultura")[["apolices", "sinistros", "indenizacao", "premio"]].sum() \
+              .sort_values("apolices", ascending=False)
+        st.dataframe(pd.DataFrame([{
+            "Cultura": cult, "Apólices": _br(x["apolices"]), "Sinistros": _br(x["sinistros"]),
+            "% com sinistro": f"{_br(x['sinistros'] / x['apolices'] * 100, 0)}%",
+            "Indenização (R$ mi)": _br(x["indenizacao"] / 1e6, 1),
+            "Sinistralidade": f"{_br(x['indenizacao'] / x['premio'] * 100, 0)}%" if x["premio"] else "–"}
+            for cult, x in pc.iterrows()]), hide_index=True, width="stretch")
+    with c2:
+        cs = pd.concat(causas, ignore_index=True) if causas else pd.DataFrame()
+        if not cs.empty:
+            pe = cs.groupby("evento")["indenizacao"].sum().sort_values()
+            fig = go.Figure(go.Bar(x=pe.values / 1e6, y=[str(e).capitalize() for e in pe.index], orientation="h",
+                                   marker_color="#b26a00",
+                                   text=[f"R$ {_br(v / 1e6, 1)} mi" for v in pe.values], textposition="auto"))
+            fig.update_layout(height=max(160, 40 * len(pe) + 60), margin=dict(l=10, r=10, t=30, b=10),
+                              title=dict(text="Indenização por causa", font=dict(size=13)),
+                              xaxis_title="R$ milhões", separators=",.",
+                              yaxis=dict(automargin=True))
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.caption("Nenhuma indenização paga no período.")
+
+    pa = r.groupby("ano_apolice")[["apolices", "sinistros", "indenizacao"]].sum()
+    st.dataframe(pd.DataFrame([{"Ano": str(int(ano)), "Apólices": _br(x["apolices"]),
+                                "Com sinistro": _br(x["sinistros"]),
+                                "Indenização (R$ mi)": _br(x["indenizacao"] / 1e6, 1)}
+                               for ano, x in pa.iterrows()]), hide_index=True, width="stretch")
+    nota = ""
+    if parciais:
+        msg = parciais[0].replace("PSR: ", "").strip()
+        nota = f" Atenção: {msg}."
+    st.caption("Só entram apólices com subvenção federal (PSR). Grandes produtores costumam usar seguro "
+               "privado ou nenhum, então o número de apólices pode ser baixo mesmo em regiões grandes."
+               f"{nota} Fonte: MAPA, Programa de Subvenção ao Prêmio do Seguro Rural.")
+    return {"apolices": int(tot["apolices"]), "sinistros": int(tot["sinistros"]),
+            "indenizacao": float(tot["indenizacao"]), "premio": float(tot["premio"]),
+            "sinistralidade": sinistralidade, "ano0": ano0}
 
 
 # =========================================================================
@@ -1206,24 +1574,13 @@ def render_tab():
                .groupby("item")["area_colhida"].sum().sort_values(ascending=False))
     # "Café (em grão) Total" soma arábica + canephora: fica fora para não contar duas vezes.
     todas = [i for i in ranking.index if not i.endswith(" Total")]
-    with st.container(border=True):
-        ui.secao("O que a região produz")
-        culturas = st.multiselect(
-            "Culturas (sugeridas: as maiores do município pela área colhida)",
-            options=todas, default=todas[:N_CULTURAS], key=f"mercado_culturas::{source_name}")
-        if not culturas:
-            st.caption("Escolha ao menos uma cultura.")
-        else:
-            tab = _tabela_producao(pam, muns, pesos, regiao, uf_ref, ano, culturas)
-            st.dataframe(tab, hide_index=True, width="stretch")
-            st.caption(f"Produtividade em {ano}. Imóvel = {rotulo_imovel.split('(')[1].rstrip(')')}; "
-                       "região = Σ produção ÷ Σ área colhida dos municípios da região.")
-
-            foco = st.selectbox("Série de 10 anos da cultura:", culturas, key="mercado_foco")
-            st.plotly_chart(_grafico(pam, foco, pesos, regiao, uf_ref, rotulo_imovel),
-                            width="stretch")
-        st.caption(f"Fonte: IBGE, Produção Agrícola Municipal (tabela {TAB_PAM}), {int(pam['ano'].min())}–{ano}. "
-                   f"Consultado em {consultado}.")
+    # Fica acima das sub-abas: Produção, Renda e Risco usam a mesma lista (e um
+    # widget dentro de uma aba fechada perderia o valor escolhido).
+    culturas = st.multiselect(
+        "Culturas analisadas (sugeridas: as maiores do município pela área colhida)",
+        options=todas, default=todas[:N_CULTURAS], key=f"mercado_culturas::{source_name}")
+    if not culturas:
+        st.caption("Escolha ao menos uma cultura.")
 
     # Mesma área da faixa do imóvel (ui.barra_imovel): calculada do perímetro em EPSG:5880.
     area_ha = sum(m["area_ha"] for m in muns)
@@ -1237,23 +1594,66 @@ def render_tab():
     res = {"imovel": source_name, "area_ha": area_ha, "muns": muns,
            "modo": "ponderado" if len(pesos) > 1 else "unico", "nomes_reg": nomes_reg, "n_reg": len(regiao),
            "uf": utils.UF_POR_CODIGO.get(uf_ref, ""), "consultado": consultado, "ano_pam": ano,
-           "producao": [], "renda": None, "zarc": None, "pecuaria": None, "censo": None}
+           "producao": [], "renda": None, "zarc": None, "pecuaria": None, "censo": None,
+           "credito": None, "juros": None, "valor": None, "seguro": None}
     for c in culturas:
         im, rg, uv, un, area = _rend_escalas(pam, c, ano, pesos, regiao, uf_ref)
         res["producao"].append({"cultura": c, "imovel": im, "regiao": rg, "uf": uv, "unidade": un,
                                 "area": {m["municipio"]: area.get(m["cod_ibge"]) for m in muns}})
 
-    if culturas:
+    chave = f"mercado::{source_name}"
+
+    # Sub-abas preguiçosas: só a aba aberta roda (o seguro, por exemplo, leva ~1 min
+    # na primeira consulta do estado e não deve atrasar quem só quer a produção).
+    t_prod, t_renda, t_risco, t_pec, t_censo = st.tabs(
+        ["Produção", "Renda e juros", "Risco", "Pecuária", "Censo"], key="mercado_subaba", on_change="rerun")
+
+    if t_prod.open:
+        with t_prod:
+            with st.container(border=True):
+                ui.secao("O que a região produz")
+                if culturas:
+                    tab = _tabela_producao(pam, muns, pesos, regiao, uf_ref, ano, culturas)
+                    st.dataframe(tab, hide_index=True, width="stretch")
+                    st.caption(f"Produtividade em {ano}. Imóvel = {rotulo_imovel.split('(')[1].rstrip(')')}; "
+                               "região = Σ produção ÷ Σ área colhida dos municípios da região.")
+                    foco = st.selectbox("Série de 10 anos da cultura:", culturas, key="mercado_foco")
+                    st.plotly_chart(_grafico(pam, foco, pesos, regiao, uf_ref, rotulo_imovel), width="stretch")
+                st.caption(f"Fonte: IBGE, Produção Agrícola Municipal (tabela {TAB_PAM}), "
+                           f"{int(pam['ano'].min())}–{ano}. Consultado em {consultado}.")
+            with st.container(border=True):
+                res["credito"] = _bloco_credito(muns, pesos)
+
+    if t_renda.open:
+        with t_renda:
+            if culturas:
+                with st.spinner("Consultando o crédito rural no Banco Central..."):
+                    _, ref_cred, _, _ = _credito_imovel(muns, pesos)   # já trata falhas por município
+                with st.container(border=True):
+                    res["renda"] = _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, chave, ref_cred)
+            with st.container(border=True):
+                res["juros"] = _bloco_juros()
+            with st.container(border=True):
+                res["valor"] = _bloco_valor(res["renda"], res["juros"], area_ha, chave)
+
+    if t_risco.open:
+        with t_risco:
+            if culturas:
+                with st.container(border=True):
+                    res["zarc"] = _bloco_zarc(muns, culturas, chave)
+            with st.container(border=True):
+                res["seguro"] = _bloco_seguro(muns, ufs)
+
+    if t_pec.open:
+        with t_pec:
+            with st.container(border=True):
+                res["pecuaria"] = _bloco_pecuaria(muns, regiao, uf_ref, ufs)
+
+    if t_censo.open:
+        with t_censo:
+            with st.container(border=True):
+                res["censo"] = _bloco_censo(muns, regiao, uf_ref, ufs)
+
+    if MOSTRAR_LAUDO:
         with st.container(border=True):
-            res["renda"] = _bloco_renda(pam, ano, culturas, pesos, regiao, uf_ref, f"mercado::{source_name}")
-        with st.container(border=True):
-            res["zarc"] = _bloco_zarc(muns, culturas, f"mercado::{source_name}")
-
-    with st.container(border=True):
-        res["pecuaria"] = _bloco_pecuaria(muns, regiao, uf_ref, ufs)
-
-    with st.container(border=True):
-        res["censo"] = _bloco_censo(muns, regiao, uf_ref, ufs)
-
-    with st.container(border=True):
-        _bloco_laudo(res)
+            _bloco_laudo(res)

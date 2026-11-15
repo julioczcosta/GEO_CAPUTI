@@ -305,13 +305,19 @@ except FileNotFoundError:
 
 styles_menu = {
     "container": {"padding": "0!important", "background-color": "#f8f9fa"},
+    # Rótulo e ícone numa linha só (nunca "Uso do / Solo"); a grade que
+    # reorganiza os botões conforme a largura fica no CSS_MENU abaixo.
     "icon": {"color": "#555", "font-size": "14px"},
     "nav-link": {
         "font-size": "14px",
         "text-align": "center",
+        "white-space": "nowrap",
+        "display": "flex",
+        "align-items": "center",
+        "justify-content": "center",
+        "gap": "6px",
         "margin": "0px",
-        "padding-top": "12px",
-        "padding-bottom": "12px",
+        "padding": "10px 14px",
         "--hover-color": "#eee"
     },
     "nav-link-selected": {"background-color": "#008C45", "font-weight": "600"},
@@ -334,10 +340,27 @@ components.html(
         var win = window.parent;
         var doc = win.document;
 
+        // Grade responsiva dentro do iframe do menu (a media query mede a
+        // largura do próprio menu): todos numa linha quando cabe, 4 por
+        // linha em tela média e 2 no celular — nunca um botão sobrando.
+        var CSS_MENU = ''
+            + 'ul.nav{display:grid!important;grid-auto-flow:column;grid-auto-columns:auto;gap:2px;}'
+            + 'ul.nav>li{width:auto!important;max-width:none!important;}'
+            + 'ul.nav .nav-link.active i{color:#fff!important;}'
+            + '@media (max-width:1000px){ul.nav:has(>li:nth-child(5)){grid-auto-flow:row;grid-template-columns:repeat(4,1fr);}}'
+            + '@media (max-width:480px){ul.nav{grid-auto-flow:row;grid-template-columns:repeat(2,1fr);}'
+            + 'ul.nav .nav-link{font-size:13px!important;padding:9px 6px!important;}}';
+
         function fixOne(iframe) {
             try {
                 iframe.style.width = '100%';
                 var innerDoc = iframe.contentDocument;
+                if (innerDoc && innerDoc.head && !innerDoc.getElementById('geocaputi-menu-css')) {
+                    var st = innerDoc.createElement('style');
+                    st.id = 'geocaputi-menu-css';
+                    st.textContent = CSS_MENU;
+                    innerDoc.head.appendChild(st);
+                }
                 var ul = innerDoc ? innerDoc.querySelector('ul.nav') : null;
                 var h = ul ? ul.getBoundingClientRect().height : 0;
                 if (h > 0) { iframe.style.height = h + 'px'; }
