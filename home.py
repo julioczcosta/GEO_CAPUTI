@@ -10,6 +10,7 @@ import json
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
 import time
+import impedimentos
 
 # --- FUNÇÃO DE LIMPEZA GERAL (Reseta Análises) ---
 def resetar_analises_anteriores():
@@ -262,6 +263,13 @@ def render_tab():
                             # demais abas seguem usando gdf_imovel (a união = geral).
                             if gdf_feat is not None and not gdf_feat.empty:
                                 st.session_state['gdf_features'] = gdf_feat.copy()
+
+                            # Impedimentos: consulta todas as bases em segundo plano
+                            # já agora; o aviso aparece abaixo do menu ao terminar.
+                            try:
+                                impedimentos.iniciar_verificacao(gdf_conv)
+                            except Exception:
+                                pass  # a aba Impedimentos tenta de novo ao abrir
 
                             # MENSAGEM DE SUCESSO COM DELAY
                             st.success(f"Perímetro definido! Carregando abas...")

@@ -410,6 +410,10 @@ if modo_operacao == "Diagnóstico do Imóvel":
         styles=styles_menu
     )
 
+    # Resultado (ou andamento) da verificação de impedimentos, em todas as abas.
+    if selected != "Impedimentos":
+        impedimentos.aviso_geral()
+
     if selected == "Início":
         home.render_tab()
     elif selected == "Contexto":

@@ -7,7 +7,17 @@ import ui
 from streamlit_folium import st_folium
 from io import BytesIO
 import math
+import hashlib
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from shapely import wkb
+
+# A verificação roda em threads (segundo plano); as funções com st.cache_data
+# chamadas de lá avisam "missing ScriptRunContext", o que é inofensivo.
+for _lg in ("streamlit.runtime.scriptrunner_utils.script_run_context",
+            "streamlit.runtime.scriptrunner.script_run_context",
+            "streamlit.runtime.caching.cache_data_api"):
+    logging.getLogger(_lg).setLevel(logging.ERROR)
 
 # --- 1. CONFIGURAÇÕES DOS SERVIÇOS WFS ---
 WFS_CRS = "EPSG:4674"  # SIRGAS 2000
@@ -86,6 +96,13 @@ COLUMN_ALIASES = {
     'areatotalkm': 'Área do Alerta (km²)',
     # Florestas públicas (SFB)
     'rotulo_cnfp': 'Floresta Pública',
+    'rotulo_anm': 'Processo Minerário',
+    'FASE': 'Fase',
+    'NOME': 'Titular',
+    'SUBS': 'Substância',
+    'USO': 'Uso',
+    'AREA_HA': 'Área do Processo (ha)',
+    'ULT_EVENTO': 'Último Evento',
     'nome': 'Nome',
     'tipo': 'Tipo',
     'classe': 'Classe',
@@ -113,6 +130,7 @@ WFS_COLUNAS = {
                                       'no_esfera', 'dt_titulo'],
     "prodes": ['rotulo_desmat', 'ano_desmat', 'apos_2020', 'bioma_prodes', 'satellite'],
     "deter": ['rotulo_alerta', 'classname', 'data_alerta', 'areatotalkm', 'satellite'],
+    "anm_processos": ['rotulo_anm', 'FASE', 'NOME', 'SUBS', 'USO', 'AREA_HA', 'ULT_EVENTO'],
     "cnfp": ['rotulo_cnfp', 'tipo', 'classe', 'governo', 'orgao', 'categoria', 'nome'],
 }
 
@@ -171,7 +189,29 @@ SERVICES_TO_CHECK = [
     # o Tipo A repete TI, UC e assentamentos, que já são verificados acima.
     { "name": "Florestas Públicas Não Destinadas (SFB)", "tipo": "arcgis", "typename": "cnfp", "base_url": SFB_CNFP,
       "where": "tipo = 'TIPO B'", "color": "#2E7D32", "timeout": 40 },
+    # ANM/SIGMINE: o geoserver da INDE só serve imagem (WMS); o ArcGIS da ANM tem o vetor.
+    { "name": "Processos Minerários (ANM)", "tipo": "arcgis", "typename": "anm_processos", "color": "#5D4037", "timeout": 30,
+      "base_url": "https://geo.anm.gov.br/arcgis/rest/services/SIGMINE/dados_anm/MapServer/0/query" },
 ]
+
+# Agrupamento do checklist (ordem de exibição). Mineração fica numa seção à parte:
+# processo minerário é direito de terceiro sobre o subsolo, não restrição ambiental.
+GRUPO_MINERACAO = "Mineração"
+GRUPOS = {
+    "Embargos e autuações": ["Embargo IBAMA", "Embargo ICMBio", "Autos Infração ICMBio"],
+    "Desmatamento": ["Desmatamento após 2008 (PRODES/INPE)", "Alertas de Desmatamento (DETER/INPE)"],
+    "Áreas protegidas e florestas públicas": ["UCs ICMBio", "UCs MMA", "Florestas Públicas Não Destinadas (SFB)"],
+    "Povos e comunidades tradicionais": ["Terras Indígenas (Polígonos)", "Terras Indígenas (Pontos)",
+                                         "Aldeias Indígenas", "Territórios Quilombolas (INCRA)"],
+    "Fundiário": ["Assentamentos (INCRA)"],
+    "Patrimônio cultural": ["Sítios Arq. (Pontos) IPHAN", "Sítios Arq. (Polígonos) IPHAN"],
+    GRUPO_MINERACAO: ["Processos Minerários (ANM)"],
+}
+_GRUPO_DE = {n: g for g, ns in GRUPOS.items() for n in ns}
+
+
+def _eh_mineracao(item):
+    return _GRUPO_DE.get(item["nome"]) == GRUPO_MINERACAO
 
 # --- 2. FUNÇÕES AUXILIARES ---
 
@@ -294,8 +334,14 @@ def _baixar_arcgis(url, bbox, timeout, where="1=1"):
     params = {"geometry": bbox, "geometryType": "esriGeometryEnvelope", "inSR": "4674",
               "spatialRel": "esriSpatialRelIntersects", "where": where,
               "outFields": "*", "outSR": "4674", "f": "geojson"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        except requests.exceptions.SSLError:
+            # Vários servidores .gov.br (ex.: ANM) mandam a cadeia de certificados
+            # incompleta; são dados públicos só de leitura, como nas demais fontes.
+            r = requests.get(url, params=params, headers=headers, timeout=timeout, verify=False)
         r.raise_for_status()
     except Exception as e:
         raise FonteIndisponivel(str(e)[:200])
@@ -326,6 +372,9 @@ def consultar_servico(srv, bbox):
         if srv["typename"] == "cnfp":   # o campo "nome" costuma ser só um número ("01")
             g["rotulo_cnfp"] = (g["categoria"].astype(str).str.strip().str.capitalize()
                                 + " · " + g["codigo"].astype(str).str.strip())
+        if srv["typename"] == "anm_processos":
+            g["rotulo_anm"] = ("Processo " + g["DSProcesso"].astype(str).str.strip()
+                               + " · " + g["SUBS"].astype(str).str.strip().str.capitalize())
         if srv["typename"] == "embargo_ibama":
             for c in ("dat_embargo",):
                 if c in g:
@@ -366,7 +415,7 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
 # Colunas (por fonte) que identificam o impedimento, em ordem de preferência.
 _COLS_IDENT = ['nom_pessoa', 'nome_embargado', 'autuado', 'nome_uc', 'nomeuc', 'terrai_nome',
                'nome_aldeia', 'identificacao_bem', 'no_projeto', 'no_comunidade',
-               'rotulo_desmat', 'rotulo_alerta', 'rotulo_cnfp', 'num_auto_infracao', 'processo']
+               'rotulo_desmat', 'rotulo_alerta', 'rotulo_cnfp', 'rotulo_anm', 'num_auto_infracao', 'processo']
 
 
 def _identificar(row):
@@ -439,204 +488,411 @@ def _impedimentos_por_matricula(resultados, feats):
     ).reset_index(drop=True)
 
 
-# --- 3. RENDERIZAÇÃO ---
+# --- 3. VERIFICAÇÃO EM SEGUNDO PLANO ---
+# Começa assim que o perímetro é confirmado (home.py) e segue enquanto o usuário
+# navega pelas outras abas; um aviso abaixo do menu mostra o andamento e o resultado.
+
+_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="impedimentos")
+
+
+def _preparar(gdf):
+    g = corrigir_geometrias(gdf.copy())
+    if g.crs is None:
+        g = g.set_crs("EPSG:4326")
+    if g.crs != WFS_CRS:
+        g = g.to_crs(WFS_CRS)
+    return g
+
+
+def _assinatura(gdf_4674):
+    return hashlib.md5(gdf_4674.unary_union.wkb).hexdigest()
+
+
+def _verificar_um(srv, bbox, geom_uniao, crs_proj):
+    try:
+        gdf_wfs = consultar_servico(srv, bbox)
+        cols = WFS_COLUNAS.get(srv["typename"], [])
+        achou, gdf_res, msg = processar_camada(gdf_wfs, geom_uniao, crs_proj, cols)
+        return {"nome": srv["name"], "status": achou, "dados": gdf_res, "cor": srv["color"], "erro": msg}
+    except Exception as e:   # FonteIndisponivel ou erro inesperado: não verificada
+        return {"nome": srv["name"], "status": False, "dados": None, "cor": "#ccc",
+                "erro": str(e)[:200], "indisponivel": True}
+
+
+def _verificar(gdf_4674, prog):
+    """Consulta todas as fontes em paralelo. Roda fora do script: nada de st.* aqui."""
+    geom_uniao = gdf_4674.unary_union
+    crs_proj = calcular_epsg_utm(geom_uniao.centroid)
+    b = gdf_4674.total_bounds
+    bbox = f"{b[0]},{b[1]},{b[2]},{b[3]}"
+    por_nome = {}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {ex.submit(_verificar_um, s, bbox, geom_uniao, crs_proj): s for s in SERVICES_TO_CHECK}
+        for f in as_completed(futs):
+            por_nome[futs[f]["name"]] = f.result()
+            prog["feitos"] += 1
+    return [por_nome[s["name"]] for s in SERVICES_TO_CHECK]
+
+
+def _alvo():
+    for key in ('gdf_imovel', 'imovel_upload', 'gdf_perimetro', 'kml_data', 'gdf_data'):
+        v = st.session_state.get(key)
+        if isinstance(v, gpd.GeoDataFrame) and not v.empty:
+            return v
+    return None
+
+
+def iniciar_verificacao(gdf=None, forcar=False):
+    """Dispara a verificação do perímetro em segundo plano (uma vez por geometria)."""
+    gdf = gdf if gdf is not None else _alvo()
+    if gdf is None:
+        return None
+    g = _preparar(gdf)
+    sig = _assinatura(g)
+    job = st.session_state.get("imp_job")
+    if job and job["sig"] == sig and not forcar:
+        job["src_id"] = id(gdf)
+        return job
+    prog = {"feitos": 0}
+    job = {"sig": sig, "src_id": id(gdf), "prog": prog, "total": len(SERVICES_TO_CHECK),
+           "fut": _EXECUTOR.submit(_verificar, g, prog), "avisado": False}
+    st.session_state["imp_job"] = job
+    return job
+
+
+def _job_atual():
+    """Job do perímetro ativo (None se não há perímetro ou o job é de outro imóvel)."""
+    gdf = _alvo()
+    job = st.session_state.get("imp_job")
+    if gdf is None or not job:
+        return None
+    if job.get("src_id") == id(gdf):
+        return job
+    if job["sig"] == _assinatura(_preparar(gdf)):
+        job["src_id"] = id(gdf)
+        return job
+    return None
+
+
+def _resultados(job):
+    """Resultados prontos, ou None enquanto a verificação roda."""
+    if job is None or not job["fut"].done():
+        return None
+    try:
+        return job["fut"].result()
+    except Exception as e:
+        return [{"nome": s["name"], "status": False, "dados": None, "cor": "#ccc",
+                 "erro": str(e)[:200], "indisponivel": True} for s in SERVICES_TO_CHECK]
+
+
+def _separar(resultados):
+    return ([r for r in resultados if not _eh_mineracao(r)],
+            [r for r in resultados if _eh_mineracao(r)])
+
+
+def _fmt_ha(v):
+    return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _area_uniao(itens, crs_proj):
+    """Área (ha) da união das sobreposições: PRODES e DETER, por exemplo, se repetem."""
+    geoms = [g for r in itens if r.get("dados") is not None for g in r["dados"].geometry
+             if g is not None and not g.is_empty and g.geom_type not in ("Point", "MultiPoint")]
+    if not geoms:
+        return 0.0
+    return gpd.GeoSeries(geoms, crs=WFS_CRS).to_crs(crs_proj).unary_union.area / 1e4
+
+
+# --- 4. AVISO EM TODAS AS ABAS ---
+
+_ESTILO_AVISO = {
+    "rodando": "background:#eef4fb;border-left:4px solid #3b82c4;color:#1f4e79;",
+    "alerta": "background:#ffe6e6;border-left:4px solid #ff4b4b;color:#7a1010;",
+    "atencao": "background:#fff4e0;border-left:4px solid #e0a020;color:#6e4300;",
+    "ok": "background:#e6ffec;border-left:4px solid #28a745;color:#155724;",
+}
+
+
+def _faixa(tipo, html):
+    st.markdown(f'<div style="{_ESTILO_AVISO[tipo]}padding:9px 12px;border-radius:6px;'
+                f'font-size:14px;margin:4px 0 10px 0;">{html}</div>', unsafe_allow_html=True)
+
+
+def aviso_geral():
+    """Faixa abaixo do menu: andamento da verificação e, ao terminar, o resultado."""
+    job = _job_atual()
+    if job is None:
+        return
+    if not job["fut"].done():
+        _aviso_rodando()
+        return
+    res = _resultados(job)
+    socio, mine = _separar(res)
+    hits = [r for r in socio if r["status"]]
+    falhas = [r for r in res if r.get("indisponivel")]
+    n_min = sum(len(r["dados"]) for r in mine if r["status"])
+
+    if hits:
+        tipo = "alerta"
+        txt = "⚠️ <b>Este imóvel possui impedimentos:</b> " + ", ".join(r["nome"] for r in hits) + "."
+    elif falhas:
+        tipo = "atencao"
+        txt = (f"⚠️ Nenhum impedimento nas bases que responderam, mas {len(falhas)} fonte(s) "
+               "não foram verificadas.")
+    else:
+        tipo = "ok"
+        txt = "✅ Nenhum impedimento socioambiental encontrado."
+    if n_min:
+        txt += f" ⛏️ {n_min} processo(s) minerário(s) sobre a área."
+    _faixa(tipo, txt + " Detalhes na aba <b>Impedimentos</b>.")
+
+    if not job["avisado"]:
+        job["avisado"] = True
+        if hits:
+            st.toast(f"Imóvel com {len(hits)} impedimento(s). Veja a aba Impedimentos.", icon="⚠️")
+        elif n_min:
+            st.toast("Há processo minerário sobre o imóvel. Veja a aba Impedimentos.", icon="⛏️")
+        else:
+            st.toast("Verificação de impedimentos concluída.", icon="✅")
+
+
+@st.fragment(run_every=2)
+def _aviso_rodando():
+    job = st.session_state.get("imp_job")
+    if job is None:
+        return
+    if job["fut"].done():
+        st.rerun(scope="app")
+    _faixa("rodando", f"🔎 Verificando impedimentos em segundo plano… "
+                      f"{job['prog']['feitos']}/{job['total']} bases consultadas. "
+                      "Pode seguir usando as outras abas.")
+
+
+@st.fragment(run_every=1.5)
+def _progresso_tab():
+    job = st.session_state.get("imp_job")
+    if job is None:
+        return
+    if job["fut"].done():
+        st.rerun(scope="app")
+    f, t = job["prog"]["feitos"], job["total"]
+    st.progress(f / t, text=f"Consultando as bases oficiais… {f}/{t}")
+    st.caption("A verificação começou ao confirmar o perímetro e continua mesmo se você trocar de aba.")
+
+
+# --- 5. RENDERIZAÇÃO ---
+
+def _badge(item):
+    if item.get("indisponivel"):
+        return ('<div style="background-color:#fff4e0;padding:7px 10px;border-radius:6px;'
+                'border-left:4px solid #e0a020;margin-bottom:6px;font-size:14px;color:#6e4300;">'
+                f'⚠️ <b>{item["nome"]}</b> · fonte não respondeu, não verificada</div>')
+    if item["status"]:
+        return ('<div style="background-color:#ffe6e6;padding:7px 10px;border-radius:6px;'
+                'border-left:4px solid #ff4b4b;margin-bottom:6px;font-size:14px;color:#7a1010;">'
+                f'❌ <b>{item["nome"]}</b></div>')
+    return ('<div style="background-color:#e6ffec;padding:7px 10px;border-radius:6px;'
+            'border-left:4px solid #28a745;margin-bottom:6px;font-size:14px;color:#155724;">'
+            f'✅ <b>{item["nome"]}</b></div>')
+
+
+def _checklist_html(itens):
+    """Checklist agrupado por tema; cada grupo com seu título."""
+    por_nome = {r["nome"]: r for r in itens}
+    partes = []
+    for grupo, nomes in GRUPOS.items():
+        do_grupo = [por_nome[n] for n in nomes if n in por_nome]
+        if not do_grupo:
+            continue
+        partes.append('<div style="font-size:12px;font-weight:600;letter-spacing:.04em;'
+                      'text-transform:uppercase;opacity:.65;margin:10px 0 5px 0;">'
+                      f'{grupo}</div>')
+        partes.extend(_badge(r) for r in do_grupo)
+    return "".join(partes)
+
+
+def _mapa(gdf_alvo, itens, key, altura=400):
+    centro = [gdf_alvo.unary_union.centroid.y, gdf_alvo.unary_union.centroid.x]
+    m = folium.Map(location=centro, zoom_start=12, tiles="Esri World Imagery")
+    folium.GeoJson(
+        gdf_alvo, name="Imóvel",
+        style_function=lambda x: {'color': '#00FFFF', 'fillColor': '#00FFFF', 'fillOpacity': 0.1, 'weight': 2}
+    ).add_to(m)
+
+    for item in itens:
+        gdf_draw = item["dados"].drop(columns=['geom_original'], errors='ignore').copy()
+        is_point = gdf_draw.geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
+        for col in gdf_draw.columns:
+            if col == 'area_ha_sobreposta' and not is_point:
+                gdf_draw[col] = gdf_draw[col].round(4)
+            elif col != 'geometry' and (pd.api.types.is_datetime64_any_dtype(gdf_draw[col])
+                                        or gdf_draw[col].dtype == 'object'):
+                gdf_draw[col] = gdf_draw[col].astype(str)
+
+        cols_tooltip = [c for c in gdf_draw.columns if c != 'geometry']
+        if is_point and 'area_ha_sobreposta' in cols_tooltip:
+            cols_tooltip.remove('area_ha_sobreposta')
+        aliases = [COLUMN_ALIASES.get(c, c) for c in cols_tooltip]
+
+        folium.GeoJson(
+            gdf_draw, name=item["nome"],
+            style_function=lambda x, c=item["cor"]: {'color': c, 'fillColor': c, 'fillOpacity': 0.5, 'weight': 1},
+            tooltip=folium.GeoJsonTooltip(fields=cols_tooltip[:5], aliases=aliases[:5], sticky=True)
+            if cols_tooltip else None
+        ).add_to(m)
+
+    b = gdf_alvo.total_bounds
+    m.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
+    folium.LayerControl().add_to(m)
+    st_folium(m, height=altura, use_container_width=True, key=key)
+
+
+def _tabela(item):
+    df = pd.DataFrame(item["dados"].drop(columns=['geometry', 'geom_original'], errors='ignore'))
+    if item["dados"].geometry.iloc[0].geom_type in ['Point', 'MultiPoint']:
+        df = df.drop(columns=['area_ha_sobreposta'], errors='ignore')
+    return df.rename(columns=COLUMN_ALIASES)
+
+
+def _bloco_matriculas(socio):
+    feats = st.session_state.get('gdf_features')
+    df_mat = _impedimentos_por_matricula(socio, feats)
+    if df_mat.empty:
+        return
+    ui.secao("🗂️ Impedimentos por matrícula")
+    n_mat = df_mat["Matrícula"].nunique()
+    area_tot = float(df_mat["Área sobreposta (ha)"].sum())
+    st.caption(
+        f"Os impedimentos atingem **{n_mat}** matrícula(s) · área sobreposta "
+        f"total **{_fmt_ha(area_tot)} ha**. Cada linha é um impedimento sobre a "
+        "matrícula indicada, com a área invadida (ha) e o quanto representa dela (%). "
+        "Pontos (sem área) entram com 0."
+    )
+    roll = (df_mat.groupby("Matrícula").agg(Impedimentos=("Fonte", "count")).reset_index())
+    _a = df_mat.groupby("Matrícula")["Área sobreposta (ha)"].sum().round(4).reset_index()
+    roll = roll.merge(_a, on="Matrícula")
+    st.dataframe(roll, use_container_width=True, hide_index=True)
+    with st.expander("Ver impedimentos detalhados (um por matrícula atingida)"):
+        st.dataframe(df_mat, use_container_width=True, hide_index=True)
+        _buf = BytesIO()
+        with pd.ExcelWriter(_buf, engine="xlsxwriter") as _w:
+            df_mat.to_excel(_w, index=False, sheet_name="Impedimentos")
+            roll.to_excel(_w, index=False, sheet_name="Resumo por matrícula")
+        st.download_button(
+            "📥 Baixar impedimentos por matrícula (Excel)",
+            data=_buf.getvalue(),
+            file_name="impedimentos_por_matricula.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True, key="dl_imp_matricula")
+
+
+def _secao_socioambiental(socio, gdf_alvo, crs_proj, area_imovel):
+    hits = [r for r in socio if r["status"]]
+    falhas = [r for r in socio if r.get("indisponivel")]
+
+    ui.secao("🌳 Impedimentos socioambientais")
+    if not hits and not falhas:
+        st.success("✅ **Nada consta**: nenhuma sobreposição nas bases consultadas.")
+    elif not hits:
+        st.warning(f"⚠️ **Nada consta nas bases que responderam**, mas {len(falhas)} fonte(s) não "
+                   "responderam agora e **não foram verificadas**: "
+                   + ", ".join(f["nome"] for f in falhas) + ". Use “Verificar de novo” em instantes.")
+    else:
+        area = _area_uniao(hits, crs_proj)
+        pct = f" ({_fmt_ha(area / area_imovel * 100)}% do imóvel)" if area_imovel > 0 else ""
+        st.error(f"⚠️ **{len(hits)} impedimento(s)** sobre o imóvel · área atingida "
+                 f"**{_fmt_ha(area)} ha**{pct}.")
+        if falhas:
+            st.warning(f"{len(falhas)} fonte(s) não responderam e não foram verificadas: "
+                       + ", ".join(f["nome"] for f in falhas) + ".")
+
+    if not hits:
+        with st.container(border=True, height=430):
+            st.markdown(_checklist_html(socio), unsafe_allow_html=True)
+        return
+
+    _bloco_matriculas(socio)
+
+    col_check, col_mapa = st.columns([0.42, 0.58], gap="medium")
+    with col_check:
+        with st.container(border=True, height=470):
+            ui.secao("Checklist de verificação")
+            st.markdown(_checklist_html(socio), unsafe_allow_html=True)
+    with col_mapa:
+        with st.container(border=True, height=470):
+            ui.secao("Localização das sobreposições")
+            _mapa(gdf_alvo, hits, key="imp_map")
+
+    ui.secao("Detalhamento técnico")
+    abas = st.tabs([f"🔴 {h['nome']}" for h in hits])
+    for aba, item in zip(abas, hits):
+        with aba:
+            st.dataframe(_tabela(item), use_container_width=True, hide_index=True)
+
+
+def _secao_mineracao(mine, gdf_alvo, crs_proj, area_imovel):
+    ui.secao("⛏️ Mineração (ANM / SIGMINE)")
+    st.caption("Processos minerários registrados na ANM sobre a área. Não são restrição ambiental: "
+               "indicam direito de terceiro (pesquisa ou lavra) sobre o subsolo, que pode gerar "
+               "servidão e afetar o uso e o valor do imóvel.")
+    if not mine:
+        return
+    item = mine[0]
+    if item.get("indisponivel"):
+        st.warning("⚠️ A base da ANM não respondeu agora; mineração **não verificada**. "
+                   "Use “Verificar de novo” em instantes.")
+        return
+    if not item["status"]:
+        st.success("✅ Nenhum processo minerário ativo sobre o imóvel.")
+        return
+
+    dados = item["dados"]
+    area = _area_uniao([item], crs_proj)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Processos sobre o imóvel", len(dados))
+    c2.metric("Área atingida", f"{_fmt_ha(area)} ha")
+    if area_imovel > 0:
+        c3.metric("% do imóvel", f"{_fmt_ha(area / area_imovel * 100)}%")
+
+    col_tab, col_mapa = st.columns([0.5, 0.5], gap="medium")
+    with col_tab:
+        st.dataframe(_tabela(item), use_container_width=True, hide_index=True,
+                     height=min(360, 38 + 35 * len(dados)))
+    with col_mapa:
+        _mapa(gdf_alvo, [item], key="imp_map_min", altura=360)
+
 
 def render_tab():
-    st.markdown("### Análise de Impedimentos Socioambientais")
-    
-    gdf_alvo = None
-    
-    possible_keys = ['gdf_imovel', 'imovel_upload', 'gdf_perimetro', 'kml_data', 'gdf_data']
-    for key in possible_keys:
-        if key in st.session_state and isinstance(st.session_state[key], gpd.GeoDataFrame):
-            # Usamos o .copy() para não sujar a variável global acidentalmente
-            gdf_alvo = st.session_state[key].copy()
-            break
+    st.markdown("### Análise de Impedimentos")
 
-    if gdf_alvo is None:
+    gdf = _alvo()
+    if gdf is None:
         ui.vazio()
         return
-        
-    # =======================================================
-    # APLICA A FAXINA AQUI NO TOPO! 
-    # Assim o KML fica limpo para o Botão E para o Mapa.
-    # =======================================================
-    gdf_alvo = corrigir_geometrias(gdf_alvo)
+    gdf_alvo = _preparar(gdf)
+    ui.barra_imovel(nome=st.session_state.get('last_code', 'Imóvel Carregado'))
 
-    codigo_display = st.session_state.get('last_code', 'Imóvel Carregado')
-    ui.barra_imovel(nome=codigo_display)
+    job = _job_atual() or iniciar_verificacao(gdf)
+    if not job["fut"].done():
+        _progresso_tab()
+        return
+    job["avisado"] = True   # quem está nesta aba já vê o resultado
 
-    if 'impedimentos_done' not in st.session_state: st.session_state['impedimentos_done'] = False
-    if 'impedimentos_results' not in st.session_state: st.session_state['impedimentos_results'] = []
-    
-    if st.button("🚫 Verificar Sobreposições", type="primary", use_container_width=True):
-        
-        if gdf_alvo.crs != WFS_CRS: gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
-        
-        geom_uniao = gdf_alvo.unary_union
-        crs_proj = calcular_epsg_utm(geom_uniao.centroid)
-        bounds = gdf_alvo.total_bounds
-        bbox = f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}"
-        
-        resultados = []
-        bar = st.progress(0, text="Conectando aos serviços...")
-        total = len(SERVICES_TO_CHECK)
-        
-        for i, srv in enumerate(SERVICES_TO_CHECK):
-            bar.progress(int(((i+1)/total)*100), text=f"Verificando: {srv['name']}...")
-            
-            try:
-                gdf_wfs = consultar_servico(srv, bbox)
-                cols = WFS_COLUNAS.get(srv["typename"], [])
-                achou, gdf_res, msg = processar_camada(gdf_wfs, geom_uniao, crs_proj, cols)
+    res = _resultados(job)
+    socio, mine = _separar(res)
+    geom_uniao = gdf_alvo.unary_union
+    crs_proj = calcular_epsg_utm(geom_uniao.centroid)
+    area_imovel = gpd.GeoSeries([geom_uniao], crs=WFS_CRS).to_crs(crs_proj).area.iloc[0] / 1e4
 
-                resultados.append({
-                    "nome": srv["name"], "status": achou, "dados": gdf_res, "cor": srv["color"], "erro": msg
-                })
-            except FonteIndisponivel as e:
-                resultados.append({"nome": srv["name"], "status": False, "dados": None, "cor": "#ccc",
-                                   "erro": str(e), "indisponivel": True})
-            except Exception as e:
-                resultados.append({"nome": srv["name"], "status": False, "dados": None, "cor": "#ccc",
-                                   "erro": str(e)[:200], "indisponivel": True})
+    c_txt, c_btn = st.columns([0.72, 0.28], vertical_alignment="center")
+    with c_txt:
+        n_ok = sum(1 for r in res if not r.get("indisponivel"))
+        st.caption(f"Verificação automática ao confirmar o perímetro · {n_ok}/{len(res)} bases responderam.")
+    with c_btn:
+        if st.button("🔄 Verificar de novo", use_container_width=True):
+            iniciar_verificacao(gdf, forcar=True)
+            st.rerun()
 
-        bar.empty()
-        st.session_state['impedimentos_results'] = resultados
-        st.session_state['impedimentos_done'] = True
-        st.rerun()
-
-    # --- EXIBIÇÃO ---
-    if st.session_state['impedimentos_done']:
-        resultados = st.session_state['impedimentos_results']
-        hits = [r for r in resultados if r["status"]]
-        n_hits = len(hits)
-        falhas = [r for r in resultados if r.get("indisponivel")]
-
-        st.divider()
-
-        # Resumo com severidade no topo (a resposta principal aparece primeiro).
-        if n_hits == 0 and not falhas:
-            st.success("✅ **Nada consta** — nenhuma sobreposição nas bases consultadas.")
-        elif n_hits == 0:
-            st.warning(f"⚠️ **Nada consta nas bases que responderam**, mas {len(falhas)} fonte(s) não "
-                       "responderam agora e **não foram verificadas**: "
-                       + ", ".join(f["nome"] for f in falhas) + ". Clique em verificar de novo em instantes.")
-        else:
-            st.error(f"⚠️ **{n_hits} sobreposição(ões)** encontrada(s) — veja o detalhamento abaixo.")
-            if falhas:
-                st.warning(f"{len(falhas)} fonte(s) não responderam e não foram verificadas: "
-                           + ", ".join(f["nome"] for f in falhas) + ".")
-
-        def _badge(item):
-            if item.get("indisponivel"):
-                return ('<div style="background-color:#fff4e0;padding:8px 10px;border-radius:6px;'
-                        'border-left:4px solid #e0a020;margin-bottom:8px;font-size:14px;color:#6e4300;">'
-                        f'⚠️ <b>{item["nome"]}</b> · fonte não respondeu, não verificada</div>')
-            if item["status"]:
-                return ('<div style="background-color:#ffe6e6;padding:8px 10px;border-radius:6px;'
-                        'border-left:4px solid #ff4b4b;margin-bottom:8px;font-size:14px;">'
-                        f'❌ <b>{item["nome"]}</b></div>')
-            return ('<div style="background-color:#e6ffec;padding:8px 10px;border-radius:6px;'
-                    'border-left:4px solid #28a745;margin-bottom:8px;font-size:14px;color:#155724;">'
-                    f'✅ <b>{item["nome"]}</b></div>')
-
-        # Sem sobreposição: só o checklist (tudo verde), num painel rolável.
-        if n_hits == 0:
-            with st.container(border=True, height=430):
-                ui.secao("Checklist de verificação")
-                st.markdown("".join(_badge(r) for r in resultados), unsafe_allow_html=True)
-            return
-
-        # --- Impedimentos por matrícula (imóvel com várias matrículas) ---
-        feats = st.session_state.get('gdf_features')
-        df_mat = _impedimentos_por_matricula(resultados, feats)
-        if not df_mat.empty:
-            ui.secao("🗂️ Impedimentos por matrícula")
-            n_mat = df_mat["Matrícula"].nunique()
-            area_tot = float(df_mat["Área sobreposta (ha)"].sum())
-            st.caption(
-                f"Os impedimentos atingem **{n_mat}** matrícula(s) · área sobreposta "
-                f"total **{f'{area_tot:.2f}'.replace('.', ',')} ha**. Cada linha é um "
-                "impedimento sobre a matrícula indicada, com a área invadida (ha) e o "
-                "quanto representa dela (%). Pontos (sem área) entram com 0."
-            )
-            roll = (df_mat.groupby("Matrícula")
-                          .agg(Impedimentos=("Fonte", "count")).reset_index())
-            _a = (df_mat.groupby("Matrícula")["Área sobreposta (ha)"]
-                        .sum().round(4).reset_index())
-            roll = roll.merge(_a, on="Matrícula")
-            st.dataframe(roll, use_container_width=True, hide_index=True)
-            with st.expander("Ver impedimentos detalhados (um por matrícula atingida)"):
-                st.dataframe(df_mat, use_container_width=True, hide_index=True)
-                _buf = BytesIO()
-                with pd.ExcelWriter(_buf, engine="xlsxwriter") as _w:
-                    df_mat.to_excel(_w, index=False, sheet_name="Impedimentos")
-                    roll.to_excel(_w, index=False, sheet_name="Resumo por matrícula")
-                st.download_button(
-                    "📥 Baixar impedimentos por matrícula (Excel)",
-                    data=_buf.getvalue(),
-                    file_name="impedimentos_por_matricula.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True, key="dl_imp_matricula")
-            st.divider()
-
-        # Com sobreposição: checklist e mapa LADO A LADO (painéis de altura fixa),
-        # e o detalhamento em ABAS (uma por fonte) em vez de uma pilha de tabelas.
-        col_check, col_mapa = st.columns([0.42, 0.58], gap="medium")
-
-        with col_check:
-            with st.container(border=True, height=470):
-                ui.secao("Checklist de verificação")
-                st.markdown("".join(_badge(r) for r in resultados), unsafe_allow_html=True)
-
-        with col_mapa:
-            with st.container(border=True, height=470):
-                ui.secao("Localização das sobreposições")
-
-                if gdf_alvo.crs != WFS_CRS:
-                    gdf_alvo = gdf_alvo.to_crs(WFS_CRS)
-                centro = [gdf_alvo.unary_union.centroid.y, gdf_alvo.unary_union.centroid.x]
-
-                m = folium.Map(location=centro, zoom_start=12, tiles="Esri World Imagery")
-                folium.GeoJson(
-                    gdf_alvo, name="Imóvel",
-                    style_function=lambda x: {'color': '#00FFFF', 'fillColor': '#00FFFF', 'fillOpacity': 0.1, 'weight': 2}
-                ).add_to(m)
-
-                for item in hits:
-                    gdf_draw = item["dados"].copy()
-                    is_point = gdf_draw.geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
-
-                    for col in gdf_draw.columns:
-                        if col == 'area_ha_sobreposta' and not is_point:
-                            gdf_draw[col] = gdf_draw[col].round(4)
-                        elif pd.api.types.is_datetime64_any_dtype(gdf_draw[col]) or gdf_draw[col].dtype == 'object':
-                            gdf_draw[col] = gdf_draw[col].astype(str)
-
-                    aliases_map = {k: v for k, v in COLUMN_ALIASES.items() if k in gdf_draw.columns}
-                    cols_tooltip = [c for c in gdf_draw.columns if c not in ['geometry', 'geom_original']]
-                    if is_point and 'area_ha_sobreposta' in cols_tooltip:
-                        cols_tooltip.remove('area_ha_sobreposta')
-                    tooltips_aliased = [aliases_map.get(c, c) for c in cols_tooltip]
-
-                    folium.GeoJson(
-                        gdf_draw, name=item["nome"],
-                        style_function=lambda x, c=item["cor"]: {'color': c, 'fillColor': c, 'fillOpacity': 0.5, 'weight': 1},
-                        tooltip=folium.GeoJsonTooltip(
-                            fields=cols_tooltip[:5], aliases=tooltips_aliased[:5], sticky=True
-                        ) if cols_tooltip else None
-                    ).add_to(m)
-
-                folium.LayerControl().add_to(m)
-                st_folium(m, height=400, use_container_width=True, key="imp_map")
-
-        ui.secao("Detalhamento técnico")
-        abas = st.tabs([f"🔴 {h['nome']}" for h in hits])
-        for aba, item in zip(abas, hits):
-            with aba:
-                df_show = pd.DataFrame(item["dados"].drop(columns=['geometry'], errors='ignore'))
-                is_point_table = item["dados"].geometry.iloc[0].geom_type in ['Point', 'MultiPoint']
-                if is_point_table and 'area_ha_sobreposta' in df_show.columns:
-                    df_show = df_show.drop(columns=['area_ha_sobreposta'])
-                df_show = df_show.rename(columns=COLUMN_ALIASES)
-                st.dataframe(df_show, use_container_width=True, hide_index=True)
+    _secao_socioambiental(socio, gdf_alvo, crs_proj, area_imovel)
+    st.divider()
+    _secao_mineracao(mine, gdf_alvo, crs_proj, area_imovel)
