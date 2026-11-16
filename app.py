@@ -348,18 +348,24 @@ components.html(
             + 'ul.nav>li{width:auto!important;max-width:none!important;}'
             + 'ul.nav .nav-link.active i{color:#fff!important;}'
             + '@media (max-width:1000px){ul.nav:has(>li:nth-child(5)){grid-auto-flow:row;grid-template-columns:repeat(4,1fr);}}'
-            + '@media (max-width:480px){ul.nav{grid-auto-flow:row;grid-template-columns:repeat(2,1fr);}'
-            + 'ul.nav .nav-link{font-size:13px!important;padding:9px 6px!important;}}';
+            // mesma especificidade da regra de 4 colunas (:has com nth-child) e vem
+            // depois, então vence no celular
+            + '@media (max-width:480px){ul.nav:has(>li:nth-child(1)){grid-auto-flow:row;grid-template-columns:repeat(2,minmax(0,1fr));}'
+            + 'ul.nav .nav-link{font-size:13px!important;padding:9px 4px!important;gap:4px!important;overflow:hidden;}}'
+            + '@media (max-width:300px){ul.nav .nav-link{font-size:11.5px!important;}}';
 
         function fixOne(iframe) {
             try {
                 iframe.style.width = '100%';
                 var innerDoc = iframe.contentDocument;
-                if (innerDoc && innerDoc.head && !innerDoc.getElementById('geocaputi-menu-css')) {
-                    var st = innerDoc.createElement('style');
-                    st.id = 'geocaputi-menu-css';
-                    st.textContent = CSS_MENU;
-                    innerDoc.head.appendChild(st);
+                if (innerDoc && innerDoc.head) {
+                    var st = innerDoc.getElementById('geocaputi-menu-css');
+                    if (!st) {
+                        st = innerDoc.createElement('style');
+                        st.id = 'geocaputi-menu-css';
+                        innerDoc.head.appendChild(st);
+                    }
+                    if (st.textContent !== CSS_MENU) { st.textContent = CSS_MENU; }
                 }
                 var ul = innerDoc ? innerDoc.querySelector('ul.nav') : null;
                 var h = ul ? ul.getBoundingClientRect().height : 0;
