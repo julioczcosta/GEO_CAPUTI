@@ -737,8 +737,9 @@ def _municipios_info():
 def _sedes_municipios():
     """{cod_ibge: {lat, lon, alt}} da sede municipal (IBGE, Localidades 2010,
     categoria CIDADE; dados/sedes_municipios.csv). Embutido porque a camada de
-    sedes do geoserver do IBGE está atrás do Cloudflare (HTTP 403). Faltam só
-    os 6 municípios criados depois de 2010."""
+    sedes do geoserver do IBGE está atrás do Cloudflare (HTTP 403). Os 6
+    municípios criados depois de 2010 (fora dessa base) vêm do ponto de cidade
+    do OpenStreetMap, com altitude do SRTM."""
     p = os.path.join(os.path.dirname(__file__), "dados", "sedes_municipios.csv")
     try:
         df = pd.read_csv(p, dtype={"cd_mun": str})
