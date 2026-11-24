@@ -1,4 +1,5 @@
 import os
+import gzip
 import json
 import threading
 import time
@@ -9,6 +10,7 @@ import utils
 import ui
 import ee
 import requests
+from shapely import prepare as _prepare
 from shapely.geometry import shape as _shape, Point as _Point
 
 
@@ -18,31 +20,43 @@ def _biomas_poligonos():
 
     O geoserver do IBGE (CREN:bioma_vazado) caiu atrás do Cloudflare (HTTP 403),
     então o bioma passa a ser resolvido por ponto-em-polígono num geojson embutido
-    (dados/biomas_br.geojson). Fonte: IBGE, Biomas 1:5.000.000.
+    (dados/biomas_br_250mil.geojson.gz). Fonte: IBGE, Biomas 1:250.000 (2019) —
+    a mesma base usada no QGIS — simplificada em ~110 m sem abrir vãos entre
+    biomas (coverage_simplify). A de 1:5.000.000 errava na transição (Holambra-SP).
     """
-    p = os.path.join(os.path.dirname(__file__), "dados", "biomas_br.geojson")
+    p = os.path.join(os.path.dirname(__file__), "dados", "biomas_br_250mil.geojson.gz")
     out = []
     try:
-        with open(p, encoding="utf-8") as f:
+        with gzip.open(p, "rt", encoding="utf-8") as f:
             gj = json.load(f)
         for feat in gj.get("features", []):
             nome = (feat.get("properties") or {}).get("bioma")
             geom = _shape(feat["geometry"])
             if nome and geom is not None and not geom.is_empty:
+                _prepare(geom)  # consulta ponto-em-polígono rápida (polígonos grandes)
                 out.append((nome, geom))
     except Exception:
         pass
     return out
 
 
+# Ponto num vão da simplificação ou logo além da linha de costa: vale o bioma
+# mais próximo até essa distância (graus, ~2 km).
+DIST_BIOMA_PROXIMO = 0.02
+
+
 def _bioma_no_ponto(lat, lon):
     pt = _Point(lon, lat)
-    for nome, geom in _biomas_poligonos():
+    polis = _biomas_poligonos()
+    for nome, geom in polis:
         try:
-            if geom.contains(pt) or geom.intersects(pt):
+            if geom.intersects(pt):
                 return nome
         except Exception:
             continue
+    dists = [(geom.distance(pt), nome) for nome, geom in polis]
+    if dists and min(dists)[0] <= DIST_BIOMA_PROXIMO:
+        return min(dists)[1]
     return "Não identificado"
 
 
