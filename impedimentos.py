@@ -136,11 +136,15 @@ WFS_COLUNAS = {
 }
 
 # INPE/TerraBrasilis: um geoserver por bioma. O imóvel só cruza o(s) do seu bioma;
-# os demais respondem vazio em ~0,3 s.
+# os demais respondem vazio em ~0,3 s. A Amazônia Legal (que contém todo o bioma
+# Amazônia) e o Cerrado se sobrepõem em MA, TO e MT: por isso as duas são consultadas.
+# "Resíduo" = desmatamento de anos anteriores só identificado depois (nuvem etc.).
 _TB = "https://terrabrasilis.dpi.inpe.br/geoserver"
-CAMADAS_PRODES = [
-    ("Amazônia", f"{_TB}/prodes-amazon-nb/ows", "prodes-amazon-nb:yearly_deforestation_biome"),
-    ("Cerrado", f"{_TB}/prodes-cerrado-nb/ows", "prodes-cerrado-nb:yearly_deforestation"),
+PRODES_AMZ_LEGAL = [("Amazônia Legal", f"{_TB}/prodes-legal-amz/ows", "prodes-legal-amz:yearly_deforestation")]
+PRODES_CERRADO = [("Cerrado", f"{_TB}/prodes-cerrado-nb/ows", "prodes-cerrado-nb:yearly_deforestation")]
+PRODES_RES_AMZ_LEGAL = [("Amazônia Legal", f"{_TB}/prodes-legal-amz/ows", "prodes-legal-amz:residual")]
+PRODES_RES_CERRADO = [("Cerrado", f"{_TB}/prodes-cerrado-nb/ows", "prodes-cerrado-nb:residual")]
+PRODES_OUTROS = [
     ("Caatinga", f"{_TB}/prodes-caatinga-nb/ows", "prodes-caatinga-nb:yearly_deforestation"),
     ("Mata Atlântica", f"{_TB}/prodes-mata-atlantica-nb/ows", "prodes-mata-atlantica-nb:yearly_deforestation"),
     ("Pantanal", f"{_TB}/prodes-pantanal-nb/ows", "prodes-pantanal-nb:yearly_deforestation"),
@@ -184,7 +188,16 @@ SERVICES_TO_CHECK = [
     { "name": "Territórios Quilombolas (INCRA)", "base_url": _CMR, "typename": "CMR-PUBLICO:lim_quilombolas_a", "color": "#6A1B9A" },
     { "name": "Assentamentos (INCRA)", "base_url": _CMR, "typename": "CMR-PUBLICO:lim_assentamento_rural_a", "color": "#E91E63" },
     # INPE
-    { "name": "Desmatamento após 2008 (PRODES/INPE)", "tipo": "prodes", "typename": "prodes", "color": "#FF8C00", "timeout": 40 },
+    { "name": "PRODES Amazônia Legal (INPE)", "tipo": "prodes", "typename": "prodes",
+      "camadas": PRODES_AMZ_LEGAL, "color": "#FF8C00", "timeout": 40 },
+    { "name": "PRODES Cerrado (INPE)", "tipo": "prodes", "typename": "prodes",
+      "camadas": PRODES_CERRADO, "color": "#E65100", "timeout": 40 },
+    { "name": "PRODES Resíduo Amazônia Legal (INPE)", "tipo": "prodes", "typename": "prodes",
+      "camadas": PRODES_RES_AMZ_LEGAL, "color": "#FFB74D", "timeout": 40 },
+    { "name": "PRODES Resíduo Cerrado (INPE)", "tipo": "prodes", "typename": "prodes",
+      "camadas": PRODES_RES_CERRADO, "color": "#BF360C", "timeout": 40 },
+    { "name": "PRODES demais biomas (INPE)", "tipo": "prodes", "typename": "prodes",
+      "camadas": PRODES_OUTROS, "color": "#F57C00", "timeout": 40 },
     { "name": "Alertas de Desmatamento (DETER/INPE)", "tipo": "deter", "typename": "deter", "color": "#FFD000", "timeout": 40 },
     # Serviço Florestal Brasileiro: só Tipo B (glebas públicas ainda não destinadas);
     # o Tipo A repete TI, UC e assentamentos, que já são verificados acima.
@@ -200,7 +213,9 @@ SERVICES_TO_CHECK = [
 GRUPO_MINERACAO = "Mineração"
 GRUPOS = {
     "Embargos e autuações": ["Embargo IBAMA", "Embargo ICMBio", "Autos Infração ICMBio"],
-    "Desmatamento": ["Desmatamento após 2008 (PRODES/INPE)", "Alertas de Desmatamento (DETER/INPE)"],
+    "Desmatamento após 2008": ["PRODES Amazônia Legal (INPE)", "PRODES Cerrado (INPE)",
+                               "PRODES Resíduo Amazônia Legal (INPE)", "PRODES Resíduo Cerrado (INPE)",
+                               "PRODES demais biomas (INPE)", "Alertas de Desmatamento (DETER/INPE)"],
     "Áreas protegidas e florestas públicas": ["UCs ICMBio", "UCs MMA", "Florestas Públicas Não Destinadas (SFB)"],
     "Povos e comunidades tradicionais": ["Terras Indígenas (Polígonos)", "Terras Indígenas (Pontos)",
                                          "Aldeias Indígenas", "Territórios Quilombolas (INCRA)"],
@@ -290,10 +305,10 @@ def _num(v):
         return None
 
 
-def _baixar_prodes(bbox, timeout):
-    """Desmatamento anual PRODES de todos os biomas no bbox, só após o marco de 2008."""
+def _baixar_prodes(camadas, bbox, timeout):
+    """Desmatamento (ou resíduo) PRODES das camadas no bbox, só após o marco de 2008."""
     partes = []
-    for bioma, url, typ in CAMADAS_PRODES:
+    for bioma, url, typ in camadas:
         g = baixar_wfs(url, _params_wfs(typ, bbox, extra={"outputFormat": "application/json"}), timeout)
         if g.empty:
             continue
@@ -304,10 +319,14 @@ def _baixar_prodes(bbox, timeout):
         return gpd.GeoDataFrame()
     g = gpd.GeoDataFrame(pd.concat(partes, ignore_index=True), crs=partes[0].crs)
     g["ano_desmat"] = g["year"].map(_num) if "year" in g else None
-    if "main_class" in g:
-        g = g[g["main_class"].astype(str).str.upper().str.contains("DESMATAMENTO")]
+    classe = g["main_class"].astype(str).str.upper() if "main_class" in g else pd.Series("", index=g.index)
+    residuo = classe.str.contains("RESIDUO")
+    g = g[classe.str.contains("DESMATAMENTO") | residuo]
     g = g[g["ano_desmat"].notna() & (g["ano_desmat"] >= ANO_MARCO_PRODES)].copy()
-    g["rotulo_desmat"] = "Desmatamento " + g["ano_desmat"].astype(int).astype(str)
+    if g.empty:
+        return gpd.GeoDataFrame()
+    g["rotulo_desmat"] = (residuo.loc[g.index].map({True: "Resíduo ", False: "Desmatamento "})
+                          + g["ano_desmat"].astype(int).astype(str))
     g["apos_2020"] = g["ano_desmat"].map(lambda a: "Sim" if a and a >= 2021 else "Não")
     return g
 
@@ -362,7 +381,7 @@ def consultar_servico(srv, bbox):
     timeout = srv.get("timeout", 15)
     tipo = srv.get("tipo", "wfs")
     if tipo == "prodes":
-        return _baixar_prodes(bbox, timeout)
+        return _baixar_prodes(srv["camadas"], bbox, timeout)
     if tipo == "deter":
         return _baixar_deter(bbox, timeout)
     if tipo == "arcgis":
@@ -407,6 +426,9 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
     if gdf_fonte.crs != WFS_CRS: gdf_fonte = gdf_fonte.to_crs(WFS_CRS)
     # fontes como o PRODES trazem polígonos inválidos (auto-interseção)
     gdf_fonte = gdf_fonte.set_geometry(shapely.make_valid(gdf_fonte.geometry.values))
+    dims = shapely.get_dimensions(gdf_fonte.geometry.values)
+    if (dims == 2).any():   # camada de polígonos: polígono degenerado (virou linha) sai
+        gdf_fonte = gdf_fonte[dims == 2]
 
     try:
         gdf_inter = gdf_fonte[gdf_fonte.intersects(aoi_geom)].copy()
@@ -417,7 +439,10 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
     try:
         gdf_inter['geom_original'] = gdf_inter.geometry
         gdf_inter['geometry'] = gdf_inter.geometry.intersection(aoi_geom).apply(_sem_colecao)
-        gdf_inter = gdf_inter[~gdf_inter.geometry.is_empty]
+        # polígono que só encosta na divisa vira linha/ponto: não é sobreposição
+        perdeu_dim = (shapely.get_dimensions(gdf_inter.geometry.values)
+                      < shapely.get_dimensions(gdf_inter['geom_original'].values))
+        gdf_inter = gdf_inter[~gdf_inter.geometry.is_empty & ~perdeu_dim]
         if gdf_inter.empty: return False, None, "Sem interseção"
         gdf_proj = gdf_inter.to_crs(aoi_crs_proj)
         gdf_inter['area_ha_sobreposta'] = gdf_proj.geometry.area / 10000
