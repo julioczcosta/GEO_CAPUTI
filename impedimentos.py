@@ -11,6 +11,7 @@ import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shapely import wkb
+import shapely
 
 # A verificação roda em threads (segundo plano); as funções com st.cache_data
 # chamadas de lá avisam "missing ScriptRunContext", o que é inofensivo.
@@ -389,6 +390,8 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
 
     if gdf_fonte.crs is None: gdf_fonte.set_crs(WFS_CRS, allow_override=True, inplace=True)
     if gdf_fonte.crs != WFS_CRS: gdf_fonte = gdf_fonte.to_crs(WFS_CRS)
+    # fontes como o PRODES trazem polígonos inválidos (auto-interseção)
+    gdf_fonte = gdf_fonte.set_geometry(shapely.make_valid(gdf_fonte.geometry.values))
 
     try:
         gdf_inter = gdf_fonte[gdf_fonte.intersects(aoi_geom)].copy()
@@ -600,7 +603,15 @@ def _area_uniao(itens, crs_proj):
              if g is not None and not g.is_empty and g.geom_type not in ("Point", "MultiPoint")]
     if not geoms:
         return 0.0
-    return gpd.GeoSeries(geoms, crs=WFS_CRS).to_crs(crs_proj).unary_union.area / 1e4
+    proj = gpd.GeoSeries(geoms, crs=WFS_CRS).to_crs(crs_proj).values
+    # só a parte de área (recortes podem trazer linhas/pontos) e válida após reprojetar
+    poli = shapely.make_valid(proj)
+    for _ in range(3):   # desaninha GeometryCollection > MultiPolygon > Polygon
+        poli = shapely.get_parts(poli)
+    poli = poli[shapely.get_type_id(poli) == 3]   # Polygon
+    if not len(poli):
+        return 0.0
+    return shapely.union_all(poli).area / 1e4
 
 
 # --- 4. AVISO EM TODAS AS ABAS ---
