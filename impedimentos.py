@@ -385,6 +385,21 @@ def consultar_servico(srv, bbox):
     params = _params_wfs(srv["typename"], bbox, srv.get("version", "2.0.0"), srv.get("special_params"))
     return baixar_wfs(srv["base_url"], params, timeout)
 
+def _sem_colecao(g):
+    """GeometryCollection (recorte que gera polígono + linha solta) -> só as partes de
+    maior dimensão; o folium não desenha coleções."""
+    if g is None or g.geom_type != "GeometryCollection":
+        return g
+    partes = shapely.get_parts(g)
+    for _ in range(2):   # coleção dentro de coleção / multi
+        partes = shapely.get_parts(partes)
+    partes = partes[~shapely.is_empty(partes)]
+    if not len(partes):
+        return shapely.Polygon()
+    dims = shapely.get_dimensions(partes)
+    return shapely.union_all(partes[dims == dims.max()])
+
+
 def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
     if gdf_fonte.empty: return False, None, "Sem dados na fonte"
 
@@ -401,7 +416,9 @@ def processar_camada(gdf_fonte, aoi_geom, aoi_crs_proj, colunas):
 
     try:
         gdf_inter['geom_original'] = gdf_inter.geometry
-        gdf_inter['geometry'] = gdf_inter.geometry.intersection(aoi_geom)
+        gdf_inter['geometry'] = gdf_inter.geometry.intersection(aoi_geom).apply(_sem_colecao)
+        gdf_inter = gdf_inter[~gdf_inter.geometry.is_empty]
+        if gdf_inter.empty: return False, None, "Sem interseção"
         gdf_proj = gdf_inter.to_crs(aoi_crs_proj)
         gdf_inter['area_ha_sobreposta'] = gdf_proj.geometry.area / 10000
     except Exception:
