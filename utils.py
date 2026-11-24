@@ -661,6 +661,22 @@ def _obter_municipios_interseccao_cached(_geom_gee, cache_id):
 
 @st.cache_data(show_spinner=False)
 def get_altimetria_municipio(cod_ibge, lat_fallback, lon_fallback):
+    # Altitude da SEDE (IBGE, Localidades 2010) — é a que vai no texto do laudo.
+    sede = get_sede_municipio(cod_ibge)
+    if sede:
+        alt = _num_ou_none(sede.get("alt"))
+        if alt is not None and alt > 0:
+            return {"media": alt, "fonte": "sede"}
+        # 5 sedes do litoral vêm com 0 no IBGE (campo vazio, ex.: Noronha = 48 m):
+        # usa o SRTM no ponto da sede, que bate com o IBGE (mediana 1 m) nas demais.
+        try:
+            v = ee.Image('USGS/SRTMGL1_003').reduceRegion(
+                ee.Reducer.first(), ee.Geometry.Point([sede["lon"], sede["lat"]]), 30
+            ).get('elevation').getInfo()
+            if v is not None:
+                return {"media": float(max(v, 0)), "fonte": "sede_srtm"}
+        except Exception:
+            pass
     try:
         srtm = ee.Image('USGS/SRTMGL1_003')
         # Estima a altimetria por um buffer de 15km ao redor do ponto do imóvel.
@@ -715,6 +731,25 @@ def _municipios_info():
         return {r["cd_mun"]: r for r in df.to_dict("records")}
     except Exception:
         return {}
+
+
+@st.cache_resource(show_spinner=False)
+def _sedes_municipios():
+    """{cod_ibge: {lat, lon, alt}} da sede municipal (IBGE, Localidades 2010,
+    categoria CIDADE; dados/sedes_municipios.csv). Embutido porque a camada de
+    sedes do geoserver do IBGE está atrás do Cloudflare (HTTP 403). Faltam só
+    os 6 municípios criados depois de 2010."""
+    p = os.path.join(os.path.dirname(__file__), "dados", "sedes_municipios.csv")
+    try:
+        df = pd.read_csv(p, dtype={"cd_mun": str})
+        return {r["cd_mun"]: r for r in df.to_dict("records")}
+    except Exception:
+        return {}
+
+
+def get_sede_municipio(cod_ibge):
+    """Coordenadas e altitude da sede do município, ou None se não houver."""
+    return _sedes_municipios().get(str(cod_ibge))
 
 
 def _num_ou_none(v):
@@ -935,6 +970,10 @@ def get_distancia_capital(cod_ibge, uf, lat_fallback=None, lon_fallback=None):
     lon_sede = lat_sede = None
     origem_aprox = False  # True se caímos no fallback do centroide do imóvel
 
+    sede = get_sede_municipio(cod_ibge)  # tabela local primeiro (geoserver dá 403)
+    if sede:
+        lon_sede, lat_sede = sede["lon"], sede["lat"]
+
     try:
         url_wfs = "https://geoservicos.ibge.gov.br/geoserver/ows"
         # Camada de pontos de sede verificada via GetCapabilities (workspace CGMAT, estável)
@@ -945,8 +984,9 @@ def get_distancia_capital(cod_ibge, uf, lat_fallback=None, lon_fallback=None):
         }
         # Retry cobrindo tanto 5xx quanto timeout/erro de conexão: o geoserver do
         # IBGE dá soluços transitórios e uma única falha não pode derrubar a busca.
+        # Só para municípios fora da tabela local (criados depois de 2010).
         r_wfs = None
-        for attempt in range(3):
+        for attempt in range(3 if lon_sede is None else 0):
             try:
                 r_wfs = requests.get(url_wfs, params=params_wfs, timeout=15,
                                      headers={"User-Agent": "Mozilla/5.0"})
@@ -962,7 +1002,7 @@ def get_distancia_capital(cod_ibge, uf, lat_fallback=None, lon_fallback=None):
             coords = r_wfs.json()["features"][0]["geometry"]["coordinates"]
             lon_sede, lat_sede = coords[0], coords[1]
     except Exception:
-        lon_sede = lat_sede = None
+        pass  # mantém a sede da tabela local, se houver
 
     # Fallback: se a sede não veio (IBGE fora do ar), usa o centroide do próprio
     # imóvel como origem — melhor uma distância aproximada do que nenhuma.

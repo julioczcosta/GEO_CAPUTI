@@ -207,6 +207,20 @@ def render_tab():
             dados_bacia = bases["bacia"]
             dados_arm = bases["armazens"]
 
+        # Coordenada do MUNICÍPIO (texto do laudo) = sede do IBGE. O centroide do
+        # imóvel segue valendo para bioma, bacia, armazéns etc. Sem sede cadastrada
+        # (municípios criados depois de 2010), cai no centroide do imóvel.
+        sede = utils.get_sede_municipio(mun_selecionado['cod_ibge'])
+        if sede:
+            lat_mun, lon_mun = sede['lat'], sede['lon']
+            rotulo_coord = "Sede"
+        else:
+            lat_mun, lon_mun = lat_dec, lon_dec
+            rotulo_coord = "Centroide do imóvel (sede não cadastrada)"
+        lat_mun_dms = decimal_to_dms(lat_mun, True)
+        lon_mun_dms = decimal_to_dms(lon_mun, False)
+        alt_da_sede = dados_altimetria.get("fonte") in ("sede", "sede_srtm")
+
         # Divisão em duas colunas equilibradas
         col1, col2 = st.columns(2, gap="medium")
 
@@ -234,13 +248,14 @@ def render_tab():
 
                 with st.container(border=True):
                     st.markdown(f"### {dados_ibge['municipio']} - {dados_ibge['uf']}")
-                    st.caption(f"📍 Centroide: {lat_dms}, {lon_dms} | Código IBGE: {dados_ibge['codigo_ibge']}")
+                    st.caption(f"📍 {rotulo_coord}: {lat_mun_dms}, {lon_mun_dms} | Código IBGE: {dados_ibge['codigo_ibge']}")
                     st.divider()
-                    
+
                     c_a, c_b, c_c = st.columns(3)
                     c_a.metric("👥 População", pop)
                     c_b.metric("📏 Área (km²)", area)
-                    c_c.metric("⛰️ Alt. Média", f"{alt_media}m")
+                    c_c.metric("⛰️ Alt. da Sede" if alt_da_sede else "⛰️ Alt. Média",
+                               f"{alt_media}m")
                     
                     st.metric("🏙️ Densidade Demográfica", f"{dens} hab/km²")
                     st.divider()
@@ -250,7 +265,13 @@ def render_tab():
                     * **Intermediária:** {dados_ibge['regiao_intermediaria']}
                     * **Imediata:** {dados_ibge['regiao_imediata']}
                     """)
-                    st.caption("Fonte: IBGE (Censo 2022) | NASA SRTM")
+                    if dados_altimetria.get("fonte") == "sede":
+                        st.caption("Fonte: IBGE (Censo 2022; sede e altitude: Localidades 2010)")
+                    elif alt_da_sede:
+                        st.caption("Fonte: IBGE (Censo 2022; sede: Localidades 2010) | "
+                                   "altitude da sede: NASA SRTM")
+                    else:
+                        st.caption("Fonte: IBGE (Censo 2022) | NASA SRTM")
 
             # --- LOGÍSTICA ---
             st.write("")
@@ -338,10 +359,10 @@ def render_tab():
             mun_nome=dados_ibge['municipio'], 
             pop=dados_ibge['populacao'], 
             area_km2=dados_ibge['area_km2'], 
-            lat_dec=lat_dec,
-            lon_dec=lon_dec,
-            lat_dms=lat_dms, 
-            lon_dms=lon_dms, 
+            lat_dec=lat_mun,
+            lon_dec=lon_mun,
+            lat_dms=lat_mun_dms,
+            lon_dms=lon_mun_dms,
             altitude=altitude_real, 
             dist_km=distancia_real
         )
