@@ -16,6 +16,14 @@ import base64
 import streamlit.components.v1 as components
 from streamlit_option_menu import option_menu
 from PIL import Image as _PILImage
+import importlib
+
+# No Streamlit Cloud, um push atualiza os arquivos mas o processo pode manter os
+# módulos antigos já importados (app.py novo + impedimentos.py velho = AttributeError).
+# Se faltar o que o app.py novo usa, relê os módulos do disco.
+if not hasattr(impedimentos, "aviso_geral"):
+    for _m in (impedimentos, home):
+        importlib.reload(_m)
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 try:

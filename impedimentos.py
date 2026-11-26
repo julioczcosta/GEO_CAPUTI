@@ -9,6 +9,13 @@ from io import BytesIO
 import math
 import hashlib
 import logging
+import os
+import re
+import tempfile
+import unicodedata
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from shapely.geometry import MultiPolygon
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shapely import wkb
 import shapely
@@ -600,7 +607,8 @@ def iniciar_verificacao(gdf=None, forcar=False):
         return job
     prog = {"feitos": 0}
     job = {"sig": sig, "src_id": id(gdf), "prog": prog, "total": len(SERVICES_TO_CHECK),
-           "fut": _EXECUTOR.submit(_verificar, g, prog), "avisado": False}
+           "fut": _EXECUTOR.submit(_verificar, g, prog), "avisado": False,
+           "quando": datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")}
     st.session_state["imp_job"] = job
     return job
 
@@ -807,6 +815,90 @@ def _tabela(item):
     return df.rename(columns=COLUMN_ALIASES)
 
 
+# --- Download em vetor (GeoPackage: uma camada por fonte + o perímetro) ---
+
+def _slug(txt):
+    s = unicodedata.normalize("NFKD", str(txt)).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", "_", s).strip("_")[:50] or "camada"
+
+
+def _so_poligonos(g):
+    """Partes poligonais como MultiPolygon (o recorte pode sobrar linha/ponto na borda)."""
+    if g is None or g.is_empty:
+        return None
+    if g.geom_type == "Polygon":
+        return MultiPolygon([g])
+    if g.geom_type == "MultiPolygon":
+        return g
+    if g.geom_type == "GeometryCollection":
+        partes = [p for q in g.geoms if q.geom_type in ("Polygon", "MultiPolygon")
+                  for p in (q.geoms if q.geom_type == "MultiPolygon" else [q])]
+        return MultiPolygon(partes) if partes else None
+    return None
+
+
+def _camada_vetor(item, area_imovel, quando):
+    g = item["dados"].drop(columns=['geom_original'], errors='ignore').copy()
+    eh_ponto = g.geometry.iloc[0].geom_type in ("Point", "MultiPoint")
+    if eh_ponto:
+        g = g.drop(columns=['area_ha_sobreposta'], errors='ignore')
+    else:
+        g["geometry"] = g.geometry.map(_so_poligonos)
+        g = g[g.geometry.notna()].copy()
+        g["area_ha_sobreposta"] = g["area_ha_sobreposta"].astype(float).round(4)
+        if area_imovel > 0:
+            g["pct_imovel"] = (g["area_ha_sobreposta"] / area_imovel * 100).round(2)
+    for c in g.columns:
+        if c != "geometry" and (g[c].dtype == "object" or pd.api.types.is_datetime64_any_dtype(g[c])):
+            g[c] = g[c].astype(str).replace({"nan": None, "None": None, "NaT": None})
+    g.insert(0, "Fonte", item["nome"])
+    g["Consultado em"] = quando
+    nomes, vistos = [], set()
+    for c in g.columns:
+        n = c if c == "geometry" else COLUMN_ALIASES.get(c, {"pct_imovel": "% do Imóvel"}.get(c, c))
+        while n in vistos:
+            n += "_2"
+        vistos.add(n)
+        nomes.append(n)
+    g.columns = nomes
+    return gpd.GeoDataFrame(g, geometry="geometry", crs=WFS_CRS)
+
+
+def _gpkg_bytes(itens, gdf_alvo, area_imovel, quando):
+    """GeoPackage com o perímetro e uma camada por fonte com sobreposição."""
+    with tempfile.TemporaryDirectory() as tmp:
+        caminho = os.path.join(tmp, "impedimentos.gpkg")
+        imovel = gpd.GeoDataFrame(
+            {"Imóvel": [str(st.session_state.get('last_code', 'Imóvel'))],
+             "Área (ha)": [round(area_imovel, 4)], "Consultado em": [quando]},
+            geometry=[_so_poligonos(gdf_alvo.unary_union)], crs=WFS_CRS)
+        imovel.to_file(caminho, layer="imovel", driver="GPKG")
+        for item in itens:
+            camada = _camada_vetor(item, area_imovel, quando)
+            if not camada.empty:
+                camada.to_file(caminho, layer=_slug(item["nome"]), driver="GPKG",
+                               promote_to_multi=True)
+        with open(caminho, "rb") as f:
+            return f.read()
+
+
+def _botao_gpkg(itens, gdf_alvo, area_imovel, sufixo, rotulo):
+    job = st.session_state.get("imp_job") or {}
+    quando = job.get("quando", "")
+    cache = job.setdefault("gpkg", {})
+    if sufixo not in cache:
+        try:
+            cache[sufixo] = _gpkg_bytes(itens, gdf_alvo, area_imovel, quando)
+        except Exception as e:
+            st.caption(f"Não foi possível gerar o arquivo vetorial: {str(e)[:150]}")
+            return
+    cod = _slug(st.session_state.get('last_code', 'imovel'))
+    st.download_button(
+        rotulo, data=cache[sufixo],
+        file_name=f"{sufixo}_{cod}_{quando[:10].replace('/', '-')}.gpkg".replace("__", "_"),
+        mime="application/geopackage+sqlite3", use_container_width=True, key=f"dl_gpkg_{sufixo}")
+
+
 def _bloco_matriculas(socio):
     feats = st.session_state.get('gdf_features')
     df_mat = _impedimentos_por_matricula(socio, feats)
@@ -881,6 +973,8 @@ def _secao_socioambiental(socio, gdf_alvo, crs_proj, area_imovel):
     for aba, item in zip(abas, hits):
         with aba:
             st.dataframe(_tabela(item), use_container_width=True, hide_index=True)
+    _botao_gpkg(hits, gdf_alvo, area_imovel, "impedimentos",
+                "🗺️ Baixar sobreposições em vetor (GeoPackage · uma camada por fonte)")
 
 
 def _secao_mineracao(mine, gdf_alvo, crs_proj, area_imovel):
@@ -911,6 +1005,8 @@ def _secao_mineracao(mine, gdf_alvo, crs_proj, area_imovel):
     with col_tab:
         st.dataframe(_tabela(item), use_container_width=True, hide_index=True,
                      height=min(360, 38 + 35 * len(dados)))
+        _botao_gpkg([item], gdf_alvo, area_imovel, "mineracao",
+                    "🗺️ Baixar processos minerários em vetor (GeoPackage)")
     with col_mapa:
         _mapa(gdf_alvo, [item], key="imp_map_min", altura=360)
 
